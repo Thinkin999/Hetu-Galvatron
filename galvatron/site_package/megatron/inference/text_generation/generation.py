@@ -8,15 +8,21 @@ import torch.nn.functional as F
 from megatron.training import get_args, get_tokenizer
 from megatron.core import mpu
 from megatron.training.utils import get_ltor_masks_and_position_ids
+from megatron.core.transformer.cuda_graphs import create_cudagraphs
+from megatron.core.inference.contexts import StaticInferenceContext
 from .communication import (
     copy_from_last_to_first_pipeline_stage,
+    broadcast_tensor,
     broadcast_from_last_pipeline_stage,
     broadcast_from_last_to_first_pipeline_stage)
 from .forward_step import ForwardStep
 from .sampling import sample
 from .beam_utils import BeamHypotheses
 
-def score_and_return_on_first_stage(model, tokens, lengths):
+MAX_TOPK_LOGPROBS = 5
+NO_TOPK_LOGPROBS = None
+
+def score_and_return_on_first_stage(model, tokens: torch.Tensor, lengths: torch.Tensor):
     """Function for just scoring.
 
     Args:
@@ -35,15 +41,20 @@ def score_and_return_on_first_stage(model, tokens, lengths):
     batch_size = tokens.size(0)
     max_prompt_length = lengths.max().item()
     assert max_prompt_length == tokens.size(1)
-    
+
     if max_prompt_length > args.max_position_embeddings:
-        raise ValueError("Length of prompt + tokens_to_generate longer than allowed")
-    
+        raise ValueError(
+            f"Length of prompt + tokens_to_generate longer than allowed {max_prompt_length} > {args.max_position_embeddings}"
+        )
+
     if max_prompt_length * batch_size > args.max_tokens_to_oom:
-        raise ValueError("Too many tokens.  " + str(max_prompt_length*batch_size)+ " is greater than "+str(args.max_tokens_to_oom))
+        raise ValueError(
+            f"Too many tokens.  {max_prompt_length*batch_size} > {args.max_tokens_to_oom}"
+        )
 
     # forward step.
-    forward_step = ForwardStep(model, batch_size, max_prompt_length)
+    inference_context = StaticInferenceContext(batch_size, args.inference_max_seq_length)
+    forward_step = ForwardStep(model, inference_context)
 
     # ===================
     # Pre-allocate memory
@@ -51,56 +62,76 @@ def score_and_return_on_first_stage(model, tokens, lengths):
 
     # Log probability of the sequence (prompt + generated tokens).
     output_log_probs = None
+    output_topk_log_probs, output_topk_log_indices = None, None
     output_log_probs_size = (batch_size, max_prompt_length - 1)
-    
+    output_topk_log_probs_size = (batch_size, max_prompt_length, MAX_TOPK_LOGPROBS)
+
     if mpu.is_pipeline_last_stage():
-        output_log_probs = torch.empty(output_log_probs_size,
-                                       dtype=torch.float32,
-                                       device=torch.cuda.current_device())
-    
+        output_log_probs = torch.empty(
+            output_log_probs_size, dtype=torch.float32, device=torch.cuda.current_device()
+        )
+
+        output_topk_log_probs = torch.empty(
+            output_topk_log_probs_size, dtype=torch.float32, device=torch.cuda.current_device()
+        )
+
+        output_topk_log_indices = torch.empty(
+            output_topk_log_probs_size, dtype=torch.int64, device=torch.cuda.current_device()
+        )
     # =============
     # Run infernece
     # =============
     with torch.no_grad():
         attention_mask, position_ids = _build_attention_mask_and_position_ids(tokens)
-        
+
         # logits will be meanigful only in the last pipeline stage.
         logits = forward_step(tokens, position_ids, attention_mask)
 
         if mpu.is_pipeline_last_stage():
             # Always the last stage should have an output.
             assert logits is not None
-            log_probs = F.log_softmax(logits, dim=2)
-            
+            log_probs = F.log_softmax(logits, dim=2).to(dtype=output_topk_log_probs.dtype)
+
             # Pick the tokens that we need to get the log
             # probabilities for. Note that next input token is
             # the token which we selected in the current logits,
             # so shift by 1.
             indices = torch.unsqueeze(tokens[:, 1:], 2)
             output_log_probs = torch.gather(log_probs, 2, indices).squeeze(2)
-    
+            torch.topk(log_probs, MAX_TOPK_LOGPROBS, dim=2, out=(output_topk_log_probs, output_topk_log_indices))
+
     # ======================================
     # Broadcast to the first pipeline stage.
     # ======================================
+    output_topk_log_probs = broadcast_from_last_to_first_pipeline_stage(
+        output_topk_log_probs_size, torch.float32, output_topk_log_probs
+    )
+    output_topk_log_indices = broadcast_from_last_to_first_pipeline_stage(
+        output_topk_log_probs_size, torch.int64, output_topk_log_indices
+    )
     output_log_probs = broadcast_from_last_to_first_pipeline_stage(
-        output_log_probs_size, torch.float32, output_log_probs)
-    
-    return tokens, lengths, output_log_probs, logits
+        output_log_probs_size, torch.float32, output_log_probs
+    )
+
+    logprobs_topk = torch.return_types.topk((output_topk_log_probs, output_topk_log_indices))
+    return tokens, lengths, output_log_probs, logprobs_topk
 
 def generate_tokens_probs_and_return_on_first_stage(
-        model, tokens, lengths,
+        model, inference_context, forward_step, tokens, lengths,
         return_output_log_probs=False,
         top_k=0, top_p=0.0, top_p_decay=0.0, top_p_bound=0.0,
         temperature=1.0,
         use_eod_token_for_early_termination=True,
         stop_on_double_eol=False,
         stop_on_eol=False,
-        prevent_newline_after_colon=True
+        prevent_newline_after_colon=True,
+        data_parallel=False
         ):
     """Main token generation function.
 
     Args:
         model: no interleaving is supported.
+        forward_step (ForwardStep): Class for running the model forward step.
         tokens: prompt tokens extended to be of size [b, max-sequence-length]
         lengths: original prompt length, size: [b]
         return_output_log_probs: flag to calculate the log probability of
@@ -135,19 +166,23 @@ def generate_tokens_probs_and_return_on_first_stage(
 
     if max_sequence_length > args.max_position_embeddings:
         raise ValueError("Length of prompt + tokens_to_generate longer than allowed")
-    
+
     if max_sequence_length * batch_size > args.max_tokens_to_oom:
         raise ValueError("Too many tokens.  " + str(max_sequence_length*batch_size)+ " is greater than "+str(args.max_tokens_to_oom))
 
     # forward step.
-    forward_step = ForwardStep(model, batch_size, max_sequence_length)
+    forward_step = forward_step(model, inference_context)
 
     # Added termination_id to support the case that we want to terminate the
     # generation once that id is generated.
-    if hasattr(args, 'eos_id'):
+    if hasattr(args, 'eos_id') and args.eos_id:
         termination_id = args.eos_id
-    else:
+    elif hasattr(tokenizer, 'eod'):
         termination_id = tokenizer.eod
+    elif hasattr(tokenizer, 'eos_id'):
+        termination_id = tokenizer.eos_id
+    else:
+        raise AttributeError('No eod token found in tokenizer or args')
 
     # ===================
     # Pre-allocate memory
@@ -166,13 +201,13 @@ def generate_tokens_probs_and_return_on_first_stage(
         generated_sequence_lengths = torch.ones(
                 batch_size, dtype=torch.int64,
                 device=torch.cuda.current_device()) * max_sequence_length
-    
+
     # Whether we have reached a termination id.
     is_generation_done = torch.zeros(batch_size, dtype=torch.uint8,
                                      device=torch.cuda.current_device())
 
     # =============
-    # Run infernece
+    # Run inference
     # =============
 
     with torch.no_grad():
@@ -181,14 +216,23 @@ def generate_tokens_probs_and_return_on_first_stage(
         prev_context_length = 0
         for context_length in range(min_prompt_length, max_sequence_length):
 
+            prefill = context_length == min_prompt_length
+            if not prefill:
+                forward_step.inference_context.enable_decode_mode()
+
             # Pick the slice that we need to pass through the network.
             tokens2use = tokens[:, prev_context_length:context_length]
             positions2use = position_ids[:, prev_context_length:context_length]
+
+            # Do not pass a variable-shape attention mask in the decode phase.
             attention_mask2use = attention_mask[
-                ..., prev_context_length:context_length, :context_length]
+                ..., prev_context_length:context_length, :context_length] if prefill else None
 
             # logits will be meanigful only in the last pipeline stage.
             logits = forward_step(tokens2use, positions2use, attention_mask2use)
+
+            if args.enable_cuda_graph and not prefill:
+                create_cudagraphs()
 
             if mpu.is_pipeline_last_stage():
                 if prevent_newline_after_colon:
@@ -252,20 +296,19 @@ def generate_tokens_probs_and_return_on_first_stage(
                     hit_double_eol = (new_sample == 628).byte() & started.byte()
                     hit_eol = (new_sample == 198).byte() & started.byte()
                     done_token = hit_double_eol | hit_eol
-                else: 
+                else:
                     done_token = (new_sample == termination_id).byte() & \
                         started.byte()
-                
+
                 just_finished = (done_token & ~is_generation_done).bool()
                 generated_sequence_lengths[just_finished.view(-1)] = \
                     context_length + 1
                 is_generation_done = is_generation_done | done_token
                 done = torch.all(is_generation_done)
-            done = broadcast_from_last_pipeline_stage(1, torch.uint8,
-                                                      tensor=done)
+            done = broadcast_tensor(size=1, dtype=torch.uint8, tensor=done, data_parallel=data_parallel)
             if use_eod_token_for_early_termination and done:
                 break
-            
+
     # ===================================================
     # Update the length of based on max generated length.
     # ===================================================
@@ -286,9 +329,9 @@ def generate_tokens_probs_and_return_on_first_stage(
         output_log_probs = broadcast_from_last_to_first_pipeline_stage(
             output_log_probs_size, torch.float32, output_log_probs)
 
-    return tokens, generated_sequence_lengths, output_log_probs, None
+    return tokens, generated_sequence_lengths, output_log_probs, NO_TOPK_LOGPROBS
 
-def beam_search_and_return_on_first_stage(model, tokens, lengths, beam_size, stop_token, num_return_gen, length_penalty, prevent_newline_after_colon=True):
+def beam_search_and_return_on_first_stage(model, forward_step, tokens, lengths, beam_size, stop_token, num_return_gen, length_penalty, prevent_newline_after_colon=True):
     args = get_args()
     tokenizer = get_tokenizer()
 
@@ -297,13 +340,14 @@ def beam_search_and_return_on_first_stage(model, tokens, lengths, beam_size, sto
     prompt_length = lengths.item()
     final_sequence_length = tokens.size(1)
     final_sequence_length = min(final_sequence_length, args.max_position_embeddings)
-    
+
     # If the context is too big, this happens
     if prompt_length >= final_sequence_length:
         raise ValueError("context length + tokens_to_generate too large")
 
     # forward step.
-    forward_step = ForwardStep(model, beam_size, final_sequence_length)
+    inference_context = StaticInferenceContext(beam_size, final_sequence_length)
+    forward_step = forward_step(model, inference_context)
 
     beam_hyp = BeamHypotheses(beam_size, length_penalty)
     best_batches = None
@@ -313,7 +357,7 @@ def beam_search_and_return_on_first_stage(model, tokens, lengths, beam_size, sto
                          device=torch.cuda.current_device()).unsqueeze(1)
     scores_size_tensor, tokens_size_tensor = None, None
     # =============
-    # Run infernece
+    # Run inference
     # =============
     with torch.no_grad():
         tokens = tokens.repeat(beam_size, 1)
@@ -321,11 +365,15 @@ def beam_search_and_return_on_first_stage(model, tokens, lengths, beam_size, sto
         prev_context_length = 0
         for context_length in range(prompt_length, final_sequence_length):
 
+            prefill = context_length == prompt_length
+
             # Pick the slice that we need to pass through the network.
             tokens2use = tokens[:, prev_context_length:context_length]
             positions2use = position_ids[:, prev_context_length:context_length]
+
+            # Do not pass a variable-shape attention mask in the decode phase.
             attention_mask2use = attention_mask[
-                ..., prev_context_length:context_length, :context_length]
+                ..., prev_context_length:context_length, :context_length] if not prefill else None
 
             # logits will be meanigful only in the last pipeline stage.
             logits = forward_step(tokens2use, positions2use, attention_mask2use)
@@ -369,12 +417,12 @@ def beam_search_and_return_on_first_stage(model, tokens, lengths, beam_size, sto
 
                 if beam_hyp.is_done(best_scores.max().item(), context_length + 1 - prompt_length):
                     done = torch.ones(1, dtype=torch.uint8, device=torch.cuda.current_device())
-            
+
                 best_batches = tokens.new([item[2] for item in next_beams])
                 tokens = tokens[best_batches,:]
                 tokens[:, context_length] = tokens.new([item[0] for item in next_beams])
                 scores = scores.new([item[1] for item in next_beams]).unsqueeze(1)
-          
+
             # torch.distributed.barrier()
             done = broadcast_from_last_pipeline_stage(1, torch.uint8, done)
             if done:
@@ -387,7 +435,7 @@ def beam_search_and_return_on_first_stage(model, tokens, lengths, beam_size, sto
 
             # set inference key values to make it consistent with best beam index
             best_batches = broadcast_from_last_pipeline_stage(beam_size, torch.int64, best_batches)
-            forward_step.inference_params.swap_key_value_dict(best_batches)
+            forward_step.inference_context.swap_key_value_dict(best_batches)
 
             # Update the context length for the next token generation.
             prev_context_length = context_length
