@@ -89,7 +89,7 @@ def set_global_variables(args, build_tokenizer=True):
         args.data_parallel_size,
         args.decrease_batch_size_if_needed,
     )
-    if build_tokenizer:
+    if build_tokenizer and args.vocab_file:
         _ = _build_tokenizer(args)
     _set_tensorboard_writer(args)
     _set_wandb_writer(args)

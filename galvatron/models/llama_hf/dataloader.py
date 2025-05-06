@@ -1,5 +1,5 @@
 from functools import partial
-from typing import List
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -11,7 +11,7 @@ from megatron.training.training import build_train_valid_test_data_iterators
 from megatron.training.utils import (
     average_losses_across_data_parallel_group,
     get_batch_on_this_tp_rank,
-    get_ltor_masks_and_position_ids,
+    get_blend_and_blend_per_split,
 )
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -86,20 +86,25 @@ def is_dataset_built_on_rank():
 def core_gpt_dataset_config_from_args(args):
     tokenizer = get_tokenizer()
 
+    blend: Optional[Tuple[List[str], Optional[List[float]]]]
+    blend_per_split: Optional[List[Optional[Tuple[List[str], Optional[List[float]]]]]]
+    blend, blend_per_split = get_blend_and_blend_per_split(args)
+
     return GPTDatasetConfig(
         random_seed=args.seed,
         sequence_length=args.seq_length,
-        blend=args.data_path,
-        blend_per_split=[args.train_data_path, args.valid_data_path, args.test_data_path],
+        blend=blend,
+        blend_per_split=blend_per_split,
         split=args.split,
+        num_dataset_builder_threads=args.num_dataset_builder_threads,
         path_to_cache=args.data_cache_path,
-        mock=args.mock_data,
         mmap_bin_files=args.mmap_bin_files,
         tokenizer=tokenizer,
         reset_position_ids=args.reset_position_ids,
         reset_attention_mask=args.reset_attention_mask,
         eod_mask_loss=args.eod_mask_loss,
         create_attention_mask=args.create_attention_mask_in_dataloader,
+        s3_cache_path=args.s3_cache_path,
     )
 
 

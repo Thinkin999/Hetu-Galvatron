@@ -121,21 +121,23 @@ class VocabParallelCrossEntropy:
 
 class _VocabParallelCrossEntropy(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, vocab_parallel_logits, target, label_smoothing=0.0):
+    def forward(ctx, vocab_parallel_logits, target, label_smoothing=0.0, tp_group=None):
         """Vocab parallel cross entropy forward function."""
 
         vocab_parallel_logits, logits_max = VocabParallelCrossEntropy.calculate_logits_max(
             vocab_parallel_logits
         )
+        if tp_group == None:
+            tp_group = get_tensor_model_parallel_group()
         torch.distributed.all_reduce(
-            logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group()
+            logits_max, op=torch.distributed.ReduceOp.MAX, group=tp_group
         )
 
         # Get the partition's vocab indices
         get_vocab_range = VocabUtility.vocab_range_from_per_partition_vocab_size
         partition_vocab_size = vocab_parallel_logits.size()[-1]
-        rank = get_tensor_model_parallel_rank()
-        world_size = get_tensor_model_parallel_world_size()
+        rank = get_tensor_model_parallel_rank(tp_group)
+        world_size = get_tensor_model_parallel_world_size(tp_group)
         vocab_start_index, vocab_end_index = get_vocab_range(partition_vocab_size, rank, world_size)
 
         (target_mask, masked_target_1d, predicted_logits, sum_exp_logits, exp_logits) = (
@@ -148,13 +150,13 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
         torch.distributed.all_reduce(
             predicted_logits,
             op=torch.distributed.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
+            group=tp_group,
         )
 
         torch.distributed.all_reduce(
             sum_exp_logits,
             op=torch.distributed.ReduceOp.SUM,
-            group=get_tensor_model_parallel_group(),
+            group=tp_group,
         )
 
         exp_logits, loss = VocabParallelCrossEntropy.calculate_cross_entropy_loss(
@@ -213,10 +215,10 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
                 grad_2d, arange_1d, masked_target_1d, softmax_update, grad_input, grad_output
             )
 
-        return grad_input, None, None
+        return grad_input, None, None, None
 
 
-def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=0.0):
+def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=0.0, tp_group=None):
     """
     Performs cross entropy loss when logits are split across tensor parallel ranks
 
@@ -229,4 +231,55 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=
         label_smoothing: smoothing factor, must be in range [0.0, 1.0)
                          default is no smoothing (=0.0)
     """
-    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, label_smoothing)
+    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, label_smoothing, tp_group)
+
+
+from packaging import version
+
+class _VocabSequenceParallelCrossEntropy(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, vocab_seq_parallel_logits, target, sp_group, label_smoothing=0.0):
+        # vocab_seq_parallel_logits: [S/P, B, V]
+        # target: [S/P, B]
+        # return: [S, B]
+
+        # Need softmax for backward
+        softmax = torch.nn.functional.softmax(vocab_seq_parallel_logits, dim=-1)
+        ctx.vocab_size = vocab_seq_parallel_logits.size(2)
+        loss = torch.nn.functional.nll_loss(softmax.log().view(-1, ctx.vocab_size), target.view(-1), reduction='none')
+    
+        ctx.seqlen = vocab_seq_parallel_logits.size(0) * torch.distributed.get_world_size(sp_group)
+        batch_size = vocab_seq_parallel_logits.size(1)
+        ctx.sp_group = sp_group
+        loss_all = torch.empty(ctx.seqlen, batch_size, dtype=vocab_seq_parallel_logits.dtype, device=vocab_seq_parallel_logits.device)
+        if version.parse(torch.__version__) >= version.parse('1.13'):
+            torch.distributed.all_gather_into_tensor(loss_all, loss, group=sp_group)
+        else:
+            torch.distributed._all_gather_base(loss_all, loss, group=sp_group)
+
+        ctx.save_for_backward(softmax, target)
+
+        return loss_all
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        softmax, target = ctx.saved_tensors
+
+        step_seqlen = ctx.seqlen // torch.distributed.get_world_size(ctx.sp_group)
+        sp_rank = torch.distributed.get_rank(ctx.sp_group)
+        grad_output_part = grad_output[step_seqlen*sp_rank:step_seqlen*(sp_rank + 1), :]
+
+        grad_input = softmax
+        grad_2d = grad_input.view(-1, ctx.vocab_size)
+        arange_1d = torch.arange(start=0, end=grad_2d.size()[0],
+                                device=grad_2d.device)
+
+        grad_2d[arange_1d, target.view(-1)] -= 1
+        grad_input.mul_(grad_output_part.unsqueeze(dim=-1))
+
+        return grad_input, None, None, None
+
+
+def vocab_sequence_parallel_cross_entropy(vocab_parallel_logits, target, sp_group, label_smoothing=0.0):
+    return _VocabSequenceParallelCrossEntropy.apply(vocab_parallel_logits, target, sp_group, label_smoothing)

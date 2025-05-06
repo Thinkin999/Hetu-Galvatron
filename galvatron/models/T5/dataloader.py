@@ -160,7 +160,6 @@ def core_t5_dataset_config_from_args(args):
         blend_per_split=[args.train_data_path, args.valid_data_path, args.test_data_path],
         split=args.split,
         path_to_cache=args.data_cache_path,
-        mock=False,
         tokenizer=tokenizer,
         masking_probability=args.mask_prob,
         short_sequence_probability=args.short_seq_prob,

@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterable, List, Optional, Type, Union
 import numpy
 import torch
 
+from megatron.training import get_args
+from megatron.core import mpu
 from megatron.core.datasets.blended_dataset import BlendedDataset
 from megatron.core.datasets.blended_megatron_dataset_config import BlendedMegatronDatasetConfig
 from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
@@ -24,6 +26,16 @@ TopLevelDataset = Union[BlendedDataset, MidLevelDataset]
 DistributedDataset = Union[
     TopLevelDataset, MidLevelDataset, LowLevelDataset, torch.utils.data.Dataset
 ]
+
+def need_to_build_dataset():
+    args = get_args()
+    share_save = args.shared_storage
+    rank = torch.distributed.get_rank()
+    local_rank = torch.cuda.current_device()
+    if share_save:
+        return rank == 0
+    else:
+        return mpu.get_tensor_model_parallel_rank() == 0
 
 
 class BlendedMegatronDatasetBuilder(object):

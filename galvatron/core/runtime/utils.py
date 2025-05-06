@@ -5,7 +5,7 @@ from functools import partial, reduce
 import megatron
 import torch.distributed
 from megatron.core import mpu
-from megatron.core.optimizer.clip_grads import clip_grad_norm_fp32
+from megatron.core.optimizer.clip_grads import get_grad_norm_fp32, clip_grad_by_total_norm_fp32
 from megatron.training.global_vars import rebuild_tokenizer
 from megatron.core.datasets.blended_megatron_dataset_builder import need_to_build_dataset
 from torch import distributed as dist
@@ -127,7 +127,8 @@ def clip_grad_norm(model, max_norm, norm_type=2):
         parameters.append(params)
         grads_for_norm.append(params.grad)
 
-    total_norm = clip_grad_norm_fp32(parameters, grads_for_norm, max_norm, norm_type)
+    total_norm = get_grad_norm_fp32(grads_for_norm, norm_type)
+    clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm)
 
     return total_norm
 

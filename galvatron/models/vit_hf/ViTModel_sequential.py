@@ -1,8 +1,13 @@
 import torch
 import torch.distributed
 import torch.nn as nn
+from megatron.core import mpu
 from megatron.core import tensor_parallel
-from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_tensor_model_parallel_region,
+    scatter_to_sequence_parallel_region,
+)
 from megatron.core.tensor_parallel.utils import VocabUtility
 
 from galvatron.core import get_args
@@ -93,7 +98,7 @@ class ViTLoss_(nn.Module):
         self.sequence_parallel = sequence_parallel
         self.tp_group = tp_group
         
-        world_size = get_tensor_model_parallel_world_size_group(tp_group)
+        world_size = mpu.get_tensor_model_parallel_world_size(tp_group)
         if self.sequence_parallel and world_size <= 1:
             self.sequence_parallel = False
     
@@ -103,7 +108,7 @@ class ViTLoss_(nn.Module):
             weight=self.weight,
             bias=None,
             gradient_accumulation_fusion=False,
-            async_grad_allreduce=False,
+            allreduce_dgrad=False,
             sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group,
         )
@@ -154,7 +159,7 @@ class ViTCls_(nn.Module):
             labels = labels.transpose(0, 1).contiguous()
         
         if not self.parallel_loss:
-            output = tensor_parallel.gather_from_tensor_model_parallel_region_group(
+            output = gather_from_tensor_model_parallel_region(
                 logits_parallel, self.tp_group
             )
             logits = output.float() if not self.half_entropy else output

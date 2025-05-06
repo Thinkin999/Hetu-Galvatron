@@ -86,6 +86,7 @@ _DATA_PARALLEL_GLOBAL_RANKS = None
 # A list of global ranks for each tensor model parallel group to ease calculation of
 # the first local rank in the tensor model parallel group
 _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = None
+_TENSOR_MODEL_PARALLEL_SRC_RANK = None
 
 # A list of global ranks for each model parallel group to ease calculation of
 # the first local rank in the model parallel group
@@ -1408,12 +1409,15 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size(group=None):
     """Return world size for the tensor-model-parallel group."""
-    global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
-    if _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE is not None:
-        return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
-    return torch.distributed.get_world_size(group=get_tensor_model_parallel_group())
+    if group is None:
+        global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+        if _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE is not None:
+            return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+        return torch.distributed.get_world_size(group=get_tensor_model_parallel_group())
+    else:
+        return torch.distributed.get_world_size(group=group)
 
 
 def get_pipeline_model_parallel_world_size():
@@ -1452,12 +1456,15 @@ def set_pipeline_model_parallel_split_rank(rank):
     _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = rank
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank(group=None):
     """Return caller's rank for the tensor-model-parallel group."""
-    global _MPU_TENSOR_MODEL_PARALLEL_RANK
-    if _MPU_TENSOR_MODEL_PARALLEL_RANK is not None:
-        return _MPU_TENSOR_MODEL_PARALLEL_RANK
-    return torch.distributed.get_rank(group=get_tensor_model_parallel_group())
+    if group is None:
+        global _MPU_TENSOR_MODEL_PARALLEL_RANK
+        if _MPU_TENSOR_MODEL_PARALLEL_RANK is not None:
+            return _MPU_TENSOR_MODEL_PARALLEL_RANK
+        return torch.distributed.get_rank(group=get_tensor_model_parallel_group())
+    else:
+        return torch.distributed.get_rank(group=group)
 
 
 def get_pipeline_model_parallel_rank():
@@ -1640,10 +1647,16 @@ def get_virtual_pipeline_model_parallel_world_size():
 def get_tensor_model_parallel_src_rank():
     """Calculate the global rank corresponding to the first local rank
     in the tensor model parallel group."""
-    assert (
-        _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS is not None
-    ), "Tensor model parallel group is not initialized"
-    return _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+    global _TENSOR_MODEL_PARALLEL_SRC_RANK
+    if _TENSOR_MODEL_PARALLEL_SRC_RANK is not None:
+         return _TENSOR_MODEL_PARALLEL_SRC_RANK
+    global_rank = torch.distributed.get_rank()
+    local_world_size = get_tensor_model_parallel_world_size()
+    return (global_rank // local_world_size) * local_world_size
+    # assert (
+    #     _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS is not None
+    # ), "Tensor model parallel group is not initialized"
+    # return _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
 
 
 def get_model_parallel_src_rank():
@@ -2122,3 +2135,18 @@ def destroy_model_parallel():
 
     global _MOE_LAYER_WISE_LOGGING_TRACKER
     _MOE_LAYER_WISE_LOGGING_TRACKER = {}
+
+    global _TENSOR_MODEL_PARALLEL_SRC_RANK
+    _TENSOR_MODEL_PARALLEL_SRC_RANK = None
+
+def set_tensor_model_parallel_group(group):
+    global _TENSOR_MODEL_PARALLEL_GROUP
+    _TENSOR_MODEL_PARALLEL_GROUP = group
+
+def set_data_parallel_group(group):
+    global _DATA_PARALLEL_GROUP
+    _DATA_PARALLEL_GROUP = group
+
+def set_tensor_model_parallel_src_rank(rank):
+    global _TENSOR_MODEL_PARALLEL_SRC_RANK
+    _TENSOR_MODEL_PARALLEL_SRC_RANK = rank

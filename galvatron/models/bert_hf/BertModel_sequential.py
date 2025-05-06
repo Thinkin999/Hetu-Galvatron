@@ -1,27 +1,19 @@
-<<<<<<< HEAD
 import torch
 import torch.distributed
 import torch.nn as nn
+from megatron.core import mpu
 from megatron.core import tensor_parallel
-from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_tensor_model_parallel_region,
+    scatter_to_sequence_parallel_region,
+)
 from megatron.core.tensor_parallel.utils import VocabUtility
 
 from galvatron.core import get_args
 from galvatron.core.runtime import ModelInfo, mixed_precision_dtype
 from galvatron.core.runtime.pipeline import PipeSequential
 from galvatron.core.runtime.tensor_parallel import colummn_row_reset_parameters
-=======
-import torch.distributed
-import torch.nn as nn
-import torch
-from galvatron.core.pipeline import PipeSequential
-from galvatron.core import mixed_precision_dtype, ModelInfo
-from galvatron.core import get_args
-from megatron.core import tensor_parallel
-from galvatron.core.tensor_parallel import colummn_row_reset_parameters
-from megatron.core.tensor_parallel.utils import VocabUtility
-from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
->>>>>>> 0e554e6502dab21f2e27e26454504bed37ac6828
 
 def bert_extended_attention_mask(attention_mask):
     attention_mask_b1s = attention_mask.unsqueeze(1)
@@ -102,7 +94,7 @@ class BertEmbeddings_(nn.Module):
         embeddings = embeddings.transpose(0, 1).contiguous()
    
         if self.sequence_parallel:
-            embeddings = tensor_parallel.scatter_to_sequence_parallel_region_group(
+            embeddings = scatter_to_sequence_parallel_region(
                 embeddings,
                 self.tp_group
             )
@@ -148,7 +140,7 @@ class BertLoss_(nn.Module):
         self.bias = nn.Parameter(bias.clone())
         self.sequence_parallel = sequence_parallel
         self.tp_group = tp_group
-        world_size = get_tensor_model_parallel_world_size_group(tp_group)
+        world_size = mpu.get_tensor_model_parallel_world_size(tp_group)
         if self.sequence_parallel and world_size <= 1:
             self.sequence_parallel = False
             # disable sp to avoid global buffer
@@ -159,7 +151,7 @@ class BertLoss_(nn.Module):
             weight=self.weight,
             bias=self.bias,
             gradient_accumulation_fusion=False,
-            async_grad_allreduce=False,
+            allreduce_dgrad=False,
             sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group
         )
@@ -198,7 +190,7 @@ class BertMLMCls_(nn.Module):
             labels = labels[:, self.seq_start_index:self.seq_end_index].contiguous()
 
         if not self.sequence_parallel:
-            hidden_states = tensor_parallel.copy_to_tensor_model_parallel_region_group(
+            hidden_states = copy_to_tensor_model_parallel_region(
                 hidden_states, 
                 self.tp_group
             )
@@ -207,11 +199,12 @@ class BertMLMCls_(nn.Module):
         logits_parallel = self.lm_head(hidden_states)
         
         if not self.parallel_loss:
-            output = tensor_parallel.gather_from_tensor_model_parallel_region_group(
+            output = gather_from_tensor_model_parallel_region(
                 logits_parallel,
                 self.tp_group
             )
             logits = output if self.half_entropy else output.float()
+            from torch.nn import CrossEntropyLoss
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(
                 logits.view(-1, logits.size(-1)),  # [batch_size * seq_length, vocab_size]
