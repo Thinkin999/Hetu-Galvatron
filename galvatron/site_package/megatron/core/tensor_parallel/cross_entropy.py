@@ -22,10 +22,12 @@ class VocabParallelCrossEntropy:
     @staticmethod
     def calculate_logits_max(
         vocab_parallel_logits: torch.Tensor,
+        half_entropy: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculates logits_max."""
 
-        vocab_parallel_logits = vocab_parallel_logits.float()
+        if not half_entropy:
+            vocab_parallel_logits = vocab_parallel_logits.float()
         # Maximum value along vocab dimension across all GPUs.
         logits_max = torch.max(vocab_parallel_logits, dim=-1)[0]
 
@@ -121,11 +123,11 @@ class VocabParallelCrossEntropy:
 
 class _VocabParallelCrossEntropy(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, vocab_parallel_logits, target, label_smoothing=0.0, tp_group=None):
+    def forward(ctx, vocab_parallel_logits, target, half_entropy, label_smoothing=0.0, tp_group=None):
         """Vocab parallel cross entropy forward function."""
 
         vocab_parallel_logits, logits_max = VocabParallelCrossEntropy.calculate_logits_max(
-            vocab_parallel_logits
+            vocab_parallel_logits, half_entropy
         )
         if tp_group == None:
             tp_group = get_tensor_model_parallel_group()
@@ -218,7 +220,7 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
         return grad_input, None, None, None
 
 
-def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=0.0, tp_group=None):
+def vocab_parallel_cross_entropy(vocab_parallel_logits, target, half_entropy=False, label_smoothing=0.0, tp_group=None):
     """
     Performs cross entropy loss when logits are split across tensor parallel ranks
 
@@ -231,7 +233,7 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=
         label_smoothing: smoothing factor, must be in range [0.0, 1.0)
                          default is no smoothing (=0.0)
     """
-    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, label_smoothing, tp_group)
+    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, half_entropy, label_smoothing, tp_group)
 
 
 from packaging import version

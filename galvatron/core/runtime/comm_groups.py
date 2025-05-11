@@ -170,6 +170,32 @@ def gen_sp_group_dist(sp_size, pp_size, to_print=True, consecutive=True, world_r
     return sp_group
 
 
+def gen_ep_group_dist(ep_size, tp_of_ep_size, pp_size, to_print=True, world_ranks=None):
+    world_ranks = sort_ranks(world_ranks)
+    rank, world_size = torch.distributed.get_rank(), get_world_size(world_ranks)
+    all_ep_groups, ep_group = [], None
+    dp_size = world_size // ep_size // tp_of_ep_size // pp_size
+    num_pp_groups = world_size // pp_size
+    num_dp_groups = ep_size * tp_of_ep_size
+    
+    for i in range(pp_size):
+        base_rank = i * num_pp_groups
+        for j in range(dp_size):
+            start_rank, end_rank = base_rank + num_dp_groups * j, base_rank + num_dp_groups * (j + 1)
+            for k in range(tp_of_ep_size):
+                ranks = range(start_rank + k, end_rank, tp_of_ep_size)
+                ranks = index_ranks(ranks, world_ranks)
+                group = CommGroup(ranks)
+                all_ep_groups.append(group)
+                if group.has_rank(rank):
+                    ep_group = group
+
+    if rank == 0 and to_print:
+        print("EP groups:", end=" ")
+        show_groups(all_ep_groups)
+    return ep_group
+
+
 def gen_pp_group_dist(pp_size, to_print=True, world_ranks=None):
     world_ranks = sort_ranks(world_ranks)
     rank, world_size = torch.distributed.get_rank(), get_world_size(world_ranks)
@@ -314,8 +340,41 @@ def gen_seq_data_group_dist(pp_size, to_print, world_ranks=None):
     #     show_groups(all_seq_data_groups)
     return seq_data_group
 
+def get_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=None):
+    ep_sizes_set = list(set(all_ep_sizes))
+    ep_group_dict = {}
+    for ep_size in ep_sizes_set:
+        ep_group_dict[ep_size] = gen_ep_group_dist(ep_size, all_tp_of_ep_sizes, pp_size, to_print=False, world_ranks=world_ranks)
+    return ep_group_dict
 
-def gen_comm_groups(all_tp_sizes, all_sp_sizes, pp_size, tp_consecutive_flags, show_rank=-1, world_ranks=None):
+def get_tp_of_ep_group_dict_dist(all_tp_of_ep_sizes, pp_size, world_ranks=None):
+    tp_of_ep_sizes_set = list(set(all_tp_of_ep_sizes))
+    tp_of_ep_group_dict = {}
+    for tp_of_ep_size in tp_of_ep_sizes_set:
+        tp_of_ep_group_dict[tp_of_ep_size] = gen_tp_group_dist(tp_of_ep_size, pp_size, to_print=False, world_ranks=world_ranks)
+    return tp_of_ep_group_dict
+
+def get_tp_and_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=None):
+    all_mul_sizes = []
+    for ep_size, tp_of_ep_size in zip(all_ep_sizes, all_tp_of_ep_sizes):
+        all_mul_sizes.append(ep_size * tp_of_ep_size)
+    mul_sizes_set = list(set(all_mul_sizes))
+    tp_and_ep_group_dict = {}
+    for mul_size in mul_sizes_set:
+        tp_and_ep_group_dict[mul_size] = gen_tp_group_dist(mul_size, pp_size, to_print=False, world_ranks=world_ranks)
+    return tp_and_ep_group_dict
+
+def get_dp_of_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=None):
+    all_mul_sizes = []
+    for ep_size, tp_of_ep_size in zip(all_ep_sizes, all_tp_of_ep_sizes):
+        all_mul_sizes.append(ep_size * tp_of_ep_size)
+    mul_sizes_set = list(set(all_mul_sizes))
+    dp_of_ep_group_dict = {}
+    for mul_size in mul_sizes_set:
+        dp_of_ep_group_dict[mul_size] = gen_dp_group_dist(mul_size, pp_size, to_print=False, world_ranks=world_ranks)
+    return dp_of_ep_group_dict
+
+def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_ep_sizes, all_tp_of_ep_sizes, pp_size, tp_consecutive_flags, is_moe_model=False, show_rank=-1, world_ranks=None):
     world_ranks = sort_ranks(world_ranks)
     world_size = get_world_size(world_ranks)
     world_size_per_stage = world_size // pp_size
@@ -330,6 +389,10 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, pp_size, tp_consecutive_flags, s
             tp_consecutive_flags[i] = 1
     tp_groups, dp_groups, sp_groups = [], [], []
     dp_groups = []
+    if is_moe_model:
+        ep_groups, tp_of_ep_groups, tp_and_ep_groups, dp_of_ep_groups = [], [], [], []
+    else:
+        ep_groups, tp_of_ep_groups, tp_and_ep_groups, dp_of_ep_groups = None, None, None, None
     allgather_groups, split_groups = [None], [None]
     fused_split_groups, fused_allgather_groups = [None], [None]
     pp_group, all_pp_groups = gen_pp_group_dist(pp_size, to_print=False, world_ranks=world_ranks)
@@ -341,10 +404,21 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, pp_size, tp_consecutive_flags, s
             all_tp_sizes, all_sp_sizes, pp_size, consec, world_ranks=world_ranks
         )
         sp_group_dict[consec] = get_sp_group_dict_dist(all_sp_sizes, pp_size, consec, world_ranks=world_ranks)
+    if is_moe_model:
+        ep_groups_dict = get_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=world_ranks)
+        tp_of_ep_groups_dict = get_tp_of_ep_group_dict_dist(all_tp_of_ep_sizes, pp_size, world_ranks=world_ranks)
+        tp_and_ep_groups_dict = get_tp_and_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=world_ranks)
+        dp_of_ep_groups_dict = get_dp_of_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=world_ranks)
+    # TODO: consider sp of ep (different scale of all-to-all communication)
     for i in range(len(all_tp_sizes)):
         tp_groups.append(tp_group_dict[tp_consecutive_flags[i]][all_tp_sizes[i]])
         dp_groups.append(dp_group_dict[1 - tp_consecutive_flags[i]][all_tp_sizes[i] * all_sp_sizes[i]])
         sp_groups.append(sp_group_dict[tp_consecutive_flags[i]][all_sp_sizes[i]])
+        if is_moe_model:
+            ep_groups.append(ep_groups_dict[all_ep_sizes[i]])
+            tp_of_ep_groups.append(tp_of_ep_groups_dict[all_tp_of_ep_sizes[i]])
+            tp_and_ep_groups.append(tp_and_ep_groups_dict[all_ep_sizes[i] * all_tp_of_ep_sizes[i]])
+            dp_of_ep_groups.append(dp_of_ep_groups_dict[all_ep_sizes[i] * all_tp_of_ep_sizes[i]])
     for i in range(1, len(all_tp_sizes)):
         if all_tp_sizes[i - 1] != 1:
             old_tp_size = all_tp_sizes[i - 1]
@@ -385,6 +459,15 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, pp_size, tp_consecutive_flags, s
         show_groups(dp_groups)
         print("SDP groups for rank %d (all layers):" % show_rank)
         show_groups(seq_data_groups)
+        if is_moe_model:
+            print("EP groups for rank %d (all layers)" % show_rank)
+            show_groups(ep_groups)
+            print("TP of EP groups for rank %d (all layers)" % show_rank)
+            show_groups(tp_of_ep_groups)
+            print("TP and EP groups for rank %d (all layers)" % show_rank)
+            show_groups(tp_and_ep_groups)
+            print("DP of EP groups for rank %d (all layers)" % show_rank)
+            show_groups(dp_of_ep_groups)
         print("Split groups for rank %d:" % show_rank)
         show_groups(split_groups)
         print("AllGather groups for rank %d:" % show_rank)
@@ -400,6 +483,10 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, pp_size, tp_consecutive_flags, s
         sp_groups,
         dp_groups,
         seq_data_groups,
+        ep_groups,
+        tp_of_ep_groups,
+        tp_and_ep_groups,
+        dp_of_ep_groups,
         allgather_groups,
         split_groups,
         fused_allgather_groups,

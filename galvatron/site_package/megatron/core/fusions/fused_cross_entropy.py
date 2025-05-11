@@ -133,7 +133,7 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
         return grad_input, None, None
 
 
-def fused_vocab_parallel_cross_entropy(vocab_parallel_logits, target, tp_group):
+def fused_vocab_parallel_cross_entropy(vocab_parallel_logits, target, half_entropy, tp_group):
     """
     Performs cross entropy loss when logits are split across tensor parallel ranks
 
@@ -145,4 +145,4 @@ def fused_vocab_parallel_cross_entropy(vocab_parallel_logits, target, tp_group):
         tp_group: the tensor parallel group over which to all reduce
 
     """
-    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, tp_group)
+    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, half_entropy, tp_group)

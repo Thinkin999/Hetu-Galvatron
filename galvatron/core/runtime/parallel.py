@@ -43,14 +43,18 @@ def wrap_data_parallel(
     dp_type=None,
     dp_group=None,
     module_type="bert_enc",
+    dp_of_ep_groups=None,
     pp_device=None,
     mixed_precision=torch.bfloat16,
     pp_on=False,
     wrap_block_name=None,
+    wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
+    tp_of_ep_groups=None,
     all_block_name=None,
     load_module_func=None,
+    is_moe_model=False,
 ):
     if dp_type is None:
         return module
@@ -65,14 +69,18 @@ def wrap_data_parallel(
             pp_device,
             module_type,
             dp_group,
+            dp_of_ep_groups,
             fsdp_type=fsdp_type_dict[dp_type],
             mixed_precision=mixed_precision,
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
+            wrap_block_pos=wrap_block_pos,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups,
+            tp_of_ep_groups=tp_of_ep_groups,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
+            is_moe_model=is_moe_model,
         )
 
 
@@ -94,14 +102,18 @@ def wrap_module_fsdp_manually(
     pp_device,
     module_type="bert_enc",
     dp_group=None,
+    dp_of_ep_groups=None,
     fsdp_type="zero3",
     mixed_precision=torch.bfloat16,
     pp_on=False,
     wrap_block_name=None,
+    wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
+    tp_of_ep_groups=None,
     all_block_name=None,
     load_module_func=None,
+    is_moe_model=False,
 ):
     comm_group = None if dp_group is None else dp_group.group
     sharding_strategy = {
@@ -136,26 +148,49 @@ def wrap_module_fsdp_manually(
         ),
         limit_all_gathers=True,
     )
-    # Wrap given block
-    if wrap_block_name is not None:
-        if "enc" in module_type or "dec" in module_type:
-            module = apply_fsdp(module, fsdp_args, wrap_block_name)
-        else:
-            module = apply_fsdp(module, fsdp_args, wrap_other_block_name)
-            # if not ('initialize_on_meta' in args and args.initialize_on_meta):
-            #     module = module.to(pp_device)
 
-            # if tied_wte_attr_names is not None:
-            #     if module_type == 'embed':
-            #         assert rhasattr(module.module, tied_wte_attr_names[0])
-            #         tied_module = rgetattr(module.module, tied_wte_attr_names[0])
-            #         rsetattr(module.module, tied_wte_attr_names[0], FSDP(tied_module, **fsdp_args))
-            #     elif module_type == 'cls':
-            #         assert rhasattr(module.module, tied_wte_attr_names[-1])
-            #         tied_module = rgetattr(module.module, tied_wte_attr_names[-1])
-            #         rsetattr(module.module, tied_wte_attr_names[-1], FSDP(tied_module, **fsdp_args))
-            # module = FSDP(module, **fsdp_args)
-        return module
+    if is_moe_model:
+        assert wrap_block_pos is not None
+        assert len(wrap_block_pos) == 2
+        moe_fsdp_args = dict(
+            process_group=dp_of_ep_groups.group,
+            sharding_strategy=sharding_strategy,
+            mixed_precision=mixed_precision_policy,
+            device_id=pp_device,
+            param_init_fn=(
+                partial(
+                    param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_of_ep_groups.group, load_module_func
+                )
+                if args.initialize_on_meta
+                else None
+            ),
+            limit_all_gathers=True,
+        )
+        attention_module = getattr(module, wrap_block_pos[0])
+        mlp_module = getattr(module, wrap_block_pos[1])
+        setattr(module, wrap_block_pos[0], apply_fsdp(attention_module, fsdp_args, wrap_block_name[0]))
+        setattr(module, wrap_block_pos[1], apply_fsdp(mlp_module, moe_fsdp_args, wrap_block_name[1]))
+    else:
+        # Wrap given block
+        if wrap_block_name is not None:
+            if "enc" in module_type or "dec" in module_type:
+                module = apply_fsdp(module, fsdp_args, wrap_block_name)
+            else:
+                module = apply_fsdp(module, fsdp_args, wrap_other_block_name)
+                # if not ('initialize_on_meta' in args and args.initialize_on_meta):
+                #     module = module.to(pp_device)
+
+                # if tied_wte_attr_names is not None:
+                #     if module_type == 'embed':
+                #         assert rhasattr(module.module, tied_wte_attr_names[0])
+                #         tied_module = rgetattr(module.module, tied_wte_attr_names[0])
+                #         rsetattr(module.module, tied_wte_attr_names[0], FSDP(tied_module, **fsdp_args))
+                #     elif module_type == 'cls':
+                #         assert rhasattr(module.module, tied_wte_attr_names[-1])
+                #         tied_module = rgetattr(module.module, tied_wte_attr_names[-1])
+                #         rsetattr(module.module, tied_wte_attr_names[-1], FSDP(tied_module, **fsdp_args))
+                # module = FSDP(module, **fsdp_args)
+            return module
 
     # Wrap manually
     if module_type in ["bert_enc", "vit_enc"]:
@@ -299,10 +334,12 @@ def wrap_modules_data_parallel(
     dp_types,
     dp_groups,
     module_types,
+    dp_of_ep_groups=None,
     pp_devices=None,
     mixed_precision=torch.bfloat16,
     default_process_group=None,
     wrap_block_name=None,
+    wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
     all_block_name=None,
@@ -327,14 +364,17 @@ def wrap_modules_data_parallel(
             dp_types[i],
             dp_groups[i],
             module_type=module_types[i],
+            dp_of_ep_groups=dp_of_ep_groups[i] if dp_of_ep_groups is not None else None,
             pp_device=pp_device,
             mixed_precision=mixed_precision,
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
+            wrap_block_pos=wrap_block_pos,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups[i],
             all_block_name=all_block_name,
             load_module_func=load_module_func,
+            is_moe_model=args.is_moe_model,
         )
     args = get_args()
     sharding_strategy = {

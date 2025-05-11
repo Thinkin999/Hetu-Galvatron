@@ -1817,14 +1817,17 @@ def get_expert_model_parallel_group(check_initialized=True):
     return _EXPERT_MODEL_PARALLEL_GROUP
 
 
-def get_expert_model_parallel_world_size():
+def get_expert_model_parallel_world_size(group=None):
     """Return world size for the expert-model-parallel group."""
-    if _MPU_EXPERT_MODEL_PARALLEL_WORLD_SIZE is not None:
-        return _MPU_EXPERT_MODEL_PARALLEL_WORLD_SIZE
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_world_size(group=get_expert_model_parallel_group())
+    if group is None:
+        if _MPU_EXPERT_MODEL_PARALLEL_WORLD_SIZE is not None:
+            return _MPU_EXPERT_MODEL_PARALLEL_WORLD_SIZE
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_world_size(group=get_expert_model_parallel_group())
+        else:
+            return 0
     else:
-        return 0
+        return torch.distributed.get_world_size(group=group)
 
 
 def set_expert_model_parallel_world_size(world_size):
@@ -1833,14 +1836,17 @@ def set_expert_model_parallel_world_size(world_size):
     _MPU_EXPERT_MODEL_PARALLEL_WORLD_SIZE = world_size
 
 
-def get_expert_model_parallel_rank():
+def get_expert_model_parallel_rank(group=None):
     """Return caller's rank in the expert-model-parallel group."""
-    if _MPU_EXPERT_MODEL_PARALLEL_RANK is not None:
-        return _MPU_EXPERT_MODEL_PARALLEL_RANK
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_rank(group=get_expert_model_parallel_group())
+    if group is None:
+        if _MPU_EXPERT_MODEL_PARALLEL_RANK is not None:
+            return _MPU_EXPERT_MODEL_PARALLEL_RANK
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank(group=get_expert_model_parallel_group())
+        else:
+            return 0
     else:
-        return 0
+        return torch.distributed.get_rank(group=group)
 
 
 def set_expert_model_parallel_rank(rank):
@@ -1858,17 +1864,19 @@ def get_expert_tensor_parallel_group(check_initialized=True):
     return _EXPERT_TENSOR_PARALLEL_GROUP
 
 
-def get_expert_tensor_parallel_world_size():
+def get_expert_tensor_parallel_world_size(tp_of_ep_group=None):
     """Return world size for the expert tensor parallel group."""
-    global _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE
-    if _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE is not None:
-        return _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE
-    # Use tensor parallel group world size for backward compability otherwise
-    if not _EXPERT_TENSOR_PARALLEL_GROUP:
-        return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    if tp_of_ep_group is None:
+        global _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE
+        if _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE is not None:
+            return _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE
+        # Use tensor parallel group world size for backward compability otherwise
+        if not _EXPERT_TENSOR_PARALLEL_GROUP:
+            return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+        else:
+            return torch.distributed.get_world_size(group=get_expert_tensor_parallel_group())
     else:
-        return torch.distributed.get_world_size(group=get_expert_tensor_parallel_group())
-
+        return torch.distributed.get_world_size(group=tp_of_ep_group)
 
 def set_expert_tensor_parallel_world_size(world_size):
     "Set expert tensor model parallel size"
@@ -1876,17 +1884,19 @@ def set_expert_tensor_parallel_world_size(world_size):
     _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE = world_size
 
 
-def get_expert_tensor_parallel_rank():
+def get_expert_tensor_parallel_rank(tp_of_ep_group=None):
     """Return my rank for the expert tensor parallel group."""
-    global _MPU_EXPERT_TENSOR_PARALLEL_RANK
-    if _MPU_EXPERT_TENSOR_PARALLEL_RANK is not None:
-        return _MPU_EXPERT_TENSOR_PARALLEL_RANK
-    # Use tensor parallel group rank for backward compability otherwise
-    if not _EXPERT_TENSOR_PARALLEL_GROUP:
-        return _MPU_TENSOR_MODEL_PARALLEL_RANK
+    if tp_of_ep_group is None:
+        global _MPU_EXPERT_TENSOR_PARALLEL_RANK
+        if _MPU_EXPERT_TENSOR_PARALLEL_RANK is not None:
+            return _MPU_EXPERT_TENSOR_PARALLEL_RANK
+        # Use tensor parallel group rank for backward compability otherwise
+        if not _EXPERT_TENSOR_PARALLEL_GROUP:
+            return _MPU_TENSOR_MODEL_PARALLEL_RANK
+        else:
+            return torch.distributed.get_rank(group=get_expert_tensor_parallel_group())
     else:
-        return torch.distributed.get_rank(group=get_expert_tensor_parallel_group())
-
+        return torch.distributed.get_rank(group=tp_of_ep_group)
 
 def set_expert_tensor_parallel_rank(rank):
     "Set expert tensor model parallel rank"
