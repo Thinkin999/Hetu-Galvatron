@@ -52,6 +52,7 @@ def wrap_data_parallel(
     wrap_other_block_name=None,
     tp_groups=None,
     tp_of_ep_groups=None,
+    ep_groups=None,
     all_block_name=None,
     load_module_func=None,
     is_moe_model=False,
@@ -78,13 +79,14 @@ def wrap_data_parallel(
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups,
             tp_of_ep_groups=tp_of_ep_groups,
+            ep_groups=ep_groups,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
             is_moe_model=is_moe_model,
         )
 
 
-def param_init_fn(all_block_name, load, distributed_checkpoint, tp_groups, load_module_func, module):
+def param_init_fn(all_block_name, load, distributed_checkpoint, tp_groups, ep_groups, load_module_func, module):
     m = module
     if isinstance(m, tuple(all_block_name)):
         m.to_empty(device=torch.device("cuda"))
@@ -94,7 +96,7 @@ def param_init_fn(all_block_name, load, distributed_checkpoint, tp_groups, load_
                 if load == None:
                     submodule.reset_parameters()
                 else:
-                    load_module_func(load, tp_groups, name, submodule, m, distributed_checkpoint)
+                    load_module_func(load, tp_groups, name, submodule, m, distributed_checkpoint, ep_groups)
 
 
 def wrap_module_fsdp_manually(
@@ -111,6 +113,7 @@ def wrap_module_fsdp_manually(
     wrap_other_block_name=None,
     tp_groups=None,
     tp_of_ep_groups=None,
+    ep_groups=None,
     all_block_name=None,
     load_module_func=None,
     is_moe_model=False,
@@ -141,7 +144,7 @@ def wrap_module_fsdp_manually(
         device_id=pp_device,
         param_init_fn=(
             partial(
-                param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_groups.group, load_module_func
+                param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_groups.group, None, load_module_func
             )
             if args.initialize_on_meta
             else None
@@ -159,17 +162,16 @@ def wrap_module_fsdp_manually(
             device_id=pp_device,
             param_init_fn=(
                 partial(
-                    param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_of_ep_groups.group, load_module_func
+                    param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_of_ep_groups.group, ep_groups.group, load_module_func
                 )
                 if args.initialize_on_meta
                 else None
             ),
             limit_all_gathers=True,
         )
-        attention_module = getattr(module, wrap_block_pos[0])
-        mlp_module = getattr(module, wrap_block_pos[1])
-        setattr(module, wrap_block_pos[0], apply_fsdp(attention_module, fsdp_args, wrap_block_name[0]))
-        setattr(module, wrap_block_pos[1], apply_fsdp(mlp_module, moe_fsdp_args, wrap_block_name[1]))
+        apply_fsdp(module, fsdp_args, [wrap_block_name[0]], True)
+        apply_fsdp(module, moe_fsdp_args, [wrap_block_name[1]], True)
+        return module
     else:
         # Wrap given block
         if wrap_block_name is not None:
@@ -191,56 +193,24 @@ def wrap_module_fsdp_manually(
                 #         rsetattr(module.module, tied_wte_attr_names[-1], FSDP(tied_module, **fsdp_args))
                 # module = FSDP(module, **fsdp_args)
             return module
+    
+    assert False
 
-    # Wrap manually
-    if module_type in ["bert_enc", "vit_enc"]:
-        sub_module = module.module.layer[0]
-        setattr(sub_module, "attention", FSDP(sub_module.attention, **fsdp_args))
-        setattr(sub_module, "mlp", FSDP(sub_module.mlp, **fsdp_args))
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["swin_enc"]:
-        sub_module = module.module.block
-        setattr(sub_module, "attention", FSDP(sub_module.attention, **fsdp_args))
-        setattr(sub_module, "intermediate", FSDP(sub_module.intermediate, **fsdp_args))
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["t5_enc"]:
-        sub_module = module.module.block.t5_block
-        setattr(
-            sub_module.layer[0], "SelfAttention", FSDP(sub_module.layer[0].SelfAttention.cuda(pp_device), **fsdp_args)
-        )
-        sub_module.layer[-1] = FSDP(sub_module.layer[-1].cuda(pp_device), **fsdp_args)
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["t5_dec"]:
-        module_ = module.module
-        sub_module = module_.block.t5_block
-        setattr(module_, "block", FSDP(module_.block.cuda(pp_device), **fsdp_args))
-        setattr(
-            sub_module.layer[0], "SelfAttention", FSDP(sub_module.layer[0].SelfAttention.cuda(pp_device), **fsdp_args)
-        )
-        setattr(
-            sub_module.layer[1],
-            "EncDecAttention",
-            FSDP(sub_module.layer[1].EncDecAttention.cuda(pp_device), **fsdp_args),
-        )
-        sub_module.layer[-1] = FSDP(sub_module.layer[-1].cuda(pp_device), **fsdp_args)
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["gpt_dec"]:
-        module.module.layers[0] = FSDP(module.module.layers[0], **fsdp_args)
-        return FSDP(module, **fsdp_args)
+
+def apply_fsdp(model, fsdp_args, wrap_block_name, need_ignore=False):
+    if need_ignore:
+        ignored_modules = set()
+        for name, module in model.named_modules():
+            if isinstance(module, FSDP):
+                ignored_modules.add(module)
     else:
-        if "initialize_on_meta" in args and args.initialize_on_meta:
-            return FSDP(module, **fsdp_args)
-        else:
-            return FSDP(module.to(pp_device), **fsdp_args)
-
-
-def apply_fsdp(model, fsdp_args, wrap_block_name):
+        ignored_modules = set()
     check_fn = lambda submodule: (any(isinstance(submodule, block) for block in wrap_block_name))
     _recursive_wrap(
         module=model,
         auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=check_fn),
         wrapper_cls=FSDP,
-        ignored_modules=set(),
+        ignored_modules=ignored_modules,
         ignored_params=set(),
         only_wrap_children=True,
         **fsdp_args
@@ -342,6 +312,8 @@ def wrap_modules_data_parallel(
     wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
+    tp_of_ep_groups=None,
+    ep_groups=None,
     all_block_name=None,
     load_module_func=None,
 ):
@@ -372,6 +344,8 @@ def wrap_modules_data_parallel(
             wrap_block_pos=wrap_block_pos,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups[i],
+            tp_of_ep_groups=tp_of_ep_groups[i],
+            ep_groups=ep_groups[i],
             all_block_name=all_block_name,
             load_module_func=load_module_func,
             is_moe_model=args.is_moe_model,

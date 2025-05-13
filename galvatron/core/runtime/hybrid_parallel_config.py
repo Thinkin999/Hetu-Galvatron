@@ -31,8 +31,8 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
             [args.global_tp_consec] * total_layer_num if args.global_tp_consec in [0, 1] else [1] * total_layer_num
         )
         dp_types_enc = total_layer_num * [args.sdp]
-        ep_sizes_enc = total_layer_num * [args.global_ep_size]
-        tp_of_ep_sizes_enc = total_layer_num * [args.global_tp_of_ep_size]
+        ep_sizes_enc = total_layer_num * [args.global_ep_deg]
+        tp_of_ep_sizes_enc = total_layer_num * [args.global_tp_of_ep_deg]
         checkpoint_flags_enc = [args.global_checkpoint] * total_layer_num
         pp_divide = None
         if args.use_ulysses:
@@ -41,8 +41,6 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
         else:
             args.vocab_sp = 0
             use_sp = [0] * total_layer_num
-        ep_deg = args.global_ep_deg
-        tp_of_ep_deg = args.global_tp_of_ep_deg
     else:
         if isinstance(args.galvatron_config_path, str):
             galvatron_config = read_json_config(args.galvatron_config_path)
@@ -138,6 +136,8 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
                 "   pp_deg: %d, tp_deg: %d, %s_deg: %d, tp_consecutive_flag: %d, checkpoint_flag: %d"
                 % (pp_deg, tp_deg, dp_type, dp_deg, tp_consec, args.global_checkpoint)
             )
+            if args.is_moe_model:
+                print("   ep_deg: %d, tp_of_ep_deg: %d" % (args.global_ep_deg, args.global_tp_of_ep_deg))
             embed_sdp = ", embed_sdp: 1" if args.embed_sdp else ""
             print(
                 "   pipeline_type: %s, default_dp_type: %s, dtype: %s%s"
@@ -291,8 +291,8 @@ def hp_config_whole_model(module_types, hp_configs, embed_sdp=0, embed_ckpt=0, v
             hp_configs_whole["tp_consec_whole"].append(1)
             hp_configs_whole["checkpoint_flags_whole"].append(embed_ckpt)
             # for padding
-            hp_configs_whole["ep_sizes_whole"].append(ep_sizes_enc[idx_enc])
-            hp_configs_whole["tp_of_ep_sizes_whole"].append(tp_of_ep_sizes_enc[idx_enc])
+            hp_configs_whole["ep_sizes_whole"].append(ep_sizes_enc[0 if idx_enc==0 else idx_enc-1])
+            hp_configs_whole["tp_of_ep_sizes_whole"].append(tp_of_ep_sizes_enc[0 if idx_enc==0 else idx_enc-1])
             
 
     world_size = torch.distributed.get_world_size()
@@ -312,6 +312,7 @@ def hp_config_whole_model(module_types, hp_configs, embed_sdp=0, embed_ckpt=0, v
             if isinstance(hp_configs_whole[key], (list, tuple)):
                 test_dict[key + "_check"] = get_enc_groups(hp_configs_whole[key], module_types)
         # print_hp_configs(test_dict)
+    hp_configs_whole["is_moe_model"] = hp_configs["is_moe_model"]
     return hp_configs_whole
 
 

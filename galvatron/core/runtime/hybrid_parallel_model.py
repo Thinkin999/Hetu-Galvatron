@@ -88,64 +88,6 @@ class GalvatronModel(nn.Module):
         return loss
 
 
-class GalvatronModelWrapper:
-    def __init__(self, args, wrap_block_names=[]):
-        self.args = args
-        self.wrap_block_names = wrap_block_names
-
-    # Wrap Galvatron Hybrid Parallel Model, need to be called after Galvatron is initialized
-    def wrap_model_hybrid_parallel(
-        self,
-        model,
-        model_config,
-        hybrid_parallel_configs,
-        model_info,
-        construct_sequential_model,
-        construct_tensor_parallel_model,
-    ):
-        return construct_hybrid_parallel_model_api(
-            model,
-            model_config,
-            self.args,
-            hybrid_parallel_configs,
-            model_info,
-            construct_sequential_model,
-            construct_tensor_parallel_model,
-            self.wrap_block_names,
-        )
-
-    # Wrap Data Parallel Model, can be called on any PyTorch Model even when Galvatron is not initilized
-    def wrap_model_data_parallel(
-        self,
-        model,
-        device,
-        dp_type="ddp",
-        mixed_precision="bf16",
-        comm_group=None,
-        initialize_on_meta=False,
-        backward_prefetch=True,
-    ):
-        from galvatron.core.parallel import wrap_model_data_parallel
-
-        mixed_precision = mixed_precision_dtype(mixed_precision)
-        return wrap_model_data_parallel(
-            model,
-            device,
-            self.wrap_block_names,
-            dp_type,
-            mixed_precision,
-            comm_group,
-            initialize_on_meta,
-            backward_prefetch,
-        )
-
-    # Wrap Activation Checkpoint Model, can be called on any PyTorch Model even when Galvatron is not initilized
-    def wrap_model_checkpoint(self, model):
-        from galvatron.core.parallel import wrap_model_checkpoint
-
-        return wrap_model_checkpoint(model, self.wrap_block_names)
-
-
 def construct_hybrid_parallel_model_api(
     model,
     model_config,
@@ -223,17 +165,17 @@ def construct_hybrid_parallel_model_api(
     model_args = {
         "model": model,
         "config": config,
-        "tp_groups": tp_groups_whole,
+        "tp_groups_enc": tp_groups_whole,
     }
     if use_hf:
         model_args.update({
-            "sp_groups": sp_groups_whole,
+            "sp_groups_enc": sp_groups_whole,
         })
     if hp_configs_whole["is_moe_model"]:
         model_args.update({
-            "ep_groups": ep_groups_whole,
-            "tp_of_ep_groups": tp_of_ep_groups_whole,
-            "tp_and_ep_groups": tp_and_ep_groups_whole,
+            "ep_groups_enc": ep_groups_whole,
+            "tp_of_ep_groups_enc": tp_of_ep_groups_whole,
+            "tp_and_ep_groups_enc": tp_and_ep_groups_whole,
         })
     if args.initialize_on_meta and use_hf:
         with init_empty_weights(meta_init_buffer):
@@ -290,6 +232,7 @@ def construct_hybrid_parallel_model_api(
         wrap_other_block_name=wrap_other_block_name,
         tp_groups=tp_groups_whole,
         tp_of_ep_groups=tp_of_ep_groups_whole,
+        ep_groups=ep_groups_whole,
         all_block_name=all_block_name,
         load_module_func=load_module_func,
     )

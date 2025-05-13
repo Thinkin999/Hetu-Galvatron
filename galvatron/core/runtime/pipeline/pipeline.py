@@ -181,6 +181,7 @@ class PipelineParallel(nn.Module):
         wrap_other_block_name=None,
         tp_groups=None,
         tp_of_ep_groups=None,
+        ep_groups=None,
         all_block_name=None,
         load_module_func=None,
     ):
@@ -193,6 +194,7 @@ class PipelineParallel(nn.Module):
         pp_devices_cur_stage = [self.local_rank] * (self.stage_end_idx - self.stage_start_idx)
         tp_groups_cur_stage = tp_groups[self.stage_start_idx : self.stage_end_idx]
         tp_of_ep_groups_cur_stage = tp_of_ep_groups[self.stage_start_idx : self.stage_end_idx]
+        ep_groups_cur_stage = ep_groups[self.stage_start_idx : self.stage_end_idx]
         if dp_of_ep_groups is not None:
             dp_of_ep_groups_cur_stage = dp_of_ep_groups[self.stage_start_idx : self.stage_end_idx]
         else:
@@ -212,6 +214,7 @@ class PipelineParallel(nn.Module):
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups_cur_stage,
             tp_of_ep_groups=tp_of_ep_groups_cur_stage,
+            ep_groups=ep_groups_cur_stage,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
         )

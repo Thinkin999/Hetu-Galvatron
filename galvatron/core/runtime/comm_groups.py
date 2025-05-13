@@ -343,8 +343,8 @@ def gen_seq_data_group_dist(pp_size, to_print, world_ranks=None):
 def get_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, world_ranks=None):
     ep_sizes_set = list(set(all_ep_sizes))
     ep_group_dict = {}
-    for ep_size in ep_sizes_set:
-        ep_group_dict[ep_size] = gen_ep_group_dist(ep_size, all_tp_of_ep_sizes, pp_size, to_print=False, world_ranks=world_ranks)
+    for ep_size, tp_of_ep_size in zip(ep_sizes_set, all_tp_of_ep_sizes):
+        ep_group_dict[ep_size] = gen_ep_group_dist(ep_size, tp_of_ep_size, pp_size, to_print=False, world_ranks=world_ranks)
     return ep_group_dict
 
 def get_tp_of_ep_group_dict_dist(all_tp_of_ep_sizes, pp_size, world_ranks=None):

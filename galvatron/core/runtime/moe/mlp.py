@@ -23,7 +23,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import grouped_gemm_util as gg
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from .mlp import MLP, MLPSubmodules
+from ..tensor_parallel.mlp import MLP, MLPSubmodules
 
 class GroupedMLP(MegatronModule):
     """An efficient implementation of the Experts layer using GroupedGEMM.

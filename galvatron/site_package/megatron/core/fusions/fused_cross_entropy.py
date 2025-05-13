@@ -10,13 +10,13 @@ from megatron.core.tensor_parallel.utils import VocabUtility
 
 
 @jit_fuser
-def calculate_logits_max(vocab_parallel_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def calculate_logits_max(vocab_parallel_logits: torch.Tensor, half_entropy: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Calculates the maximum logits of the predicted tokens.
     """
 
     vocab_parallel_logits, logits_max = VocabParallelCrossEntropy.calculate_logits_max(
-        vocab_parallel_logits
+        vocab_parallel_logits, half_entropy
     )
 
     return vocab_parallel_logits, logits_max
@@ -86,11 +86,11 @@ def calculate_gradients(
 
 class _VocabParallelCrossEntropy(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, vocab_parallel_logits, target, tp_group):
+    def forward(ctx, vocab_parallel_logits, target, half_entropy, tp_group):
         """
         Forward implementation for the cross entropy loss.
         """
-        vocab_parallel_logits, logits_max = calculate_logits_max(vocab_parallel_logits)
+        vocab_parallel_logits, logits_max = calculate_logits_max(vocab_parallel_logits, half_entropy)
         torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=tp_group)
 
         # Get the partition's vocab indices
@@ -130,7 +130,7 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
 
         grad_input = calculate_gradients(softmax, grad_output, target_mask, masked_target_1d)
 
-        return grad_input, None, None
+        return grad_input, None, None, None
 
 
 def fused_vocab_parallel_cross_entropy(vocab_parallel_logits, target, half_entropy, tp_group):

@@ -485,7 +485,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         all_gather_buffer, input, group=ctx.tp_group, async_op=True
                     )
                 else:
-                    handle = torch.distributed._all_gather_base(
+                    handle = dist_all_gather_func(
                         all_gather_buffer, input, group=ctx.tp_group # , async_op=True
                     )
 
@@ -524,7 +524,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                     sub_grad_input, grad_input, group=ctx.tp_group, async_op=True
                 )
             else:
-                handle = torch.distributed._reduce_scatter_base(
+                handle = dist_reduce_scatter_func(
                     sub_grad_input, grad_input, group=ctx.tp_group# , async_op=True
                 )
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
@@ -787,8 +787,8 @@ class ColumnParallelLinear(torch.nn.Module):
         self.disable_grad_reduce = disable_grad_reduce
 
         if is_expert:
-            world_size = get_expert_tensor_parallel_world_size()
-            rank = get_expert_tensor_parallel_rank()
+            world_size = get_expert_tensor_parallel_world_size(self.tp_group)
+            rank = get_expert_tensor_parallel_rank(self.tp_group)
         else:
             world_size = get_tensor_model_parallel_world_size(self.tp_group)
             rank = get_tensor_model_parallel_rank(self.tp_group)
@@ -1098,8 +1098,8 @@ class RowParallelLinear(torch.nn.Module):
 
         # Divide the weight matrix along the last dimension.
         if self.is_expert:
-            world_size = get_expert_tensor_parallel_world_size()
-            rank = get_expert_tensor_parallel_rank()
+            world_size = get_expert_tensor_parallel_world_size(self.tp_group)
+            rank = get_expert_tensor_parallel_rank(self.tp_group)
         else:
             world_size = get_tensor_model_parallel_world_size(self.tp_group)
             rank = get_tensor_model_parallel_rank(self.tp_group)

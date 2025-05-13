@@ -51,7 +51,7 @@ class MoETokenDispatcher:
         """
         self.config = config
         self.shared_experts: Optional[SharedExpertMLP] = None
-        self.ep_group = ep_group
+        self.dispatcher_ep_group = ep_group
         self.tp_of_ep_group = tp_of_ep_group
         self.tp_and_ep_group = tp_and_ep_group
 
@@ -61,7 +61,7 @@ class MoETokenDispatcher:
     @property
     def ep_group(self):
         """Get expert model parallel group."""
-        return self.ep_group
+        return self.dispatcher_ep_group
 
     @property
     def tp_group(self):

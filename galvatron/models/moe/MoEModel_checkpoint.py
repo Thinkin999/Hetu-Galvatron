@@ -22,8 +22,8 @@ layer_name = "model_layers_%d.pt"
 ln_f_name = "model_norm.pt"
 cls_name = "lm_head.pt"
 
-
-def load_distributed_checkpoint(load, tp_groups, name, submodule, module):
+# TODO: Fix distributed loading and saving
+def load_distributed_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
     world_size = dist.get_world_size(tp_groups)
     rank = dist.get_rank(tp_groups)
     args = get_args()
@@ -44,7 +44,7 @@ def load_distributed_checkpoint(load, tp_groups, name, submodule, module):
     submodule.weight.copy_(weight)
 
 
-def load_hf_checkpoint(load, tp_groups, name, submodule, module):
+def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
     world_size = dist.get_world_size(tp_groups)
     rank = dist.get_rank(tp_groups)
     if name.endswith("embed_tokens"):
@@ -88,10 +88,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
         file_path = os.path.join(load, layer_name % module.idx)
         checkpoint = torch.load(file_path, mmap=True, map_location="cpu")
         if name.startswith("attention"):
-            if name.endswith("LayerNorm"):
-                weight = checkpoint["input_layernorm.weight"].to(device="cuda", dtype=torch.float32)
-                submodule.weight.copy_(weight)
-            elif name.endswith("query_key_value"):
+            if name.endswith("linear_qkv"):
                 args = get_args()
                 # q: num_heads * head_dim, hidden_size
                 # k,v: num_key_value_heads * head_dim, hidden_size
@@ -112,44 +109,57 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
                     weight.shape[0], rank, world_size
                 )
                 submodule.weight.copy_(weight[weight_start_index:weight_end_index].contiguous())
-            elif name.endswith("dense"):
+            elif name.endswith("linear_proj"):
                 # o: hidden_size, num_heads * head_dim
                 weight = checkpoint["self_attn.o_proj.weight"].to(device="cuda", dtype=torch.float32)
                 weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                     weight.shape[1], rank, world_size
                 )
                 submodule.weight.copy_(weight[:, weight_start_index:weight_end_index].contiguous())
-        elif name.startswith("mlp"):
-            if name.endswith("LayerNorm"):
+        elif name.endswith("LayerNorm"):
+                weight = checkpoint["input_layernorm.weight"].to(device="cuda", dtype=torch.float32)
+                submodule.weight.copy_(weight)
+        elif name.endswith("MLPLayerNorm"):
                 weight = checkpoint["post_attention_layernorm.weight"].to(device="cuda", dtype=torch.float32)
                 submodule.weight.copy_(weight)
-            elif name.endswith("dense_h_to_4h"):
-                weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-                    checkpoint["mlp.gate_proj.weight"].shape[0], rank, world_size
-                )
-                weight = torch.cat(
-                    [
-                        checkpoint["mlp.gate_proj.weight"][weight_start_index:weight_end_index].contiguous(),
-                        checkpoint["mlp.up_proj.weight"][weight_start_index:weight_end_index].contiguous(),
-                    ],
-                    dim=0,
-                )
+        elif name.startswith("router"):
+            weight = checkpoint["block_sparse_moe.gate.weight"].to(device="cuda", dtype=torch.float32)
+            submodule.weight.copy_(weight)
+        elif name.startswith("experts"):
+            # Sequential
+            ep_world_size = dist.get_world_size(ep_groups)
+            ep_rank = dist.get_rank(ep_groups)
+            expert_start_index, expert_end_index = VocabUtility.vocab_range_from_global_vocab_size(
+                args.num_experts, ep_rank, ep_world_size
+            )
+            for i in range(expert_start_index, expert_end_index):
+                if name.endswith("%d.linear_fc1" % (i - expert_start_index)):
+                    weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
+                        checkpoint["block_sparse_moe.experts.%d.w1.weight" % i].shape[0], rank, world_size
+                    )
+                    weight = torch.cat(
+                        [
+                            checkpoint["block_sparse_moe.experts.%d.w1.weight" % i][weight_start_index:weight_end_index].contiguous(),
+                            checkpoint["block_sparse_moe.experts.%d.w3.weight" % i][weight_start_index:weight_end_index].contiguous(),
+                        ],
+                        dim=0,
+                    )
 
-                submodule.weight.copy_(weight.contiguous())
-            elif name.endswith("dense_4h_to_h"):
-                weight = checkpoint["mlp.down_proj.weight"].to(device="cuda", dtype=torch.float32)
-                weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-                    weight.shape[1], rank, world_size
-                )
-                submodule.weight.copy_(weight[:, weight_start_index:weight_end_index].contiguous())
+                    submodule.weight.copy_(weight.contiguous())
+                elif name.endswith("%d.linear_fc2" % (i - expert_start_index)):
+                    weight = checkpoint["block_sparse_moe.experts.%d.w2.weight" % i].to(device="cuda", dtype=torch.float32)
+                    weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
+                        weight.shape[1], rank, world_size
+                    )
+                    submodule.weight.copy_(weight[:, weight_start_index:weight_end_index].contiguous())
 
 
 @torch.no_grad()
-def load_moe_module(load, tp_groups, name, submodule, module, distributed_checkpoint):
+def load_moe_module(load, tp_groups, name, submodule, module, distributed_checkpoint, ep_groups):
     if distributed_checkpoint:
-        load_distributed_checkpoint(load, tp_groups, name, submodule, module)
+        load_distributed_checkpoint(load, tp_groups, name, submodule, module, ep_groups)
     else:
-        load_hf_checkpoint(load, tp_groups, name, submodule, module)
+        load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups)
 
 
 @torch.no_grad()

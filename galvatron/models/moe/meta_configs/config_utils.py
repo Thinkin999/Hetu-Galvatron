@@ -77,6 +77,7 @@ def set_model_config(config, args, overwrite_args=True):
 
 
 def overwrite_model_args(config, args):
+    args.is_moe_model = True
     args.hidden_size = config.hidden_size
     args.intermediate_size = config.intermediate_size
     args.seq_length = config.max_position_embeddings
@@ -122,7 +123,7 @@ def overwrite_megatron_args(config, args):
         args.moe_aux_loss_coeff = args.router_aux_loss_coef
 
     args.moe_router_topk = config.num_experts_per_tok
-    args.moe_token_dispatcher_type = "all_to_all" # "flex" for deepep, use with moe_enable_deepep
+    args.moe_token_dispatcher_type = "alltoall" # "flex" for deepep, use with moe_enable_deepep
     # TODO: args need to consider
     # moe_grouped_gemm, moe_use_legacy_grouped_gemm
     # moe_router_dtype

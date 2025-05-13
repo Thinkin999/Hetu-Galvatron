@@ -217,7 +217,7 @@ class _VocabParallelCrossEntropy(torch.autograd.Function):
                 grad_2d, arange_1d, masked_target_1d, softmax_update, grad_input, grad_output
             )
 
-        return grad_input, None, None, None
+        return grad_input, None, None, None, None
 
 
 def vocab_parallel_cross_entropy(vocab_parallel_logits, target, half_entropy=False, label_smoothing=0.0, tp_group=None):

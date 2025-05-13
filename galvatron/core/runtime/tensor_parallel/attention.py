@@ -115,6 +115,7 @@ class Attention(MegatronModule, ABC):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
         self.use_flash_attn = args.use_flash_attn
+        self.sequence_parallel = config.sequence_parallel
         
         # For normal attention without groups, num_query_groups == num_attention_heads,
         # so these two will be the same
@@ -395,7 +396,7 @@ class Attention(MegatronModule, ABC):
         inference_value_memory: Tensor,
         rotary_cos: Tensor,
         rotary_sin: Tensor,
-    ) -> (Tensor, Tensor):
+    ) -> Tuple[Tensor, Tensor]:
         """
         The flash decoding kernel will do the following in a single execution:
         1. Compute RoPE embedding with precomputed cos & sin tensors
@@ -685,9 +686,9 @@ class Attention(MegatronModule, ABC):
                         ]
                         if not self.sequence_parallel:
                             with tensor_parallel.get_cuda_rng_tracker().fork():
-                                core_attn_out = self.core_attention_flash(q, k, v)
+                                core_attn_out = self.flash_attention(q, k, v)
                         else:
-                            core_attn_out = self.core_attention_flash(q, k, v)
+                            core_attn_out = self.flash_attention(q, k, v)
                         core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
                 else:
                     if self.use_flash_attn:
@@ -746,6 +747,7 @@ class SelfAttention(Attention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str = None,
         tp_group: dist.ProcessGroup = None,
+        sp_group: dist.ProcessGroup = None,
     ):
         super().__init__(
             config=config,
@@ -754,6 +756,8 @@ class SelfAttention(Attention):
             attn_mask_type=attn_mask_type,
             attention_type="self",
             cp_comm_type=cp_comm_type,
+            tp_group=tp_group,
+            sp_group=sp_group,
         )
 
         self.linear_qkv = build_module(
@@ -768,6 +772,7 @@ class SelfAttention(Attention):
             is_expert=False,
             tp_comm_buffer_name='qkv',
             tp_group=tp_group,
+            sp_group=sp_group,
         )
 
         if submodules.q_layernorm is not None:
@@ -929,6 +934,7 @@ class CrossAttention(Attention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str = None,
         tp_group: dist.ProcessGroup = None,
+        sp_group: dist.ProcessGroup = None,
     ):
         super().__init__(
             config=config,
@@ -937,6 +943,8 @@ class CrossAttention(Attention):
             attn_mask_type=attn_mask_type,
             attention_type="cross",
             cp_comm_type=cp_comm_type,
+            tp_group=tp_group,
+            sp_group=sp_group,
         )
 
         if self.config.num_query_groups != self.config.num_attention_heads:
