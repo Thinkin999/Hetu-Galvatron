@@ -236,3 +236,119 @@ class SequentialMLP(MegatronModule):
                 output_bias_local = None
 
             return output_local, output_bias_local
+
+class MoE(torch.nn.Module):
+    def __init__(self, args, tp_groups, ep_groups):
+        super().__init__()
+        self.args = args
+        self.tp_groups = tp_groups
+        self.ep_groups = ep_groups
+        self.num_experts = args.num_experts
+        self.top_k = args.top_k
+        self.gate = torch.nn.Linear(args.hidden_size, args.num_experts, bias=False)
+        
+        # 初始化experts
+        self.local_experts = torch.nn.ModuleList()
+        ep_world_size = dist.get_world_size(ep_groups)
+        ep_rank = dist.get_rank(ep_groups)
+        expert_start_index, expert_end_index = VocabUtility.vocab_range_from_global_vocab_size(
+            args.num_experts, ep_rank, ep_world_size
+        )
+        
+        for i in range(expert_start_index, expert_end_index):
+            expert = MoEExpert(args, tp_groups)
+            # 确保权重被正确初始化
+            for name, param in expert.named_parameters():
+                if param.storage().size() == 0:
+                    print(f"Warning: expert {i} {name} has zero storage size")
+                    param.storage().resize_(param.numel())
+                    # 显式分配内存
+                    param.data = param.data.clone()
+            self.local_experts.append(expert)
+            
+        # 确保gate权重被正确初始化
+        if self.gate.weight.storage().size() == 0:
+            print("Warning: gate weight has zero storage size")
+            self.gate.weight.storage().resize_(self.gate.weight.numel())
+            # 显式分配内存
+            self.gate.weight.data = self.gate.weight.data.clone()
+            
+    def forward(self, hidden_states):
+        # 在forward开始时检查权重
+        for i, expert in enumerate(self.local_experts):
+            for name, param in expert.named_parameters():
+                if param.storage().size() == 0:
+                    print(f"Warning: expert {i} {name} has zero storage size")
+                    param.storage().resize_(param.numel())
+                    # 显式分配内存
+                    param.data = param.data.clone()
+                    
+        if self.gate.weight.storage().size() == 0:
+            print("Warning: gate weight has zero storage size")
+            self.gate.weight.storage().resize_(self.gate.weight.numel())
+            # 显式分配内存
+            self.gate.weight.data = self.gate.weight.data.clone()
+            
+        # 确保输入张量有内存
+        if hidden_states.storage().size() == 0:
+            print("Warning: hidden_states has zero storage size")
+            hidden_states = hidden_states.clone()
+            
+        # 原有的forward逻辑
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        
+        # 计算gate输出
+        gate_output = self.gate(hidden_states)
+        
+        # 检查gate输出
+        if gate_output.storage().size() == 0:
+            print("Warning: gate_output has zero storage size")
+            gate_output = gate_output.clone()
+        
+        # 获取top-k experts
+        gate_output = F.softmax(gate_output, dim=-1)
+        top_k_values, top_k_indices = torch.topk(gate_output, self.top_k, dim=-1)
+        
+        # 检查top-k结果
+        if top_k_values.storage().size() == 0:
+            print("Warning: top_k_values has zero storage size")
+            top_k_values = top_k_values.clone()
+        if top_k_indices.storage().size() == 0:
+            print("Warning: top_k_indices has zero storage size")
+            top_k_indices = top_k_indices.clone()
+        
+        # 准备expert输入
+        expert_inputs = []
+        expert_indices = []
+        for k in range(self.top_k):
+            expert_inputs.append(hidden_states)
+            expert_indices.append(top_k_indices[:, k])
+            
+        # 处理每个expert
+        expert_outputs = []
+        for i, expert in enumerate(self.local_experts):
+            expert_mask = torch.zeros(batch_size * sequence_length, dtype=torch.bool, device=hidden_states.device)
+            for k in range(self.top_k):
+                expert_mask |= (expert_indices[k] == i)
+                
+            if expert_mask.any():
+                expert_input = hidden_states[expert_mask]
+                expert_output = expert(expert_input)
+                expert_outputs.append((expert_output, expert_mask))
+                
+        # 合并expert输出
+        final_output = torch.zeros_like(hidden_states)
+        for expert_output, expert_mask in expert_outputs:
+            final_output[expert_mask] = expert_output
+            
+        # 检查最终输出
+        if final_output.storage().size() == 0:
+            print("Warning: final_output has zero storage size")
+            final_output = final_output.clone()
+            
+        # 应用gate权重
+        for k in range(self.top_k):
+            final_output *= top_k_values[:, k].unsqueeze(-1)
+            
+        return final_output.view(batch_size, sequence_length, hidden_dim)

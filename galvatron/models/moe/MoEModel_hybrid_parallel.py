@@ -14,7 +14,7 @@ from galvatron.models.moe.MoEModel_sequential import (
     MoEPreNorm_,
     construct_sequential_model,
 )
-from galvatron.models.moe.MoEModel_tensor_parallel import MoELayer_tp, construct_tensor_parallel_model, MoEAttention_tp, MoEMLP_tp
+from galvatron.models.moe.MoEModel_tensor_parallel import MoELayer_tp, construct_tensor_parallel_model, MoEAttention_tp, MoEMLP_tp, MoERouter
 from galvatron.models.moe.meta_configs import config_from_meta, model_layer_configs, model_name, set_model_config
 
 def get_hybrid_parallel_configs(model_config, training_args):
@@ -26,7 +26,7 @@ def construct_hybrid_parallel_model(model, model_config, training_args, hybrid_p
     wrap_block_name = [MoEAttention_tp, MoEMLP_tp]
     wrap_checkpoint_block_name = [MoEAttention_tp, MoEMLP_tp]
     wrap_other_block_name = [MoEEmbeddings_, MoEPreNorm_, MoECls_]
-    all_block_name = [MoEEmbeddings_, MoEAttention_tp, MoEMLP_tp, MoEPreNorm_, MoECls_]
+    all_block_name = [MoEEmbeddings_, MoEAttention_tp, MoEMLP_tp, MoERouter, MoEPreNorm_, MoECls_]
     hp_model = construct_hybrid_parallel_model_api(
         model,
         model_config,
@@ -36,7 +36,6 @@ def construct_hybrid_parallel_model(model, model_config, training_args, hybrid_p
         construct_sequential_model,
         construct_tensor_parallel_model,
         wrap_block_name=wrap_block_name,
-        wrap_block_pos=["attention","mlp"], # first attn last moe
         wrap_checkpoint_block_name=wrap_checkpoint_block_name,
         wrap_other_block_name=wrap_other_block_name,
         # tied_wte_attr_names=['embed_tokens', 'lm_head'],

@@ -112,7 +112,7 @@ class MoELoss_(nn.Module):
 
 
 class MoECls_(nn.Module):
-    def __init__(self, model, parallel_loss=True, half_entropy=True):
+    def __init__(self, model, parallel_loss=True, half_entropy=False):
         super().__init__()
         self.sequence_parallel = get_args().sequence_parallel
         self.tp_group = model.lm_head.tp_group

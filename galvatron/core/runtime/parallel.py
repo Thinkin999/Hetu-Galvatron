@@ -48,7 +48,6 @@ def wrap_data_parallel(
     mixed_precision=torch.bfloat16,
     pp_on=False,
     wrap_block_name=None,
-    wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
     tp_of_ep_groups=None,
@@ -75,7 +74,6 @@ def wrap_data_parallel(
             mixed_precision=mixed_precision,
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
-            wrap_block_pos=wrap_block_pos,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups,
             tp_of_ep_groups=tp_of_ep_groups,
@@ -109,7 +107,6 @@ def wrap_module_fsdp_manually(
     mixed_precision=torch.bfloat16,
     pp_on=False,
     wrap_block_name=None,
-    wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
     tp_of_ep_groups=None,
@@ -132,14 +129,16 @@ def wrap_module_fsdp_manually(
         param_dtype=mixed_precision,  # Param precision
         reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision,  # Gradient communication precision
         buffer_dtype=mixed_precision,  # Buffer precision
-        cast_forward_inputs=True,
-        cast_root_forward_inputs=True,
+        cast_forward_inputs=False,
+        cast_root_forward_inputs=False,
     )
+    forward_prefetch = True if is_moe_model else False # For MoE model, we explicitly prefetch the parameters
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
     fsdp_args = dict(
         process_group=comm_group,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision_policy,
+        forward_prefetch=forward_prefetch,
         # backward_prefetch=backward_prefetch,
         device_id=pp_device,
         param_init_fn=(
@@ -152,47 +151,40 @@ def wrap_module_fsdp_manually(
         limit_all_gathers=True,
     )
 
-    if is_moe_model:
-        assert wrap_block_pos is not None
-        assert len(wrap_block_pos) == 2
-        moe_fsdp_args = dict(
-            process_group=dp_of_ep_groups.group,
-            sharding_strategy=sharding_strategy,
-            mixed_precision=mixed_precision_policy,
-            device_id=pp_device,
-            param_init_fn=(
-                partial(
-                    param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_of_ep_groups.group, ep_groups.group, load_module_func
+    # Wrap given block
+    if wrap_block_name is not None:
+        if "enc" in module_type or "dec" in module_type:
+            if is_moe_model:
+                moe_fsdp_args = dict(
+                    process_group=dp_of_ep_groups.group,
+                    sharding_strategy=sharding_strategy,
+                    mixed_precision=mixed_precision_policy,
+                    forward_prefetch=forward_prefetch,
+                    device_id=pp_device,
+                    param_init_fn=(
+                        partial(
+                            param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_of_ep_groups.group, ep_groups.group, load_module_func
+                        )
+                        if args.initialize_on_meta
+                        else None
+                    ),
+                    limit_all_gathers=True,
                 )
-                if args.initialize_on_meta
-                else None
-            ),
-            limit_all_gathers=True,
-        )
-        apply_fsdp(module, fsdp_args, [wrap_block_name[0]], True)
-        apply_fsdp(module, moe_fsdp_args, [wrap_block_name[1]], True)
-        return module
-    else:
-        # Wrap given block
-        if wrap_block_name is not None:
-            if "enc" in module_type or "dec" in module_type:
-                module = apply_fsdp(module, fsdp_args, wrap_block_name)
+                # Wrap MoE layer first
+                module = apply_fsdp(module, moe_fsdp_args, [wrap_block_name[1]], True)
+                for name, mod in module.named_modules():
+                    if isinstance(mod, FSDP):
+                        # Add gradient scaling for expert parameters.
+                        # Will be scaled before grad norm.
+                        # (Reference: megatron/core/distributed/distributed_data_parallel.py)
+                        # TODO: check the correctnees with fine-grained parallelism
+                        setattr(mod, "scaling_groups", (comm_group, dp_of_ep_groups.group))
+                module = apply_fsdp(module, fsdp_args, [wrap_block_name[0]], True)
             else:
-                module = apply_fsdp(module, fsdp_args, wrap_other_block_name)
-                # if not ('initialize_on_meta' in args and args.initialize_on_meta):
-                #     module = module.to(pp_device)
-
-                # if tied_wte_attr_names is not None:
-                #     if module_type == 'embed':
-                #         assert rhasattr(module.module, tied_wte_attr_names[0])
-                #         tied_module = rgetattr(module.module, tied_wte_attr_names[0])
-                #         rsetattr(module.module, tied_wte_attr_names[0], FSDP(tied_module, **fsdp_args))
-                #     elif module_type == 'cls':
-                #         assert rhasattr(module.module, tied_wte_attr_names[-1])
-                #         tied_module = rgetattr(module.module, tied_wte_attr_names[-1])
-                #         rsetattr(module.module, tied_wte_attr_names[-1], FSDP(tied_module, **fsdp_args))
-                # module = FSDP(module, **fsdp_args)
-            return module
+                module = apply_fsdp(module, fsdp_args, wrap_block_name)
+        else:
+            module = apply_fsdp(module, fsdp_args, wrap_other_block_name)
+        return module
     
     assert False
 
@@ -309,7 +301,6 @@ def wrap_modules_data_parallel(
     mixed_precision=torch.bfloat16,
     default_process_group=None,
     wrap_block_name=None,
-    wrap_block_pos=None,
     wrap_other_block_name=None,
     tp_groups=None,
     tp_of_ep_groups=None,
@@ -320,7 +311,7 @@ def wrap_modules_data_parallel(
     assert len(module_list) == len(dp_types)
     assert len(module_list) == len(dp_groups)
 
-    process_group = default_process_group if default_process_group is not None else dp_groups[0]
+    process_group = default_process_group.group if default_process_group is not None else torch.distributed.group.WORLD
     from galvatron.core import get_args
 
     args = get_args()
@@ -341,11 +332,10 @@ def wrap_modules_data_parallel(
             mixed_precision=mixed_precision,
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
-            wrap_block_pos=wrap_block_pos,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups[i],
-            tp_of_ep_groups=tp_of_ep_groups[i],
-            ep_groups=ep_groups[i],
+            tp_of_ep_groups=tp_of_ep_groups[i] if tp_of_ep_groups is not None else None,
+            ep_groups=ep_groups[i] if ep_groups is not None else None,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
             is_moe_model=args.is_moe_model,
@@ -360,18 +350,21 @@ def wrap_modules_data_parallel(
         param_dtype=mixed_precision,  # Param precision
         reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision,  # Gradient communication precision
         buffer_dtype=mixed_precision,  # Buffer precision
-        cast_forward_inputs=True,
-        cast_root_forward_inputs=True,
+        cast_forward_inputs=False,
+        cast_root_forward_inputs=False, # For rotary embedding
     )
+    forward_prefetch = True if args.is_moe_model else False # For MoE model, we explicitly prefetch the parameters
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
+    # Wrap router paramter into root FSDP with WORLD process group so that the grad of router can be reduce-scatter correctly
     fsdp_args = dict(
-        process_group=process_group.group,
+        process_group=process_group,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision_policy,
+        forward_prefetch=forward_prefetch,
         # backward_prefetch=backward_prefetch,
         device_id=pp_devices[0],
         param_init_fn=(
-            partial(param_init_fn, all_block_name, args.load, args.distributed_checkpoint, None, None)
+            partial(param_init_fn, all_block_name, args.load, args.distributed_checkpoint, None, None, load_module_func)
             if args.initialize_on_meta
             else None
         ),

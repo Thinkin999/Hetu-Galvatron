@@ -177,7 +177,6 @@ class PipelineParallel(nn.Module):
         dp_of_ep_groups=None,
         mixed_precision=torch.bfloat16,
         wrap_block_name=None,
-        wrap_block_pos=None,
         wrap_other_block_name=None,
         tp_groups=None,
         tp_of_ep_groups=None,
@@ -193,13 +192,19 @@ class PipelineParallel(nn.Module):
         dp_groups_cur_stage = dp_groups[self.stage_start_idx : self.stage_end_idx]
         pp_devices_cur_stage = [self.local_rank] * (self.stage_end_idx - self.stage_start_idx)
         tp_groups_cur_stage = tp_groups[self.stage_start_idx : self.stage_end_idx]
-        tp_of_ep_groups_cur_stage = tp_of_ep_groups[self.stage_start_idx : self.stage_end_idx]
-        ep_groups_cur_stage = ep_groups[self.stage_start_idx : self.stage_end_idx]
+        if tp_of_ep_groups is not None:
+           tp_of_ep_groups_cur_stage = tp_of_ep_groups[self.stage_start_idx : self.stage_end_idx]
+        else:
+            tp_of_ep_groups_cur_stage = None
+        if ep_groups is not None:
+            ep_groups_cur_stage = ep_groups[self.stage_start_idx : self.stage_end_idx]
+        else:
+            ep_groups_cur_stage = None
         if dp_of_ep_groups is not None:
             dp_of_ep_groups_cur_stage = dp_of_ep_groups[self.stage_start_idx : self.stage_end_idx]
         else:
             dp_of_ep_groups_cur_stage = None
-        default_process_group = dp_groups[0]
+        # default_process_group = dp_groups[0]
         self.model_cur_stage = wrap_modules_data_parallel(
             module_list=self.model_cur_stage,
             dp_types=dp_types_cur_stage,
@@ -208,9 +213,8 @@ class PipelineParallel(nn.Module):
             dp_of_ep_groups=dp_of_ep_groups_cur_stage,
             pp_devices=pp_devices_cur_stage,
             mixed_precision=mixed_precision,
-            default_process_group=default_process_group,
+            default_process_group=None,
             wrap_block_name=wrap_block_name,
-            wrap_block_pos=wrap_block_pos,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups_cur_stage,
             tp_of_ep_groups=tp_of_ep_groups_cur_stage,
@@ -265,6 +269,7 @@ class PipelineParallel(nn.Module):
                 idx += 1
 
     def set_last_batch(self, state):
+        self.model_cur_stage.last_batch = state
         for block in self.model_cur_stage:
             for m in block.modules():
                 if isinstance(m, FSDP):

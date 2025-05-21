@@ -286,7 +286,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     """
 
     def __init__(
-        self, num_local_experts: int, local_expert_indices: List[int], config: TransformerConfig, ep_group: dist.ProcessGroup = None, tp_of_ep_group: dist.ProcessGroup = None, tp_and_ep_group: dist.ProcessGroup = None
+        self, num_local_experts: int, local_expert_indices: List[int], config: TransformerConfig, ep_group: dist.ProcessGroup = None, tp_of_ep_group: dist.ProcessGroup = None, tp_and_ep_group: dist.ProcessGroup = None,
+        layer_number: int = None,
     ) -> None:
         """
         Initialize the AlltoAll token dispatcher.
@@ -297,6 +298,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             config (TransformerConfig): Configuration for the transformer model.
         """
         super().__init__(config=config, ep_group=ep_group, tp_of_ep_group=tp_of_ep_group, tp_and_ep_group=tp_and_ep_group)
+        self.layer_number = layer_number
         self.num_local_experts = num_local_experts
         assert config.num_moe_experts is not None
         self.num_experts = config.num_moe_experts

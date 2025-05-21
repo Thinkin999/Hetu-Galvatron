@@ -103,6 +103,7 @@ def overwrite_megatron_args(config, args):
     args.hidden_dropout = 0.0
     args.attention_dropout = 0.0
     args.add_bias_linear = False
+    args.add_qkv_bias = False
     args.swiglu = True
     args.position_embedding_type = "rope"
     args.apply_rope_fusion = True

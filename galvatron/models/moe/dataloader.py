@@ -163,6 +163,15 @@ def get_batch(data_iterator):
     args = get_args()
     batch = get_batch_on_this_tp_rank(data_iterator)
 
+    rotary_pos_emb = RotaryEmbedding(
+            args.hidden_size // args.num_attention_heads, 
+            args.rotary_percent, 
+            seq_len_interpolation_factor=args.rotary_seq_len_interpolation_factor,
+            rotary_base=args.rotary_base
+        )
+    rotary_embedding = rotary_pos_emb(
+                        args.seq_length
+                    )
     micro_lossmask = chunk_batch([batch["loss_mask"]], get_chunks(args))
     # print(f"Rank {torch.cuda.current_device()} with input {tokens}")
     if batch["tokens"] == None:
@@ -173,6 +182,7 @@ def get_batch(data_iterator):
             "position_ids": batch["position_ids"],
             "attention_mask": batch["attention_mask"],
             "labels": batch["labels"],
+            "rotary_embedding": rotary_embedding
         },
         partial(loss_func, micro_lossmask),
     )

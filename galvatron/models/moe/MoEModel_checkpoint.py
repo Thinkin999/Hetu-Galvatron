@@ -116,17 +116,18 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
                     weight.shape[1], rank, world_size
                 )
                 submodule.weight.copy_(weight[:, weight_start_index:weight_end_index].contiguous())
-        elif name.endswith("LayerNorm"):
-                weight = checkpoint["input_layernorm.weight"].to(device="cuda", dtype=torch.float32)
-                submodule.weight.copy_(weight)
+        elif name.endswith("LayerNorm") and not name.startswith("MLP"):
+            weight = checkpoint["input_layernorm.weight"].to(device="cuda", dtype=torch.float32)
+            submodule.weight.copy_(weight)
         elif name.endswith("MLPLayerNorm"):
-                weight = checkpoint["post_attention_layernorm.weight"].to(device="cuda", dtype=torch.float32)
-                submodule.weight.copy_(weight)
+            weight = checkpoint["post_attention_layernorm.weight"].to(device="cuda", dtype=torch.float32)
+            submodule.weight.copy_(weight)
         elif name.startswith("router"):
             weight = checkpoint["block_sparse_moe.gate.weight"].to(device="cuda", dtype=torch.float32)
             submodule.weight.copy_(weight)
         elif name.startswith("experts"):
             # Sequential
+            args = get_args()
             ep_world_size = dist.get_world_size(ep_groups)
             ep_rank = dist.get_rank(ep_groups)
             expert_start_index, expert_end_index = VocabUtility.vocab_range_from_global_vocab_size(
@@ -152,6 +153,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
                         weight.shape[1], rank, world_size
                     )
                     submodule.weight.copy_(weight[:, weight_start_index:weight_end_index].contiguous())
+            # TODO: GroupGEMM
 
 
 @torch.no_grad()
