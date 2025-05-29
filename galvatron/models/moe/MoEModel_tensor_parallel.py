@@ -95,6 +95,7 @@ class MoERouter(nn.Module):
         megatron_config = core_transformer_config_from_args(args)
         self.idx = layer_number
         self.router = TopKRouter(config=megatron_config)
+        self.router.layer_number = layer_number
 
     def forward(self, hidden_states):
         if hasattr(self, "predict"):
@@ -156,6 +157,7 @@ class MoEMLP_tp(nn.Module):
                     linear_fc2=RowParallelLinear,
                 ),
                 self.tp_of_ep_group,
+                self.tp_and_ep_group,
             )
     def forward(self, hidden_states, mlp_residual, probs, routing_map):
         (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(

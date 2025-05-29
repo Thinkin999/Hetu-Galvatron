@@ -299,6 +299,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         """
         super().__init__(config=config, ep_group=ep_group, tp_of_ep_group=tp_of_ep_group, tp_and_ep_group=tp_and_ep_group)
         self.layer_number = layer_number
+        self.iter = 0
         self.num_local_experts = num_local_experts
         assert config.num_moe_experts is not None
         self.num_experts = config.num_moe_experts
@@ -436,6 +437,14 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 .reshape(self.ep_size, self.tp_size, self.num_experts)
                 .transpose(0, 1)
             )
+            # with torch.no_grad():
+            #     if torch.cuda.current_device() == 0:
+            #         import os
+            #         node_rank = os.getenv("ARNOLD_ID")
+            #         data_str = f"iter {self.iter}, layer {self.layer_number}, routing {num_global_tokens_per_expert.tolist()}\n"
+            #         with open("result/router_log%s.log"%node_rank, "a") as f:
+            #             f.write(data_str)
+            #         self.iter += 1
             # [tp_size, ep_size, num_experts] -> [tp_size, ep_size, num_local_experts]
             num_global_tokens_per_local_expert = num_global_tokens_per_expert[
                 :, :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1

@@ -1,6 +1,6 @@
 import torch
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
-from megatron.core.tensor_parallel.random import get_cuda_rng_tracker, get_data_parallel_rng_tracker_name
+from megatron.core.tensor_parallel.random import get_cuda_rng_tracker, get_data_parallel_rng_tracker_name, get_expert_parallel_rng_tracker_name, get_tensor_parallel_rng_tracker_name
 from megatron.training import get_args
 from galvatron.core.runtime.moe.router import TopKRouter
 
@@ -11,9 +11,14 @@ from .utils import init_method_normal
 
 def colummn_row_reset_parameters(self):
     args = get_args()
-    with get_cuda_rng_tracker().fork():
-        init_method = init_method_normal(args.init_method_std)
-        init_method(self.weight)
+    if getattr(self, "is_expert", False):
+        with get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name(self.tp_and_ep_group)):
+            init_method = init_method_normal(args.init_method_std)
+            init_method(self.weight)
+    else:
+        with get_cuda_rng_tracker().fork(get_tensor_parallel_rng_tracker_name(self.tp_group)):
+            init_method = init_method_normal(args.init_method_std)
+            init_method(self.weight)
     if hasattr(self, "bias") and self.bias != None:
         with torch.no_grad():
             self.bias.zero_()

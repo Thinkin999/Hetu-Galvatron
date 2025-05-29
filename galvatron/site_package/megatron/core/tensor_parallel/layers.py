@@ -768,11 +768,13 @@ class ColumnParallelLinear(torch.nn.Module):
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         sp_group: Optional[torch.distributed.ProcessGroup] = None,
+        tp_and_ep_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super(ColumnParallelLinear, self).__init__()
 
         self.tp_group = tp_group
         self.sp_group = sp_group
+        self.tp_and_ep_group = tp_and_ep_group
         # Keep input parameters
         self.input_size = input_size
         self.output_size = output_size
@@ -1079,11 +1081,13 @@ class RowParallelLinear(torch.nn.Module):
         is_expert: bool = False,
         tp_comm_buffer_name: str = None,  # Not used
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        tp_and_ep_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super(RowParallelLinear, self).__init__()
 
         # Keep input parameters
         self.tp_group = tp_group
+        self.tp_and_ep_group = tp_and_ep_group
         self.input_size = input_size
         self.output_size = output_size
         self.input_is_parallel = input_is_parallel

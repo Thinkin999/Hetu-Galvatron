@@ -109,10 +109,22 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
     _lazy_call(cb)
 
 
-def get_expert_parallel_rng_tracker_name():
+def get_expert_parallel_rng_tracker_name(group=None):
     """Get the expert parallel rng tracker name"""
     global _EXPERT_PARALLEL_RNG_TRACKER_NAME
-    return _EXPERT_PARALLEL_RNG_TRACKER_NAME
+    if group == None:
+        return _EXPERT_PARALLEL_RNG_TRACKER_NAME
+    else:
+        return _EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%torch.distributed.get_world_size(group)
+
+def get_tensor_parallel_rng_tracker_name(group=None):
+    """Get the tensor parallel rng tracker name"""
+    global _MODEL_PARALLEL_RNG_TRACKER_NAME
+    if group == None:
+        return _MODEL_PARALLEL_RNG_TRACKER_NAME
+    else:
+        return _MODEL_PARALLEL_RNG_TRACKER_NAME + "-%d"%torch.distributed.get_world_size(group)
+
 
 
 def get_data_parallel_rng_tracker_name():
@@ -172,6 +184,11 @@ class CudaRNGStatesTracker:
         the size of seed for compatibility."""
         self._is_initialized = True
         self.states_ = states
+    
+    def check(self, name):
+        if name not in self.states_:
+            return True
+        return False
 
     def add(self, name, seed):
         """Track the rng state."""
@@ -283,6 +300,45 @@ def initialize_rng_tracker(
     _CUDA_RNG_STATE_TRACKER = tracker_class(**tracker_kwargs)
     _CUDA_RNG_STATE_TRACKER_INITIALIZED = True
 
+
+def set_seed_with_group(
+    tp_groups: list = None,  
+    tp_and_ep_groups: list = None, 
+    seed: int = 1234,
+    te_rng_tracker: bool = False,
+    inference_rng_tracker: bool = False,
+    use_cudagraphable_rng: bool = False,
+    ):
+    # 917 is just for fun and any POSITIVE value will work.
+    data_parallel_seed = seed
+    offset = seed + 917
+    initialize_rng_tracker(te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng)
+    _CUDA_RNG_STATE_TRACKER.reset()
+
+    torch.cuda.manual_seed(data_parallel_seed)
+    _CUDA_RNG_STATE_TRACKER.add(_DATA_PARALLEL_RNG_TRACKER_NAME, data_parallel_seed)
+
+    for group in tp_groups:
+        rank = torch.distributed.get_rank(group.group)
+        world_size = torch.distributed.get_world_size(group.group)
+        if _CUDA_RNG_STATE_TRACKER.check(_MODEL_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size):
+            _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size, offset + rank)
+            offset += 100
+
+    for group in tp_and_ep_groups:
+        rank = torch.distributed.get_rank(group.group)
+        world_size = torch.distributed.get_world_size(group.group)
+        if _CUDA_RNG_STATE_TRACKER.check(_EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size):
+            _CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size, offset + rank)
+            offset += 100
+
+    # Add defalut state.
+    _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, offset + get_tensor_model_parallel_rank())
+
+    expert_parallel_seed = (
+        offset + 1024 + 100 * get_expert_model_parallel_rank() + get_expert_tensor_parallel_rank()
+    )
+    _CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME, expert_parallel_seed)
 
 def get_cuda_rng_tracker(
     use_te_rng_tracker: bool = False,

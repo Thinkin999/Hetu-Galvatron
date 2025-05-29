@@ -110,6 +110,7 @@ class TopKRouter(Router):
         """
         super().__init__(config=config)
         self.predict_acc = []
+        self.iter = 0
 
         self.topk = self.config.moe_router_topk
         self.routing_type = self.config.moe_router_load_balancing_type
@@ -421,13 +422,17 @@ class TopKRouter(Router):
             with torch.no_grad():
                 self.local_tokens_per_expert += routing_map.sum(dim=0)
 
-        if hasattr(self, "predict_topk_map"):
-            with torch.no_grad():
-                now_predict_acc = torch.sum(
-                    torch.logical_and(self.predict_topk_map, routing_map)
-                ).float() / torch.sum(self.predict_topk_map).float()
-                torch.distributed.all_reduce(now_predict_acc, torch.distributed.ReduceOp.AVG)
-                self.predict_acc.append(now_predict_acc)
+        # if hasattr(self, "predict_topk_map"):
+        #     with torch.no_grad():
+        #         now_predict_acc = torch.sum(
+        #             torch.logical_and(self.predict_topk_map, routing_map)
+        #         ).float() / torch.sum(self.predict_topk_map).float()
+        #         torch.distributed.all_reduce(now_predict_acc, torch.distributed.ReduceOp.AVG)
+        #         self.predict_acc.append(now_predict_acc)
+        #         if torch.distributed.get_rank() == 0:
+        #             with open("result/predict_acc.txt", "a") as f:
+        #                 f.write(f"iter {self.iter}, layer {self.layer_number}, acc {self.predict_acc[-1].tolist()}\n")
+        #             self.iter += 1
 
         return scores, routing_map
 

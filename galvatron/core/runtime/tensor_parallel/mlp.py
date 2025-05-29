@@ -53,6 +53,7 @@ class MLP(MegatronModule):
         is_expert: bool = False,
         input_size: int = None,
         tp_group: dist.ProcessGroup = None,
+        tp_and_ep_group: dist.ProcessGroup = None,
     ):
         super().__init__(config=config)
 
@@ -83,6 +84,7 @@ class MLP(MegatronModule):
             is_expert=is_expert,
             tp_comm_buffer_name='fc1',
             tp_group=tp_group,
+            tp_and_ep_group=tp_and_ep_group,
         )
 
         self.activation_func = self.config.activation_func
@@ -99,6 +101,7 @@ class MLP(MegatronModule):
             is_expert=is_expert,
             tp_comm_buffer_name='fc2',
             tp_group=tp_group,
+            tp_and_ep_group=tp_and_ep_group,
         )
 
     def forward(self, hidden_states):
@@ -138,75 +141,3 @@ class MLP(MegatronModule):
         output, output_bias = self.linear_fc2(intermediate_parallel)
 
         return output, output_bias
-
-
-class MoEExpert(torch.nn.Module):
-    def __init__(self, args, tp_groups):
-        super().__init__()
-        self.args = args
-        self.tp_groups = tp_groups
-        
-        # 初始化linear层
-        self.linear_fc1 = ColumnParallelLinear(
-            args.hidden_size,
-            args.ffn_hidden_size,
-            gather_output=False,
-            init_method=init_method_normal(args.init_method_std),
-            bias=True,
-            tp_group=tp_groups,
-        )
-        
-        self.linear_fc2 = RowParallelLinear(
-            args.ffn_hidden_size,
-            args.hidden_size,
-            input_is_parallel=True,
-            init_method=init_method_normal(args.init_method_std),
-            bias=True,
-            tp_group=tp_groups,
-        )
-        
-        # 确保权重被正确初始化
-        for name, param in self.named_parameters():
-            if param.storage().size() == 0:
-                print(f"Warning: {name} has zero storage size")
-                param.storage().resize_(param.numel())
-                # 显式分配内存
-                param.data = param.data.clone()
-                
-    def forward(self, hidden_states):
-        # 在forward开始时检查权重
-        for name, param in self.named_parameters():
-            if param.storage().size() == 0:
-                print(f"Warning: {name} has zero storage size")
-                param.storage().resize_(param.numel())
-                # 显式分配内存
-                param.data = param.data.clone()
-                
-        # 确保输入张量有内存
-        if hidden_states.storage().size() == 0:
-            print(f"Warning: hidden_states has zero storage size")
-            hidden_states = hidden_states.clone()
-                
-        # 原有的forward逻辑
-        intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
-        
-        # 检查中间结果
-        if intermediate_parallel.storage().size() == 0:
-            print(f"Warning: intermediate_parallel has zero storage size")
-            intermediate_parallel = intermediate_parallel.clone()
-            
-        intermediate_parallel = F.silu(intermediate_parallel)
-        
-        # 检查激活后的结果
-        if intermediate_parallel.storage().size() == 0:
-            print(f"Warning: activated intermediate_parallel has zero storage size")
-            intermediate_parallel = intermediate_parallel.clone()
-            
-        output, output_bias = self.linear_fc2(intermediate_parallel)
-        
-        # 检查最终输出
-        if output.storage().size() == 0:
-            print(f"Warning: output has zero storage size")
-            output = output.clone()
-            
-        return output

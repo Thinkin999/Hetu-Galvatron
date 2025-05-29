@@ -17,6 +17,8 @@ from .parallel import wrap_modules_relocation
 from .pipeline.grad_reduce import _finalize_params_bf16, _register_post_backward_hook_bf16
 from .utils import get_layernorm_offset
 
+from megatron.core.tensor_parallel.random import set_seed_with_group
+
 version_str = torch.__version__
 version_major, version_minor, _ = version_str.split(".")
 version_major, version_minor = int(version_major), int(version_minor)
@@ -160,6 +162,7 @@ def construct_hybrid_parallel_model_api(
         show_rank=0,
     )
 
+    # [Step 1] Construct Tensor Parallel Model based on tp_groups using model-specific TP function
     use_hf = args.shape_order == "SBH"
     model_args = {
         "model": model,
@@ -170,6 +173,10 @@ def construct_hybrid_parallel_model_api(
         model_args.update({
             "sp_groups_enc": sp_groups_whole,
         })
+        set_seed_with_group(
+            tp_groups=tp_groups_whole,
+            tp_and_ep_groups=tp_and_ep_groups_whole,
+        )
     if hp_configs_whole["is_moe_model"]:
         model_args.update({
             "ep_groups_enc": ep_groups_whole,
