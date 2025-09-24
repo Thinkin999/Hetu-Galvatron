@@ -208,8 +208,33 @@ def galvatron_training_args(parser, use_megatron=True):
     if not use_megatron:
         group.add_argument("--lr", type=float, default=1e-4, help="Learning rate of adam")
         group.add_argument("--gpu_id", type=int, default=0, help="Id of GPU to run.")
-        group.add_argument("--local-rank", type=int, default=0, help="Local rank.")
     else:
-        group.add_argument("--local-rank", type=int, default=-1, help="Local rank.")
         group.add_argument("--no-shared-storage", action="store_false", dest="shared_storage", help="Cluster is not shared storage.")
+    
+    # MoE arguments
+    group.add_argument(
+        "--is_moe_model",
+        action="store_true",
+        help="Whether to use MoE.",
+    )
+    group.add_argument(
+        "--set_experts_manually",
+        type=int,
+        default=0,
+        help="Whether to set experts config manually (doesn't overwrite other model configs).",
+    )
+    group.add_argument(
+        "--global_ep_deg",
+        type=int,
+        default=1,
+        help="Experts parallel degree.",
+    )
+    
+    group.add_argument(
+        "--global_tp_of_ep_deg",
+        type=int,
+        default=1,
+        help="Tensor parallel degree of experts.",
+    )
+
     return parser

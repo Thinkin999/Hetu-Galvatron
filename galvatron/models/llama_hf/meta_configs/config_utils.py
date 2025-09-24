@@ -99,6 +99,8 @@ def overwrite_megatron_args(config, args):
     args.attention_dropout = 0.0
     args.add_bias_linear = False
     args.swiglu = True
+    args.position_embedding_type = "rope"
+    args.apply_rope_fusion = True
     if getattr(args, "padded_vocab_size", None) is None:
         args.padded_vocab_size = config.vocab_size
         # args.padded_vocab_size = (config.vocab_size + args.make_vocab_size_divisible_by - 1 // args.make_vocab_size_divisible_by * args.make_vocab_size_divisible_by)

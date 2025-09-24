@@ -11,6 +11,12 @@ def galvatron_search_args(parser):
         "--set_seqlen_manually", type=int, default=0, help="Whether to set sequence length config manually (doesn't overwrite other model configs)."
     )
     group.add_argument(
+        "--set_experts_manually",
+        type=int,
+        default=0,
+        help="Whether to set experts config manually (doesn't overwrite other model configs).",
+    )
+    group.add_argument(
         "--num_nodes", type=int, default=1, help="Number of Nodes.",
     )
     group.add_argument(

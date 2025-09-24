@@ -17,6 +17,8 @@ from .parallel import wrap_modules_relocation
 from .pipeline.grad_reduce import _finalize_params_bf16, _register_post_backward_hook_bf16
 from .utils import get_layernorm_offset
 
+from megatron.core.tensor_parallel.random import set_seed_with_group
+
 version_str = torch.__version__
 version_major, version_minor, _ = version_str.split(".")
 version_major, version_minor = int(version_major), int(version_minor)
@@ -87,81 +89,6 @@ class GalvatronModel(nn.Module):
             loss = loss.item()
         return loss
 
-
-class GalvatronModelWrapper:
-    def __init__(self, args, wrap_block_names=[]):
-        self.args = args
-        self.wrap_block_names = wrap_block_names
-
-    # Wrap Galvatron Hybrid Parallel Model, need to be called after Galvatron is initialized
-    def wrap_model_hybrid_parallel(
-        self,
-        model,
-        model_config,
-        hybrid_parallel_configs,
-        model_info,
-        construct_sequential_model,
-        construct_tensor_parallel_model,
-    ):
-        return construct_hybrid_parallel_model_api(
-            model,
-            model_config,
-            self.args,
-            hybrid_parallel_configs,
-            model_info,
-            construct_sequential_model,
-            construct_tensor_parallel_model,
-            self.wrap_block_names,
-        )
-
-    # Wrap Data Parallel Model, can be called on any PyTorch Model even when Galvatron is not initilized
-    def wrap_model_data_parallel(
-        self,
-        model,
-        device,
-        dp_type="ddp",
-        mixed_precision="bf16",
-        comm_group=None,
-        initialize_on_meta=False,
-        backward_prefetch=True,
-    ):
-        from galvatron.core.parallel import wrap_model_data_parallel
-
-        mixed_precision = mixed_precision_dtype(mixed_precision)
-        return wrap_model_data_parallel(
-            model,
-            device,
-            self.wrap_block_names,
-            dp_type,
-            mixed_precision,
-            comm_group,
-            initialize_on_meta,
-            backward_prefetch,
-        )
-
-    # Wrap Activation Checkpoint Model, can be called on any PyTorch Model even when Galvatron is not initilized
-    def wrap_model_checkpoint(self, model):
-        from galvatron.core.parallel import wrap_model_checkpoint
-
-        return wrap_model_checkpoint(model, self.wrap_block_names)
-
-'''
- hybrid_parallel_configs = {
-        "pp_deg": pp_deg,
-        "tp_sizes_enc": tp_sizes_enc,
-        "tp_consecutive_flags": tp_consecutive_flags,
-        "cp_sizes_enc": cp_sizes_enc,
-        "dp_types_enc": dp_types_enc,
-        "checkpoint_flags_enc": checkpoint_flags_enc,
-        "pp_ranks_enc": pp_ranks_enc,
-        "pp_division": pp_divide,
-        "use_sp": use_sp,
-        "vocab_tp": args.vocab_tp,
-        "vocab_sp": args.vocab_sp,
-        "default_dp_type": args.default_dp_type,
-        "global_train_batch_size": args.global_train_batch_size,
-    }
-'''
 def construct_hybrid_parallel_model_api(
     model,
     model_config,
@@ -207,12 +134,6 @@ def construct_hybrid_parallel_model_api(
         module_types, hp_configs, embed_sdp=args.embed_sdp, embed_ckpt=0, vocab_tp=args.vocab_tp, vocab_sp=args.vocab_sp, vocab_cp=args.vocab_cp
     )
 
-    # if args.use_ulysses:
-    #     hp_configs_whole['sp_sizes_whole'] = hp_configs_whole['tp_sizes_whole']
-    #     hp_configs_whole['tp_sizes_whole'] = [1] * len(hp_configs_whole['tp_sizes_whole'])
-    # else:
-    #     hp_configs_whole['sp_sizes_whole'] = [1] * len(hp_configs_whole['tp_sizes_whole'])
-
     # [Step 0] Generate communication groups
     (
         pp_group,
@@ -221,6 +142,10 @@ def construct_hybrid_parallel_model_api(
         cp_groups_whole,
         dp_groups_whole,
         seq_data_groups_whole,
+        ep_groups_whole,
+        tp_of_ep_groups_whole,
+        tp_and_ep_groups_whole,
+        dp_of_ep_groups_whole,
         # allgather_groups_whole,
         # split_groups_whole,
         allgather_tp_sp_groups_whole,
@@ -237,21 +162,47 @@ def construct_hybrid_parallel_model_api(
         hp_configs_whole["tp_sizes_whole"],
         hp_configs_whole["sp_sizes_whole"],
         hp_configs_whole["cp_sizes_whole"],
+        hp_configs_whole["ep_sizes_whole"],
+        hp_configs_whole["tp_of_ep_sizes_whole"],
         hp_configs_whole["pp_deg"],
         hp_configs_whole["tp_consec_whole"],
+        is_moe_model=hp_configs_whole["is_moe_model"],
         show_rank=0,
     )
 
     # [Step 1] Construct Tensor Parallel Model based on tp_groups using model-specific TP function
-    if args.initialize_on_meta and args.shape_order == "SBH":
+    use_hf = args.shape_order == "SBH"
+    model_args = {
+        "model": model,
+        "config": config,
+        "tp_groups_enc": tp_groups_whole,
+    }
+    if use_hf:
+        model_args.update({
+            "sp_groups_enc": sp_groups_whole,
+            "cp_groups_enc": cp_groups_whole,
+        })
+        set_seed_with_group(
+            tp_groups=tp_groups_whole,
+            tp_and_ep_groups=tp_and_ep_groups_whole,
+        )
+    if hp_configs_whole["is_moe_model"]:
+        model_args.update({
+            "ep_groups_enc": ep_groups_whole,
+            "tp_of_ep_groups_enc": tp_of_ep_groups_whole,
+            "tp_and_ep_groups_enc": tp_and_ep_groups_whole,
+        })
+    if args.initialize_on_meta and use_hf:
         with init_empty_weights(meta_init_buffer):
-                model = construct_tensor_parallel_model(model, config, tp_groups_whole, sp_groups_whole, cp_groups_whole)
-    elif args.shape_order == "SBH":
-            model = construct_tensor_parallel_model(model, config, tp_groups_whole, sp_groups_whole, cp_groups_whole)
+            model = construct_tensor_parallel_model(**model_args)
+    elif use_hf:
+        model = construct_tensor_parallel_model(**model_args)
     else:
-        #TODO: FA model does not support cp!
+        # TODO: FA model does not support cp!
         assert not args.use_ulysses, "FA model does not support ulysses!"
-        model = construct_tensor_parallel_model(model, config, tp_groups_whole)
+        if hp_configs_whole["is_moe_model"]:
+            assert False, "FA model does not support MoE!"
+        model = construct_tensor_parallel_model(**model_args)
 
     # [Step 2] Construct Sequantial model using model-specific sequential function
     if args.initialize_on_meta and args.shape_order == "SBH":
@@ -293,10 +244,13 @@ def construct_hybrid_parallel_model_api(
         hp_configs_whole["dp_types_whole"],
         seq_data_groups_whole,
         module_types=module_types,
+        dp_of_ep_groups=dp_of_ep_groups_whole,
         mixed_precision=mixed_precision_dtype(args.mixed_precision),
         wrap_block_name=wrap_block_name,
         wrap_other_block_name=wrap_other_block_name,
         tp_groups=tp_groups_whole,
+        tp_of_ep_groups=tp_of_ep_groups_whole,
+        ep_groups=ep_groups_whole,
         all_block_name=all_block_name,
         load_module_func=load_module_func,
     )

@@ -127,7 +127,8 @@ def convert_checkpoints_bert_mlm(input_checkpoint_path, output_dir):
             else:
                 existing_params = params
             torch.save(existing_params, layer_file)
-            print(f"Saved parameters for {layer_name} to {layer_file}")
+            key_list = [key for key in params]
+            print(f"Saved parameters for {layer_name} to {layer_file}, parameters_list: {key_list}")
 
 def main():
     parser = argparse.ArgumentParser(description="Convert large checkpoints to smaller checkpoints by layer.")

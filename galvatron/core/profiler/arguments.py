@@ -23,6 +23,12 @@ def galvatron_profile_args(parser):
         help="Whether to set sequence length config manually (doesn't overwrite other model configs).",
     )
     group.add_argument(
+        "--set_experts_manually",
+        type=int,
+        default=0,
+        help="Whether to set experts config manually (doesn't overwrite other model configs).",
+    )
+    group.add_argument(
         "--profile_mode",
         type=str,
         default="static",
