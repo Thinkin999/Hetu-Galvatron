@@ -76,8 +76,8 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
                 print("   global_batch_size =", bsz)
             if args.chunks != chunks:
                 print("   chunks =", chunks)
-            if total_layer_num != len(tp_sizes_enc):
-                assert (False, "Layer_num in json config does not match layer_num in the model!")
+        if total_layer_num != len(tp_sizes_enc):
+            assert (False, "Layer_num in json config does not match layer_num in the model!")
         args.global_train_batch_size = bsz
         args.chunks = chunks
         args.pp_deg = pp_deg

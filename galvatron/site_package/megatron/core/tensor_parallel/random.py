@@ -325,12 +325,13 @@ def set_seed_with_group(
             _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size, offset + rank)
             offset += 100
 
-    for group in tp_and_ep_groups:
-        rank = torch.distributed.get_rank(group.group)
-        world_size = torch.distributed.get_world_size(group.group)
-        if _CUDA_RNG_STATE_TRACKER.check(_EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size):
-            _CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size, offset + rank)
-            offset += 100
+    if tp_and_ep_groups is not None:
+        for group in tp_and_ep_groups:
+            rank = torch.distributed.get_rank(group.group)
+            world_size = torch.distributed.get_world_size(group.group)
+            if _CUDA_RNG_STATE_TRACKER.check(_EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size):
+                _CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME + "-%d"%world_size, offset + rank)
+                offset += 100
 
     # Add defalut state.
     _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, offset + get_tensor_model_parallel_rank())

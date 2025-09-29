@@ -23,10 +23,10 @@ MODEL_ARGS="
     --set_model_config_manually 0 \
     --set_layernum_manually 1 \
     --set_seqlen_manually 1 \
-    --set_expert_num_manually 0 \
+    --set_experts_manually 0 \
     --vocab_size 32000 \
     --hidden_size 4096 \
-    --num_hidden_layers 8 \
+    --num_hidden_layers 4 \
     --num_attention_heads 32 \
     --seq_length 2048"
 
@@ -58,8 +58,10 @@ DATA_ARGS="
 "
 
 CKPT_ARGS="
-    --load /home/pkuhetu/lxy/checkpoints/llama2-7b-chat-hf-split
 "
+# CKPT_ARGS="
+#     --load /home/pkuhetu/lxy/checkpoints/llama2-7b-chat-hf-split
+# "
 
 # CKPT_ARGS="
 #     --save /home/pkuhetu/lxy/checkpoints/galvatron_save_llama
@@ -74,13 +76,15 @@ CKPT_ARGS="
 
 PARALLEL_ARGS="
     --pp_deg 1 \
-    --global_tp_deg 8 \
+    --global_tp_deg 4 \
     --global_tp_consec 1 \
     --global_ep_deg 8 \
-    --global_tp_of_ep_deg 8 \
+    --global_tp_of_ep_deg 1 \
+    --global_cp_deg 2 \
     --sdp 1 \
     --global_checkpoint 1 \
-    --vocab_tp 8 \
+    --vocab_tp 4 \
+    --vocab_cp 2 \
     --chunks 8 \
     --pipeline_type pipedream_flush \
     --default_dp_type zero2 \

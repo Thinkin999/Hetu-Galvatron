@@ -156,8 +156,7 @@ def construct_hybrid_parallel_model_api(
         split_tp_sp_cp_groups_whole,
         fused_allgather_groups_whole,
         fused_split_groups_whole,
-        embedding_group,
-        vtp_data_group
+        embedding_group
     ) = gen_comm_groups(
         hp_configs_whole["tp_sizes_whole"],
         hp_configs_whole["sp_sizes_whole"],
@@ -276,5 +275,4 @@ def construct_hybrid_parallel_model_api(
     model.cp_groups_whole = cp_groups_whole
     model.sdp_groups_whole = seq_data_groups_whole
     model.hybrid_parallel_configs = hybrid_parallel_configs
-    model.vtp_data_group = vtp_data_group
     return model

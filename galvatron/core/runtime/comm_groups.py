@@ -240,7 +240,7 @@ def gen_embedding_group_dist(pp_size, all_pp_groups, to_print=True):
         show_groups(all_embedding_groups)
     return embedding_group
 
-#sequence group = megatron sp group(tp group) + cp group or ulysses sp group + cp group
+# sequence group = megatron sp group(tp group) + cp group or ulysses sp group + cp group
 def gen_sep_group_dist(tp_size, cp_size, pp_size, to_print=True, consecutive=True, world_ranks=None):
     world_ranks = sort_ranks(world_ranks)
     rank, world_size = torch.distributed.get_rank(), get_world_size(world_ranks)
@@ -465,7 +465,7 @@ def get_dp_of_ep_group_dict_dist(all_ep_sizes, all_tp_of_ep_sizes, pp_size, worl
     mul_sizes_set = list(set(all_mul_sizes))
     dp_of_ep_group_dict = {}
     for mul_size in mul_sizes_set:
-        dp_of_ep_group_dict[mul_size] = gen_dp_group_dist(mul_size, pp_size, to_print=False, world_ranks=world_ranks)
+        dp_of_ep_group_dict[mul_size] = gen_dp_group_dist(mul_size, 1, pp_size, to_print=False, world_ranks=world_ranks)
     return dp_of_ep_group_dict
 
 def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_tp_of_ep_sizes, pp_size, tp_consecutive_flags, is_moe_model=False, show_rank=-1, world_ranks=None):
@@ -519,8 +519,6 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
             tp_of_ep_groups.append(tp_of_ep_groups_dict[all_tp_of_ep_sizes[i]])
             tp_and_ep_groups.append(tp_and_ep_groups_dict[all_ep_sizes[i] * all_tp_of_ep_sizes[i]])
             dp_of_ep_groups.append(dp_of_ep_groups_dict[all_ep_sizes[i] * all_tp_of_ep_sizes[i]])
-        
-    vtp_data_group = dp_groups[0] # TODO:this code may be modified in future
 
     for i in range(1, len(all_tp_sizes)):
         if all_tp_sizes[i - 1] != 1:
@@ -650,5 +648,4 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
         fused_allgather_groups,
         fused_split_groups,
         embedding_group,
-        vtp_data_group,
     )

@@ -19,23 +19,6 @@ from galvatron.core.runtime import ModelInfo, mixed_precision_dtype
 from galvatron.core.runtime.pipeline import PipeSequential
 from galvatron.core.runtime.tensor_parallel import colummn_row_reset_parameters
 
-
-def get_ltor_masks_and_position_ids(data):
-    """Build masks and position id for left to right model."""
-    micro_batch_size, seq_length = data.size()
-    att_mask_batch = 1
-    attention_mask = torch.tril(torch.ones((att_mask_batch, seq_length, seq_length), device=data.device)).view(
-        att_mask_batch, 1, seq_length, seq_length
-    )
-
-    # position_ids = torch.arange(seq_length, dtype=torch.long,
-    #                             device=data.device)
-    # position_ids = position_ids.unsqueeze(0).expand_as(data)
-    attention_mask = attention_mask < 0.5
-
-    return attention_mask  # , position_ids
-
-
 class MoEEmbeddings_(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -46,10 +29,12 @@ class MoEEmbeddings_(nn.Module):
         self.clone_scatter_output_in_embedding = args.clone_scatter_output_in_embedding
         self.tp_group = self.embed_tokens.tp_group
         self.sp_group = self.embed_tokens.sp_group
+        self.cp_group = self.embed_tokens.cp_group
+        self.cp_size = torch.distributed.get_world_size(self.cp_group) if self.cp_group is not None else 1
         self.vocab_sp = args.vocab_sp
         if self.vocab_sp:
             self.seq_start_index, self.seq_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-                args.seq_length,
+                args.seq_length // self.cp_size,
                 torch.distributed.get_rank(self.sp_group),
                 torch.distributed.get_world_size(self.sp_group),
             )
@@ -117,6 +102,8 @@ class MoECls_(nn.Module):
         self.sequence_parallel = get_args().sequence_parallel
         self.tp_group = model.lm_head.tp_group
         self.sp_group = model.lm_head.sp_group
+        self.cp_group = model.lm_head.cp_group
+        self.cp_size = torch.distributed.get_world_size(self.cp_group) if self.cp_group is not None else 1
         self.lm_head = MoELoss_(model.lm_head.weight, self.sequence_parallel, self.tp_group)
         self.clone_scatter_output_in_embedding = get_args().clone_scatter_output_in_embedding
         self.parallel_loss = parallel_loss
@@ -128,7 +115,7 @@ class MoECls_(nn.Module):
         self.vocab_sp = args.vocab_sp
         if self.vocab_sp:
             self.seq_start_index, self.seq_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-                self.seq_length,
+                self.seq_length // self.cp_size,
                 torch.distributed.get_rank(self.sp_group),
                 torch.distributed.get_world_size(self.sp_group),
             )

@@ -40,7 +40,7 @@ def train(args):
         print("Creating Dataset...")
 
     set_megatron_args_for_dataset(
-        args, model, model.sp_groups_whole[0] if args.vocab_sp else model.tp_groups_whole[0], model.dp_groups_whole[0]
+        args, model, model.sp_groups_whole[0] if args.vocab_sp else model.tp_groups_whole[0], model.dp_groups_whole[0], model.cp_groups_whole[0]
     )
     if local_rank == 0:
         _print_args("arguments", args)

@@ -109,7 +109,6 @@ class TopKRouter(Router):
             config (TransformerConfig): The configuration for the transformer model.
         """
         super().__init__(config=config)
-        self.predict_acc = []
         self.iter = 0
 
         self.topk = self.config.moe_router_topk
@@ -422,18 +421,6 @@ class TopKRouter(Router):
             with torch.no_grad():
                 self.local_tokens_per_expert += routing_map.sum(dim=0)
 
-        # if hasattr(self, "predict_topk_map"):
-        #     with torch.no_grad():
-        #         now_predict_acc = torch.sum(
-        #             torch.logical_and(self.predict_topk_map, routing_map)
-        #         ).float() / torch.sum(self.predict_topk_map).float()
-        #         torch.distributed.all_reduce(now_predict_acc, torch.distributed.ReduceOp.AVG)
-        #         self.predict_acc.append(now_predict_acc)
-        #         if torch.distributed.get_rank() == 0:
-        #             with open("result/predict_acc.txt", "a") as f:
-        #                 f.write(f"iter {self.iter}, layer {self.layer_number}, acc {self.predict_acc[-1].tolist()}\n")
-        #             self.iter += 1
-
         return scores, routing_map
 
     def forward(self, input: torch.Tensor):
@@ -452,13 +439,3 @@ class TopKRouter(Router):
         scores, routing_map = self.routing(logits)
 
         return scores, routing_map
-
-    @torch.no_grad()
-    def predict(self, input: torch.Tensor):
-        logits = self.gating(input)
-        seq_length, bsz = logits.shape[:2]
-        logits = logits.view(-1, self.config.num_moe_experts)
-        scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
-        scores, top_indices = torch.topk(scores, k=self.topk, dim=1)
-        self.predict_topk_map = torch.zeros_like(logits).int().scatter(1, top_indices, 1).bool()
-        return self.predict_topk_map

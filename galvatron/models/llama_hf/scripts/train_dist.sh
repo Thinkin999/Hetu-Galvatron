@@ -73,11 +73,13 @@ CKPT_ARGS="
 
 PARALLEL_ARGS="
     --pp_deg 1 \
-    --global_tp_deg 8 \
+    --global_tp_deg 4 \
     --global_tp_consec 1 \
+    --global_cp_deg 2 \
     --sdp 1 \
     --global_checkpoint 1 \
-    --vocab_tp 8 \
+    --vocab_tp 4 \
+    --vocab_cp 2 \
     --chunks 8 \
     --pipeline_type pipedream_flush \
     --default_dp_type zero2 \
@@ -87,4 +89,4 @@ PARALLEL_ARGS="
     --initialize_on_meta 1"
     # --galvatron_config_path ./configs/galvatron_config_hidden4096_head32_1nodes_8gpus_per_node_36GB_bf16_[tpconsec_off].json"
 
-${LAUNCHER} ${TRAINER} ${MODEL_ARGS} ${TRAIN_ARGS} ${PARALLEL_ARGS} ${DATA_ARGS} ${CKPT_ARGS}
+${LAUNCHER} ${TRAINER} ${MODEL_ARGS} ${TRAIN_ARGS} ${PARALLEL_ARGS} ${DATA_ARGS} # ${CKPT_ARGS}

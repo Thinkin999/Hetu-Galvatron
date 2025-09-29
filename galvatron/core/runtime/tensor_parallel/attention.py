@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 
 import torch
 from torch import Tensor
@@ -29,6 +29,7 @@ from megatron.core.utils import deprecate_inference_params, divide
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from galvatron.core.runtime.tensor_parallel.transformer import zigzag_ring_flash_attn_backward
 from megatron.training import get_args
 
 try:
@@ -71,6 +72,7 @@ class SelfAttentionSubmodules:
     core_attention: Union[ModuleSpec, type] = None
     flash_attention: Union[ModuleSpec, type] = None
     dist_attention: Union[ModuleSpec, type] = None
+    zigzag_ring_flash_attn: Union[ModuleSpec, type] = None
     linear_proj: Union[ModuleSpec, type] = None
     q_layernorm: Union[ModuleSpec, type] = None
     k_layernorm: Union[ModuleSpec, type] = None
@@ -107,6 +109,8 @@ class Attention(MegatronModule, ABC):
         cp_comm_type: str = None,
         tp_group: dist.ProcessGroup = None,
         sp_group: dist.ProcessGroup = None,
+        cp_group: dist.ProcessGroup = None,
+        cp_ranks: List[int] = None,
     ):
         super().__init__(config=config)
         args = get_args()
@@ -132,6 +136,14 @@ class Attention(MegatronModule, ABC):
             self.use_ulysses = True
         else:
             self.use_ulysses = False
+        if cp_group is None:
+            cp_world_size = 1
+        else:
+            cp_world_size = torch.distributed.get_world_size(cp_group)
+        if cp_world_size > 1:
+            self.use_zigzag_cp = True
+        else:
+            self.use_zigzag_cp = False
         self.hidden_size_per_attention_head = divide(
             self.query_projection_size, self.config.num_attention_heads
         )
@@ -157,20 +169,36 @@ class Attention(MegatronModule, ABC):
         if self.use_flash_attn:
             self.flash_attention = build_module(
                 submodules.flash_attention,
-                config=self.config,
                 causal=(attn_mask_type == AttnMaskType.causal),
                 attention_dropout=config.attention_dropout,
             )
         
+        if self.use_zigzag_cp:
+            assert args.use_flash_attn, "ZigzagRingFlashAttention requires use_flash_attn to be True"
+            assert self.attn_mask_type == AttnMaskType.causal, "ZigzagRingFlashAttention is designed for causal attention"
+            self.zigzag_ring_flash_attn = build_module(
+                submodules.zigzag_ring_flash_attn,
+                attention_dropout=config.attention_dropout,
+                cp_group=cp_group,
+                cp_ranks=cp_ranks,
+                causal=(attn_mask_type == AttnMaskType.causal)
+            )
+        
         if self.use_ulysses:
+            if self.use_zigzag_cp:
+                local_attention = self.zigzag_ring_flash_attn
+            elif self.use_flash_attn:
+                local_attention = self.flash_attention
+            else:
+                local_attention = self.core_attention
             assert self.config.num_query_groups % sp_world_size == 0
             self.dist_attn = build_module(
                 submodules.dist_attn,
-                config=self.config,
-                local_attention=self.flash_attention if self.use_flash_attn else self.core_attention,
+                local_attention=local_attention,
                 sequence_process_group=sp_group,
                 gather_idx=1 if self.use_flash_attn else 0,
             )
+        
 
         self.checkpoint_core_attention = self.config.recompute_granularity == 'selective'
 
@@ -748,6 +776,8 @@ class SelfAttention(Attention):
         cp_comm_type: str = None,
         tp_group: dist.ProcessGroup = None,
         sp_group: dist.ProcessGroup = None,
+        cp_group: dist.ProcessGroup = None,
+        cp_ranks: List[int] = None,
     ):
         super().__init__(
             config=config,
@@ -758,6 +788,8 @@ class SelfAttention(Attention):
             cp_comm_type=cp_comm_type,
             tp_group=tp_group,
             sp_group=sp_group,
+            cp_group=cp_group,
+            cp_ranks=cp_ranks,
         )
 
         self.linear_qkv = build_module(

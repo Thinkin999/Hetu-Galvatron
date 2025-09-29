@@ -269,6 +269,7 @@ def _fused_split_allgather_along_first_dim_with_sequence_parallel(
     split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
     fused_allgather_group, fused_split_group
 ):
+    # TODO: Add support for split_cp_group != allgather_cp_group
     from galvatron.core import get_args
 
     args = get_args()

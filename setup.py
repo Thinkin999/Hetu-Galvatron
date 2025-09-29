@@ -58,7 +58,8 @@ dp_core_ext = Extension(
 _deps = [
     "torch>=2.0.1",
     "torchvision>=0.15.2",
-    "transformers>=4.31.0",
+    "numpy<2.0.0",
+    "transformers==4.49.0",
     "h5py>=3.6.0",
     "attrs>=21.4.0",
     "yacs>=0.1.8",

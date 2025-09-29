@@ -6,11 +6,13 @@ import torch
 from megatron.core import mpu, tensor_parallel
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig
+from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.training import get_args, get_tokenizer, print_rank_0
 from megatron.training.training import build_train_valid_test_data_iterators
 from megatron.training.utils import (
     average_losses_across_data_parallel_group,
     get_batch_on_this_tp_rank,
+    get_batch_on_this_cp_rank,
     get_blend_and_blend_per_split,
 )
 from torch import Tensor
@@ -45,7 +47,8 @@ def random_collate_fn(batch):
         attention_mask = random_get_ltor_masks_and_position_ids(tokens)
     else:
         attention_mask = None
-    return tokens, {"attention_mask": attention_mask, "labels": labels}, None
+    rotary_embedding = None
+    return tokens, {"attention_mask": attention_mask, "labels": labels, "rotary_embedding": rotary_embedding}, None
 
 
 class DataLoaderForLlama(Dataset):
@@ -153,6 +156,10 @@ def get_batch(data_iterator):
     args = get_args()
     batch = get_batch_on_this_tp_rank(data_iterator)
     batch = get_batch_on_this_cp_rank(batch)
+
+    # TODO: Add cache for rotary embedding
+    rotary_embedding = None
+
     micro_lossmask = chunk_batch([batch["loss_mask"]], get_chunks(args))
     # print(f"Rank {torch.cuda.current_device()} with input {tokens}")
     if batch["tokens"] == None:
@@ -163,6 +170,7 @@ def get_batch(data_iterator):
             "position_ids": batch["position_ids"],
             "attention_mask": batch["attention_mask"],
             "labels": batch["labels"],
+            "rotary_embedding": rotary_embedding,
         },
         partial(loss_func, micro_lossmask),
     )
