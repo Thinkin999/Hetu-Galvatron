@@ -43,14 +43,13 @@ def _reverse_zigzag_transformation(input_, cp_world_size):
     output = restored_tensor.contiguous().view(restored_shape)
     return output
 
-def _split_along_first_dim_with_sequence_parallel(input_, split_tp_sp_group, split_cp_group, split_tp_sp_cp_group):
+def _split_along_first_dim_with_sequence_parallel(input_, split_cp_group, split_tp_sp_cp_group):
     """Split the tensor along its first dimension and keep the
     corresponding slice."""
     from galvatron.core import get_args
 
     args = get_args()
 
-    tp_sp_world_size = 1 if split_tp_sp_group is None else torch.distributed.get_world_size(group=split_tp_sp_group)
     cp_world_size = 1 if split_cp_group is None else torch.distributed.get_world_size(group=split_cp_group)
     tp_sp_cp_world_size = 1 if split_tp_sp_cp_group is None else torch.distributed.get_world_size(group=split_tp_sp_cp_group)
 
@@ -86,13 +85,12 @@ def _split_along_first_dim_with_sequence_parallel(input_, split_tp_sp_group, spl
 
     return output.contiguous()
 
-def _gather_along_first_dim_with_sequence_parallel(input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group):
+def _gather_along_first_dim_with_sequence_parallel(input_, allgather_cp_group, allgather_tp_sp_cp_group):
     """Gather tensors and concatinate along the first dimension."""
     from galvatron.core import get_args
 
     args = get_args()
 
-    tp_sp_world_size = 1 if allgather_tp_sp_group is None else torch.distributed.get_world_size(group=allgather_tp_sp_group)
     cp_world_size = 1 if allgather_cp_group is None else torch.distributed.get_world_size(group=allgather_cp_group)
     tp_sp_cp_world_size = 1 if allgather_tp_sp_cp_group is None else torch.distributed.get_world_size(group=allgather_tp_sp_cp_group)
     # Bypass the function if we are using only 1 GPU.
@@ -122,7 +120,6 @@ def _gather_along_first_dim_with_sequence_parallel(input_, allgather_tp_sp_group
         dim_size = output.size()[0]
         assert dim_size % tp_sp_cp_world_size == 0, "First dimension of the tensor should be divisible by tp*sp*cp parallel size"
         local_dim_size = dim_size // tp_sp_cp_world_size
-        #sp_rank = torch.distributed.get_rank(group=allgather_tp_sp_group)
         #print("device",torch.cuda.current_device(),"sp_rank",sp_rank)
         #cp_rank = torch.distributed.get_rank(group=allgather_cp_group)
         #print("device",torch.cuda.current_device(),"cp_rank",cp_rank)
@@ -177,22 +174,21 @@ class _Split(torch.autograd.Function):
     #     return _split_along_first_dim(input_, group)
 
     @staticmethod
-    def forward(ctx, input_, split_tp_sp_group, split_cp_group, split_tp_sp_cp_group, is_input):
-        ctx.split_tp_sp_group = split_tp_sp_group
+    def forward(ctx, input_, split_cp_group, split_tp_sp_cp_group, is_input):
         ctx.split_cp_group = split_cp_group
         ctx.split_tp_sp_cp_group = split_tp_sp_cp_group
         ctx.is_input = is_input
         if is_input is False:
             return _split_along_first_dim(input_, split_tp_sp_cp_group)
         else:
-            return _split_along_first_dim_with_sequence_parallel(input_, split_tp_sp_group, split_cp_group, split_tp_sp_cp_group)
+            return _split_along_first_dim_with_sequence_parallel(input_, split_cp_group, split_tp_sp_cp_group)
 
     @staticmethod
     def backward(ctx, grad_output):
         if ctx.is_input is False:
             return _gather_along_first_dim(grad_output, ctx.split_tp_sp_cp_group), None, None, None, None
         else:
-            return _gather_along_first_dim_with_sequence_parallel(grad_output, ctx.split_tp_sp_group, ctx.split_cp_group, ctx.split_tp_sp_cp_group), None, None, None, None
+            return _gather_along_first_dim_with_sequence_parallel(grad_output, ctx.split_cp_group, ctx.split_tp_sp_cp_group), None, None, None, None
 
 
 class _Gather(torch.autograd.Function):
@@ -203,34 +199,33 @@ class _Gather(torch.autograd.Function):
     #     return _gather_along_first_dim(input_)
 
     @staticmethod
-    def forward(ctx, input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, is_input):
-        ctx.allgather_tp_sp_group = allgather_tp_sp_group
+    def forward(ctx, input_, allgather_cp_group, allgather_tp_sp_cp_group, is_input):
         ctx.allgather_cp_group = allgather_cp_group
         ctx.allgather_tp_sp_cp_group = allgather_tp_sp_cp_group
         ctx.is_input = is_input
         if is_input is False:
             return _gather_along_first_dim(input_, allgather_tp_sp_cp_group)
         else:
-            return _gather_along_first_dim_with_sequence_parallel(input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group)
+            return _gather_along_first_dim_with_sequence_parallel(input_, allgather_cp_group, allgather_tp_sp_cp_group)
 
     @staticmethod
     def backward(ctx, grad_output):
         if ctx.is_input is False:
             return _split_along_first_dim(grad_output, ctx.allgather_tp_sp_cp_group), None, None, None, None
         else:
-            return _split_along_first_dim_with_sequence_parallel(grad_output, ctx.allgather_tp_sp_group, ctx.allgather_cp_group, ctx.allgather_tp_sp_cp_group), None, None, None, None
+            return _split_along_first_dim_with_sequence_parallel(grad_output, ctx.allgather_cp_group, ctx.allgather_tp_sp_cp_group), None, None, None, None
 
 
-def split_to_group(input_, split_tp_sp_group, split_cp_group, split_tp_sp_cp_group, is_input):
-    return _Split.apply(input_, split_tp_sp_group, split_cp_group, split_tp_sp_cp_group, is_input)
+def split_to_group(input_, split_cp_group, split_tp_sp_cp_group, is_input):
+    return _Split.apply(input_, split_cp_group, split_tp_sp_cp_group, is_input)
 
 
-def gather_from_group(input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, is_input):
-    return _Gather.apply(input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, is_input)
+def gather_from_group(input_, allgather_cp_group, allgather_tp_sp_cp_group, is_input):
+    return _Gather.apply(input_, allgather_cp_group, allgather_tp_sp_cp_group, is_input)
 
 def _fused_split_allgather_along_first_dim(
-    input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-    split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+    input_, allgather_cp_group, allgather_tp_sp_cp_group, 
+    split_cp_group, split_tp_sp_cp_group,
     fused_allgather_group, fused_split_group
 ):
 
@@ -267,10 +262,11 @@ def _fused_split_allgather_along_first_dim(
     return input_
 
 def _fused_split_allgather_along_first_dim_with_sequence_parallel(
-    input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-    split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+    input_, allgather_cp_group, allgather_tp_sp_cp_group, 
+    split_cp_group, split_tp_sp_cp_group,
     fused_allgather_group, fused_split_group
 ):
+    # TODO: Add support for split_cp_group != allgather_cp_group
     from galvatron.core import get_args
 
     args = get_args()
@@ -335,10 +331,8 @@ def _fused_split_allgather_along_first_dim_with_sequence_parallel(
     if args.sequence_parallel:
         dim_size = output.size()[0]
         tp_sp_cp_world_size = 1 if allgather_tp_sp_cp_group is None else torch.distributed.get_world_size(group=allgather_tp_sp_cp_group)
-        #tp_sp_world_size = 1 if allgather_tp_sp_group is None else torch.distributed.get_world_size(group=allgather_tp_sp_group)
         assert dim_size % tp_sp_cp_world_size == 0, "First dimension of the tensor should be divisible by tp*sp*cp parallel size"
         local_dim_size = dim_size // tp_sp_cp_world_size
-        #sp_rank = torch.distributed.get_rank(group=allgather_tp_sp_group)
         #cp_rank = torch.distributed.get_rank(group=allgather_cp_group)
         #dim_offset = sp_rank * local_dim_size + cp_rank * local_dim_size * tp_sp_world_size
         if tp_sp_cp_world_size > 1:
@@ -354,13 +348,11 @@ def _fused_split_allgather_along_first_dim_with_sequence_parallel(
 class _Fused_split_allgather(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input_, is_input, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-    split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
-    fused_allgather_group, fused_split_group):
-        ctx.allgather_tp_sp_group = allgather_tp_sp_group
+    def forward(ctx, input_, is_input, allgather_cp_group, allgather_tp_sp_cp_group, 
+                split_cp_group, split_tp_sp_cp_group,
+                fused_allgather_group, fused_split_group):
         ctx.allgather_cp_group = allgather_cp_group
         ctx.allgather_tp_sp_cp_group = allgather_tp_sp_cp_group
-        ctx.split_tp_sp_group = split_tp_sp_group
         ctx.split_cp_group = split_cp_group
         ctx.split_tp_sp_cp_group = split_tp_sp_cp_group
         ctx.fused_allgather_group = fused_allgather_group
@@ -368,14 +360,14 @@ class _Fused_split_allgather(torch.autograd.Function):
         ctx.is_input = is_input
         if is_input is False:
             return _fused_split_allgather_along_first_dim(
-                input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-                split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+                input_, allgather_cp_group, allgather_tp_sp_cp_group, 
+                split_cp_group, split_tp_sp_cp_group,
                 fused_allgather_group, fused_split_group
             )
         else:
             return _fused_split_allgather_along_first_dim_with_sequence_parallel(
-                input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-                split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+                input_, allgather_cp_group, allgather_tp_sp_cp_group, 
+                split_cp_group, split_tp_sp_cp_group,
                 fused_allgather_group, fused_split_group
             )
 
@@ -384,7 +376,7 @@ class _Fused_split_allgather(torch.autograd.Function):
         if ctx.is_input is False:
             return (
                 _fused_split_allgather_along_first_dim(
-                    grad_output, ctx.split_tp_sp_group, ctx.split_cp_group, ctx.split_tp_sp_cp_group, 
+                    grad_output, ctx.split_cp_group, ctx.split_tp_sp_cp_group, 
                     ctx.fused_split_group, ctx.fused_allgather_group
                 ),
                 None,
@@ -400,8 +392,8 @@ class _Fused_split_allgather(torch.autograd.Function):
         else:
             return (
                 _fused_split_allgather_along_first_dim_with_sequence_parallel(
-                    grad_output, ctx.split_tp_sp_group, ctx.split_cp_group, ctx.split_tp_sp_cp_group, 
-                    ctx.allgather_tp_sp_group, ctx.allgather_cp_group, ctx.allgather_tp_sp_cp_group,
+                    grad_output, ctx.split_cp_group, ctx.split_tp_sp_cp_group, 
+                    ctx.allgather_cp_group, ctx.allgather_tp_sp_cp_group,
                     ctx.fused_split_group, ctx.fused_allgather_group
                 ),
                 None,
@@ -416,11 +408,11 @@ class _Fused_split_allgather(torch.autograd.Function):
             )
 
 #We now use fused_split_allgather rather than unfused  split and all gather
-def fused_split_allgather(input_, is_input, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-    split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
-    fused_allgather_group, fused_split_group):
+def fused_split_allgather(input_, is_input, allgather_cp_group, allgather_tp_sp_cp_group, 
+                            split_cp_group, split_tp_sp_cp_group,
+                            fused_allgather_group, fused_split_group):
     return _Fused_split_allgather.apply(
-        input_, is_input, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-        split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+        input_, is_input, allgather_cp_group, allgather_tp_sp_cp_group, 
+        split_cp_group, split_tp_sp_cp_group,
         fused_allgather_group, fused_split_group
     )

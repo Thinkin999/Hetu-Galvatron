@@ -1,4 +1,6 @@
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 import logging
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -6,6 +8,13 @@ from torch import Tensor
 
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+
+try:
+    from megatron.core.extensions.transformer_engine import te_parallel_cross_entropy
+except:
+    te_parallel_cross_entropy = None
+from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
@@ -20,6 +29,44 @@ class LanguageModule(MegatronModule):
 
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__(config=config)
+        self._set_attention_backend()
+
+    # pylint: disable=line-too-long
+    def _set_attention_backend(self):
+        """Set attention backend
+
+        Transformer engine works based on optout. By default all three attention backend flags are set to 1. So if the user choses a particular attention backend we set the other two to 0. If the user choses local, we set all 3 TE env variables to 0.
+        """
+
+        def check_and_set_env_variable(
+            env_variable_name: str, expected_value: int, attn_type: AttnBackend
+        ) -> None:
+            current_value = os.getenv(env_variable_name)
+            assert current_value is None or current_value == str(
+                expected_value
+            ), f'{env_variable_name} set to {current_value}, but expected {expected_value} for attention backend type {attn_type.name}. unset NVTE_FLASH_ATTN, NVTE_FUSED_ATTN and NVTE_UNFUSED_ATTN. Use the --attention-backend argument if you want to choose between (flash/fused/unfused/auto/local). Default is auto.'
+            os.environ[env_variable_name] = str(expected_value)
+
+        if self.config.attention_backend == AttnBackend.local:
+            check_and_set_env_variable("NVTE_FLASH_ATTN", 0, AttnBackend.flash)
+            check_and_set_env_variable("NVTE_FUSED_ATTN", 0, AttnBackend.flash)
+            check_and_set_env_variable("NVTE_UNFUSED_ATTN", 0, AttnBackend.flash)
+        elif self.config.attention_backend == AttnBackend.flash:
+            check_and_set_env_variable("NVTE_FLASH_ATTN", 1, AttnBackend.flash)
+            check_and_set_env_variable("NVTE_FUSED_ATTN", 0, AttnBackend.flash)
+            check_and_set_env_variable("NVTE_UNFUSED_ATTN", 0, AttnBackend.flash)
+        elif self.config.attention_backend == AttnBackend.fused:
+            check_and_set_env_variable("NVTE_FLASH_ATTN", 0, AttnBackend.fused)
+            check_and_set_env_variable("NVTE_FUSED_ATTN", 1, AttnBackend.fused)
+            check_and_set_env_variable("NVTE_UNFUSED_ATTN", 0, AttnBackend.fused)
+        elif self.config.attention_backend == AttnBackend.unfused:
+            check_and_set_env_variable("NVTE_FLASH_ATTN", 0, AttnBackend.unfused)
+            check_and_set_env_variable("NVTE_FUSED_ATTN", 0, AttnBackend.unfused)
+            check_and_set_env_variable("NVTE_UNFUSED_ATTN", 1, AttnBackend.unfused)
+        elif self.config.attention_backend == AttnBackend.auto:
+            check_and_set_env_variable("NVTE_FLASH_ATTN", 1, AttnBackend.auto)
+            check_and_set_env_variable("NVTE_FUSED_ATTN", 1, AttnBackend.auto)
+            check_and_set_env_variable("NVTE_UNFUSED_ATTN", 1, AttnBackend.auto)
 
     def compute_language_model_loss(self, labels: Tensor, logits: Tensor) -> Tensor:
         """Computes the language model loss (Cross entropy across vocabulary)
@@ -33,7 +80,21 @@ class LanguageModule(MegatronModule):
         """
         # [b s] => [s b]
         labels = labels.transpose(0, 1).contiguous()
-        loss = tensor_parallel.vocab_parallel_cross_entropy(logits.float(), labels)
+        if self.config.cross_entropy_loss_fusion:
+            if self.config.cross_entropy_fusion_impl == 'te':
+                if te_parallel_cross_entropy is not None:
+                    labels = torch.as_strided(labels, labels.size(), (labels.size()[1], 1))
+                    loss = te_parallel_cross_entropy(
+                        logits, labels, parallel_state.get_tensor_model_parallel_group()
+                    )
+                else:
+                    raise RuntimeError("Trying to use a TE block when it's not present.")
+            elif self.config.cross_entropy_fusion_impl == 'native':
+                loss = fused_vocab_parallel_cross_entropy(
+                    logits, labels, parallel_state.get_tensor_model_parallel_group()
+                )
+        else:
+            loss = tensor_parallel.vocab_parallel_cross_entropy(logits, labels)
 
         # [s b] => [b, s]
         loss = loss.transpose(0, 1).contiguous()
@@ -53,27 +114,34 @@ class LanguageModule(MegatronModule):
         if self.post_process and self.output_layer.weight is not None:
             self.output_layer.weight.is_embedding_or_output_parameter = True
 
-        if not self.share_embeddings_and_output_weights:
+        # If share_embeddings_and_output_weights is True, we need to maintain duplicated
+        # embedding weights in post processing stage. If use Multi-Token Prediction (MTP),
+        # we also need to maintain duplicated embedding weights in mtp process stage.
+        # So we need to copy embedding weights from pre processing stage as initial parameters
+        # in these cases.
+        if not self.share_embeddings_and_output_weights and not getattr(
+            self.config, 'mtp_num_layers', 0
+        ):
             return
 
-        if self.pre_process and self.post_process:
+        if parallel_state.get_pipeline_model_parallel_world_size() == 1:
             # Zero out wgrad if sharing embeddings between two layers on same
             # pipeline stage to make sure grad accumulation into main_grad is
             # correct and does not include garbage values (e.g., from torch.empty).
             self.shared_embedding_or_output_weight().zero_out_wgrad = True
             return
 
-        if self.pre_process and not self.post_process:
-            assert parallel_state.is_pipeline_first_stage()
+        if parallel_state.is_pipeline_first_stage() and self.pre_process and not self.post_process:
             self.shared_embedding_or_output_weight().shared_embedding = True
 
-        if self.post_process and not self.pre_process:
+        if (self.post_process or getattr(self, 'mtp_process', False)) and not self.pre_process:
             assert not parallel_state.is_pipeline_first_stage()
-            # set word_embeddings weights to 0 here, then copy first
-            # stage's weights using all_reduce below.
-            self.output_layer.weight.data.fill_(0)
-            self.output_layer.weight.shared = True
-            self.output_layer.weight.shared_embedding = True
+            # set weights of the duplicated embedding to 0 here,
+            # then copy weights from pre processing stage using all_reduce below.
+            weight = self.shared_embedding_or_output_weight()
+            weight.data.fill_(0)
+            weight.shared = True
+            weight.shared_embedding = True
 
         # Parameters are shared between the word embeddings layers, and the
         # heads at the end of the model. In a pipelined setup with more than
@@ -126,7 +194,7 @@ class LanguageModule(MegatronModule):
         sharded_offsets: Tuple[Tuple[int, int, int]] = (),
         metadata: Optional[dict] = None,
     ) -> ShardedStateDict:
-        """ Sharded state dict implementation that handles the output layer weights tying.
+        """Sharded state dict implementation that handles the output layer weights tying.
 
         Args:
             prefix (str): Module name prefix.
@@ -181,6 +249,15 @@ class LanguageModule(MegatronModule):
 
         if self.pre_process:
             # Output layer is equivalent to the embedding already
+            return
+
+        # If use Multi-Token Prediction (MTP), we need maintain both embedding layer and output
+        # layer in mtp process stage. In this case, if share_embeddings_and_output_weights is True,
+        # the shared weights will be stored in embedding layer, and output layer will not have
+        # any weight.
+        if getattr(self, 'mtp_process', False):
+            # No output layer
+            assert output_layer_weight_key not in sharded_state_dict, sharded_state_dict.keys()
             return
 
         # Replace the default output layer with a one sharing the weights with the embedding

@@ -5,7 +5,7 @@ from functools import partial, reduce
 import megatron
 import torch.distributed
 from megatron.core import mpu
-from megatron.core.optimizer.clip_grads import clip_grad_norm_fp32
+from megatron.core.optimizer.clip_grads import get_grad_norm_fp32, clip_grad_by_total_norm_fp32
 from megatron.training.global_vars import rebuild_tokenizer
 from megatron.core.datasets.blended_megatron_dataset_builder import need_to_build_dataset
 from torch import distributed as dist
@@ -111,7 +111,7 @@ def get_layernorm_offset(model, layernorm_name=[]):
                     is_ln = True
                     break
             for param_name, param in _named_parameters_with_duplicates(submodule, recurse=False):
-                if is_ln or getattr(param, "sequence_parallel", False):
+                if is_ln: #  or getattr(param, "sequence_parallel", False):
                     ln_offset.append(offset)
                     ln_size.append(param.numel())
                 offset += param.numel()
@@ -124,12 +124,19 @@ def get_layernorm_offset(model, layernorm_name=[]):
 def clip_grad_norm(model, max_norm, norm_type=2):
     parameters = []
     grads_for_norm = []
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            # TODO: find a better way to keep the correctness
+            if isinstance(module, FSDP) and hasattr(module, "scaling_groups"):
+                module._handle.flat_param.grad *= 1 / (torch.distributed.get_world_size(module.scaling_groups[0]) / torch.distributed.get_world_size(module.scaling_groups[1]))
+    
     for name, params in model.named_parameters():
         parameters.append(params)
         grads_for_norm.append(params.grad)
 
-    total_norm = clip_grad_norm_fp32(parameters, grads_for_norm, max_norm, norm_type)
-    
+    total_norm = get_grad_norm_fp32(grads_for_norm, norm_type)
+    clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm)
+
     return total_norm
 
 
@@ -165,3 +172,4 @@ def get_optimizer_and_param_scheduler(model, args):
             print("Finish loading optimizer and param scheduler")
 
     return optimizer, opt_param_scheduler
+

@@ -6,3 +6,6 @@ build/
 .coverage
 .coveragerc
 coverage.xml
+*.log
+.eggs/
+*.tar.gz

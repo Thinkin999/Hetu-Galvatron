@@ -1,5 +1,6 @@
 from setuptools import setup, find_packages, Extension
 from setuptools.command.install import install
+from setuptools.command.develop import develop
 from setuptools.command.build_ext import build_ext
 import pathlib
 import os
@@ -17,6 +18,17 @@ here = pathlib.Path(__file__).parent.resolve()
 class CustomInstall(install):
     def run(self):
         install.run(self)
+
+        # custom install flash-attention cuda ops by running shell scripts
+        if FLASH_ATTN_INSTALL:
+            cwd = pathlib.Path.cwd()
+            
+            if fused_dense_lib is None or dropout_layer_norm is None or rotary_emb is None or xentropy_cuda_lib is None:
+                self.spawn(["bash", cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh"])
+
+class CustomDevelop(develop):
+    def run(self):
+        develop.run(self)
 
         # custom install flash-attention cuda ops by running shell scripts
         if FLASH_ATTN_INSTALL:
@@ -46,7 +58,8 @@ dp_core_ext = Extension(
 _deps = [
     "torch>=2.0.1",
     "torchvision>=0.15.2",
-    "transformers>=4.31.0",
+    "numpy<2.0.0",
+    "transformers==4.49.0",
     "h5py>=3.6.0",
     "attrs>=21.4.0",
     "yacs>=0.1.8",
@@ -89,6 +102,7 @@ setup(
     python_requires=">=3.8",
     cmdclass={
         "install": CustomInstall,
+        "develop": CustomDevelop,
         "build_ext": CustomBuildExt
     },
     install_requires=_deps,

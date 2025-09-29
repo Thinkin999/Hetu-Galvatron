@@ -43,14 +43,18 @@ def wrap_data_parallel(
     dp_type=None,
     dp_group=None,
     module_type="bert_enc",
+    dp_of_ep_groups=None,
     pp_device=None,
     mixed_precision=torch.bfloat16,
     pp_on=False,
     wrap_block_name=None,
     wrap_other_block_name=None,
     tp_groups=None,
+    tp_of_ep_groups=None,
+    ep_groups=None,
     all_block_name=None,
     load_module_func=None,
+    is_moe_model=False,
 ):
     if dp_type is None:
         return module
@@ -65,18 +69,22 @@ def wrap_data_parallel(
             pp_device,
             module_type,
             dp_group,
+            dp_of_ep_groups,
             fsdp_type=fsdp_type_dict[dp_type],
             mixed_precision=mixed_precision,
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups,
+            tp_of_ep_groups=tp_of_ep_groups,
+            ep_groups=ep_groups,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
+            is_moe_model=is_moe_model,
         )
 
 
-def param_init_fn(all_block_name, load, distributed_checkpoint, tp_groups, load_module_func, module):
+def param_init_fn(all_block_name, load, distributed_checkpoint, tp_groups, ep_groups, load_module_func, module):
     m = module
     if isinstance(m, tuple(all_block_name)):
         m.to_empty(device=torch.device("cuda"))
@@ -86,7 +94,7 @@ def param_init_fn(all_block_name, load, distributed_checkpoint, tp_groups, load_
                 if load == None:
                     submodule.reset_parameters()
                 else:
-                    load_module_func(load, tp_groups, name, submodule, m, distributed_checkpoint)
+                    load_module_func(load, tp_groups, name, submodule, m, distributed_checkpoint, ep_groups)
 
 
 def wrap_module_fsdp_manually(
@@ -94,14 +102,18 @@ def wrap_module_fsdp_manually(
     pp_device,
     module_type="bert_enc",
     dp_group=None,
+    dp_of_ep_groups=None,
     fsdp_type="zero3",
     mixed_precision=torch.bfloat16,
     pp_on=False,
     wrap_block_name=None,
     wrap_other_block_name=None,
     tp_groups=None,
+    tp_of_ep_groups=None,
+    ep_groups=None,
     all_block_name=None,
     load_module_func=None,
+    is_moe_model=False,
 ):
     comm_group = None if dp_group is None else dp_group.group
     sharding_strategy = {
@@ -117,95 +129,80 @@ def wrap_module_fsdp_manually(
         param_dtype=mixed_precision,  # Param precision
         reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision,  # Gradient communication precision
         buffer_dtype=mixed_precision,  # Buffer precision
-        cast_forward_inputs=True,
-        cast_root_forward_inputs=True,
+        cast_forward_inputs=False,
+        cast_root_forward_inputs=False,
     )
+    forward_prefetch = True if is_moe_model else False # For MoE model, we explicitly prefetch the parameters
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
     fsdp_args = dict(
         process_group=comm_group,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision_policy,
+        forward_prefetch=forward_prefetch,
         # backward_prefetch=backward_prefetch,
         device_id=pp_device,
         param_init_fn=(
             partial(
-                param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_groups.group, load_module_func
+                param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_groups.group, None, load_module_func
             )
             if args.initialize_on_meta
             else None
         ),
         limit_all_gathers=True,
     )
+
     # Wrap given block
     if wrap_block_name is not None:
         if "enc" in module_type or "dec" in module_type:
-            module = apply_fsdp(module, fsdp_args, wrap_block_name)
+            if is_moe_model:
+                moe_fsdp_args = dict(
+                    process_group=dp_of_ep_groups.group,
+                    sharding_strategy=sharding_strategy,
+                    mixed_precision=mixed_precision_policy,
+                    forward_prefetch=forward_prefetch,
+                    device_id=pp_device,
+                    param_init_fn=(
+                        partial(
+                            param_init_fn, all_block_name, args.load, args.distributed_checkpoint, tp_of_ep_groups.group, ep_groups.group, load_module_func
+                        )
+                        if args.initialize_on_meta
+                        else None
+                    ),
+                    limit_all_gathers=True,
+                )
+                # Wrap MoE layer first
+                module = apply_fsdp(module, moe_fsdp_args, [wrap_block_name[1]], True)
+                for name, mod in module.named_modules():
+                    if isinstance(mod, FSDP):
+                        # Add gradient scaling for expert parameters.
+                        # Will be scaled before grad norm.
+                        # (Reference: megatron/core/distributed/distributed_data_parallel.py)
+                        # TODO: check the correctnees with fine-grained parallelism
+                        setattr(mod, "scaling_groups", (comm_group, dp_of_ep_groups.group))
+                module = apply_fsdp(module, fsdp_args, [wrap_block_name[0]], True)
+            else:
+                module = apply_fsdp(module, fsdp_args, wrap_block_name)
         else:
             module = apply_fsdp(module, fsdp_args, wrap_other_block_name)
-            # if not ('initialize_on_meta' in args and args.initialize_on_meta):
-            #     module = module.to(pp_device)
-
-            # if tied_wte_attr_names is not None:
-            #     if module_type == 'embed':
-            #         assert rhasattr(module.module, tied_wte_attr_names[0])
-            #         tied_module = rgetattr(module.module, tied_wte_attr_names[0])
-            #         rsetattr(module.module, tied_wte_attr_names[0], FSDP(tied_module, **fsdp_args))
-            #     elif module_type == 'cls':
-            #         assert rhasattr(module.module, tied_wte_attr_names[-1])
-            #         tied_module = rgetattr(module.module, tied_wte_attr_names[-1])
-            #         rsetattr(module.module, tied_wte_attr_names[-1], FSDP(tied_module, **fsdp_args))
-            # module = FSDP(module, **fsdp_args)
         return module
+    
+    assert False
 
-    # Wrap manually
-    if module_type in ["bert_enc", "vit_enc"]:
-        sub_module = module.module.layer[0]
-        setattr(sub_module, "attention", FSDP(sub_module.attention, **fsdp_args))
-        setattr(sub_module, "mlp", FSDP(sub_module.mlp, **fsdp_args))
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["swin_enc"]:
-        sub_module = module.module.block
-        setattr(sub_module, "attention", FSDP(sub_module.attention, **fsdp_args))
-        setattr(sub_module, "intermediate", FSDP(sub_module.intermediate, **fsdp_args))
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["t5_enc"]:
-        sub_module = module.module.block.t5_block
-        setattr(
-            sub_module.layer[0], "SelfAttention", FSDP(sub_module.layer[0].SelfAttention.cuda(pp_device), **fsdp_args)
-        )
-        sub_module.layer[-1] = FSDP(sub_module.layer[-1].cuda(pp_device), **fsdp_args)
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["t5_dec"]:
-        module_ = module.module
-        sub_module = module_.block.t5_block
-        setattr(module_, "block", FSDP(module_.block.cuda(pp_device), **fsdp_args))
-        setattr(
-            sub_module.layer[0], "SelfAttention", FSDP(sub_module.layer[0].SelfAttention.cuda(pp_device), **fsdp_args)
-        )
-        setattr(
-            sub_module.layer[1],
-            "EncDecAttention",
-            FSDP(sub_module.layer[1].EncDecAttention.cuda(pp_device), **fsdp_args),
-        )
-        sub_module.layer[-1] = FSDP(sub_module.layer[-1].cuda(pp_device), **fsdp_args)
-        return FSDP(module, **fsdp_args)
-    elif module_type in ["gpt_dec"]:
-        module.module.layers[0] = FSDP(module.module.layers[0], **fsdp_args)
-        return FSDP(module, **fsdp_args)
+
+def apply_fsdp(model, fsdp_args, wrap_block_name, need_ignore=False):
+    if need_ignore:
+        ignored_modules = set()
+        for name, module in model.named_modules():
+            if isinstance(module, FSDP):
+                ignored_modules.add(module)
     else:
-        if "initialize_on_meta" in args and args.initialize_on_meta:
-            return FSDP(module, **fsdp_args)
-        else:
-            return FSDP(module.to(pp_device), **fsdp_args)
-
-
-def apply_fsdp(model, fsdp_args, wrap_block_name):
+        ignored_modules = set()
     check_fn = lambda submodule: (any(isinstance(submodule, block) for block in wrap_block_name))
     _recursive_wrap(
         module=model,
         auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=check_fn),
         wrapper_cls=FSDP,
-        ignored_modules=set(),
+        ignored_modules=ignored_modules,
         ignored_params=set(),
         only_wrap_children=True,
         **fsdp_args
@@ -246,17 +243,15 @@ def wrap_model_checkpoint(model, wrap_block_names=[]):
     return model
 
 
-def relocate_activations(input, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-    split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+def relocate_activations(input, allgather_cp_group, allgather_tp_sp_cp_group, 
+    split_cp_group, split_tp_sp_cp_group,
     fused_allgather_group, fused_split_group, is_input):
     #if fused_allgather_group is not None or fused_split_group is not None:
     input = fused_split_allgather(
         input,
         is_input,
-        getattr(allgather_tp_sp_group, "group", None),
         getattr(allgather_cp_group, "group", None),
         getattr(allgather_tp_sp_cp_group, "group", None),
-        getattr(split_tp_sp_group, "group", None),
         getattr(split_cp_group, "group", None),
         getattr(split_tp_sp_cp_group, "group", None),
         getattr(fused_allgather_group, "group", None),
@@ -264,12 +259,10 @@ def relocate_activations(input, allgather_tp_sp_group, allgather_cp_group, allga
     )
     # else:
     #     input = split_to_group(input, 
-    #         getattr(split_tp_sp_group, "group", None), 
     #         getattr(split_cp_group, "group", None), 
     #         getattr(split_tp_sp_cp_group, "group", None), 
     #         is_input)
     #     input = gather_from_group(input, 
-    #         getattr(allgather_tp_sp_group, "group", None), 
     #         getattr(allgather_cp_group, "group", None), 
     #         getattr(allgather_tp_sp_cp_group, "group", None), is_input)
 
@@ -277,22 +270,20 @@ def relocate_activations(input, allgather_tp_sp_group, allgather_cp_group, allga
 
 
 class Module_with_relocation(nn.Module):
-    def __init__(self, module, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
-        split_tp_sp_group, split_cp_group, split_tp_sp_cp_group,
+    def __init__(self, module, allgather_cp_group, allgather_tp_sp_cp_group, 
+        split_cp_group, split_tp_sp_cp_group,
         fused_allgather_group, fused_split_group):
         super().__init__()
         self.module = module
-        self.allgather_tp_sp_group = allgather_tp_sp_group
         self.allgather_cp_group = allgather_cp_group
         self.allgather_tp_sp_cp_group = allgather_tp_sp_cp_group
-        self.split_tp_sp_group = split_tp_sp_group
         self.split_cp_group = split_cp_group
         self.split_tp_sp_cp_group = split_tp_sp_cp_group
         self.fused_allgather_group = fused_allgather_group
         self.fused_split_group = fused_split_group
         self.relocate_activations = lambda x, y: relocate_activations(
-            x, self.allgather_tp_sp_group, self.allgather_cp_group, self.allgather_tp_sp_cp_group, 
-            self.split_tp_sp_group, self.split_cp_group, self.split_tp_sp_cp_group,
+            x, self.allgather_cp_group, self.allgather_tp_sp_cp_group, 
+            self.split_cp_group, self.split_tp_sp_cp_group,
             self.fused_allgather_group, self.fused_split_group, y
         )
         if hasattr(module, "get_extended_attention_mask"):
@@ -318,19 +309,22 @@ def wrap_modules_data_parallel(
     dp_types,
     dp_groups,
     module_types,
+    dp_of_ep_groups=None,
     pp_devices=None,
     mixed_precision=torch.bfloat16,
     default_process_group=None,
     wrap_block_name=None,
     wrap_other_block_name=None,
     tp_groups=None,
+    tp_of_ep_groups=None,
+    ep_groups=None,
     all_block_name=None,
     load_module_func=None,
 ):
     assert len(module_list) == len(dp_types)
     assert len(module_list) == len(dp_groups)
 
-    process_group = default_process_group if default_process_group is not None else dp_groups[0]
+    process_group = default_process_group.group if default_process_group is not None else torch.distributed.group.WORLD
     from galvatron.core import get_args
 
     args = get_args()
@@ -346,14 +340,18 @@ def wrap_modules_data_parallel(
             dp_types[i],
             dp_groups[i],
             module_type=module_types[i],
+            dp_of_ep_groups=dp_of_ep_groups[i] if dp_of_ep_groups is not None else None,
             pp_device=pp_device,
             mixed_precision=mixed_precision,
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
             wrap_other_block_name=wrap_other_block_name,
             tp_groups=tp_groups[i],
+            tp_of_ep_groups=tp_of_ep_groups[i] if tp_of_ep_groups is not None else None,
+            ep_groups=ep_groups[i] if ep_groups is not None else None,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
+            is_moe_model=args.is_moe_model,
         )
     args = get_args()
     sharding_strategy = {
@@ -365,18 +363,21 @@ def wrap_modules_data_parallel(
         param_dtype=mixed_precision,  # Param precision
         reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision,  # Gradient communication precision
         buffer_dtype=mixed_precision,  # Buffer precision
-        cast_forward_inputs=True,
-        cast_root_forward_inputs=True,
+        cast_forward_inputs=False,
+        cast_root_forward_inputs=False, # For rotary embedding
     )
+    forward_prefetch = True if args.is_moe_model else False # For MoE model, we explicitly prefetch the parameters
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
+    # Wrap router paramter into root FSDP with WORLD process group so that the grad of router can be reduce-scatter correctly
     fsdp_args = dict(
-        process_group=process_group.group,
+        process_group=process_group,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision_policy,
+        forward_prefetch=forward_prefetch,
         # backward_prefetch=backward_prefetch,
         device_id=pp_devices[0],
         param_init_fn=(
-            partial(param_init_fn, all_block_name, args.load, args.distributed_checkpoint, None, None)
+            partial(param_init_fn, all_block_name, args.load, args.distributed_checkpoint, None, None, load_module_func)
             if args.initialize_on_meta
             else None
         ),
@@ -432,20 +433,18 @@ def modules_to_devices(module_list, pp_devices):
         module_list[i].to("cuda:%d" % pp_devices[i])
 
 
-def wrap_modules_relocation(module_list, allgather_tp_sp_groups, allgather_cp_groups, allgather_tp_sp_cp_groups, 
-    split_tp_sp_groups, split_cp_groups, split_tp_sp_cp_groups, fused_allgather_groups, fused_split_groups):
-    assert len(module_list) == len(allgather_tp_sp_groups)
+def wrap_modules_relocation(module_list, allgather_cp_groups, allgather_tp_sp_cp_groups, 
+    split_cp_groups, split_tp_sp_cp_groups, fused_allgather_groups, fused_split_groups):
     assert len(module_list) == len(allgather_cp_groups)
     assert len(module_list) == len(allgather_tp_sp_cp_groups)
-    assert len(module_list) == len(split_tp_sp_groups)
     assert len(module_list) == len(split_cp_groups)
     assert len(module_list) == len(split_tp_sp_cp_groups)
     assert len(module_list) == len(fused_allgather_groups)
     assert len(module_list) == len(fused_split_groups)
     for i in range(len(module_list)):
         module_list[i] = Module_with_relocation(
-            module_list[i], allgather_tp_sp_groups[i], allgather_cp_groups[i], allgather_tp_sp_cp_groups[i], 
-            split_tp_sp_groups[i], split_cp_groups[i], split_tp_sp_cp_groups[i], 
+            module_list[i], allgather_cp_groups[i], allgather_tp_sp_cp_groups[i], 
+            split_cp_groups[i], split_tp_sp_cp_groups[i], 
             fused_allgather_groups[i], fused_split_groups[i]
         )
     return module_list

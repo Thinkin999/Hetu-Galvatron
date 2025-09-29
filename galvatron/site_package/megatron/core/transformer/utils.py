@@ -3,7 +3,7 @@
 """Utilities for transformer layers."""
 from functools import lru_cache
 from operator import itemgetter
-from typing import Any, Dict, Iterable, Iterator, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 import torch
 
@@ -32,6 +32,7 @@ def get_default_causal_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
 
+# pylint: disable=missing-function-docstring
 def attention_mask_func(attention_scores, attention_mask):
     attention_scores.masked_fill_(attention_mask, -10000.0)
     return attention_scores
@@ -43,11 +44,14 @@ def gelu_impl(x):
     return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * x * (1.0 + 0.044715 * x * x)))
 
 
+# pylint: disable=missing-function-docstring
 def openai_gelu(x):
     return gelu_impl(x)
 
 
-# This is actually Python equivalent of torch.nn.functional.gelu(), also with type hints for ONNX exporter
+# This is actually Python equivalent of torch.nn.functional.gelu(), also with
+# type hints for ONNX exporter
+# pylint: disable=missing-function-docstring
 @jit_fuser
 def erf_gelu(x):
     return (
@@ -97,12 +101,12 @@ def make_sharded_tensors_for_checkpoint(
         elif layer_name in tensor_parallel_layers_axis_map:
             tp_axis = tensor_parallel_layers_axis_map[layer_name]
             sharded_state_dict[layer_key] = make_tp_sharded_tensor_for_checkpoint(
-                tensor, layer_key, tp_axis, prepend_offsets=sharded_offsets,
+                tensor, layer_key, tp_axis, prepend_offsets=sharded_offsets
             )
 
         else:
             sharded_state_dict[layer_key] = make_sharded_tensor_for_checkpoint(
-                tensor, layer_key, prepend_offsets=sharded_offsets,
+                tensor, layer_key, prepend_offsets=sharded_offsets
             )
 
     return sharded_state_dict
@@ -115,7 +119,7 @@ def make_sharded_object_for_checkpoint(
     replica_id: Union[None, int, Tuple[int, ...]] = None,
     **kwargs,
 ):
-    """ Helper for instantiating a non-sharded ShardedObject (replicated across TP and DP group).
+    """Helper for instantiating a non-sharded ShardedObject (replicated across TP and DP group).
 
     Args:
         obj (object): any object to be sharded
@@ -125,6 +129,9 @@ def make_sharded_object_for_checkpoint(
             ShardedObject
         replica_id (Union[None, int, Tuple[int, ...]]): replica id
     """
+    is_obj_fully_sharded = hasattr(obj, 'fully_shard_param_local_index')
+    assert not is_obj_fully_sharded, f"Fully sharded object not supported: {key}"
+
     if replica_id is None:
         replica_id = (
             0,
@@ -138,7 +145,7 @@ def make_sharded_object_for_checkpoint(
 def _get_extra_state_offsets(
     sharded_offsets: Iterable[Tuple[int, int, int]]
 ) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
-    """ Turns ShardedTensor offsets into offsets suitable for ShardedObject. """
+    """Turns ShardedTensor offsets into offsets suitable for ShardedObject."""
     if sharded_offsets:
         sharded_offsets = sorted(sharded_offsets, key=itemgetter(0))  # sort by axis
         axis, extra_state_offset, extra_state_shape = zip(*sharded_offsets)
@@ -183,6 +190,6 @@ def sharded_state_dict_default(
     else:
         module_sd = module.state_dict(prefix='', keep_vars=True)
         module_sharded_sd = make_sharded_tensors_for_checkpoint(
-            module_sd, prefix, {}, sharded_offsets,
+            module_sd, prefix, {}, sharded_offsets
         )
     return module_sharded_sd

@@ -1,8 +1,13 @@
 import torch
 import torch.distributed
 import torch.nn as nn
+from megatron.core import mpu
 from megatron.core import tensor_parallel
-from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_tensor_model_parallel_region,
+    scatter_to_sequence_parallel_region,
+)
 from megatron.core.tensor_parallel.utils import VocabUtility
 
 from galvatron.core import get_args
@@ -82,7 +87,7 @@ class GPTEmbeddings_(nn.Module):
         # [b, s, h] -> [s, b, h]
         hidden_states = hidden_states.transpose(0, 1).contiguous()
         if self.sequence_parallel:
-            hidden_states = tensor_parallel.scatter_to_sequence_parallel_region_group(hidden_states, self.tp_group)
+            hidden_states = scatter_to_sequence_parallel_region(hidden_states, self.tp_group)
             # `scatter_to_sequence_parallel_region` returns a view, which prevents
             # the original tensor from being garbage collected. Clone to facilitate GC.
             # Has a small runtime cost (~0.5%).
@@ -126,7 +131,7 @@ class GPTLoss_(nn.Module):
         self.weight = nn.Parameter(weight.clone())
         self.sequence_parallel = sequence_parallel
         self.tp_group = tp_group
-        world_size = get_tensor_model_parallel_world_size_group(tp_group)
+        world_size = mpu.get_tensor_model_parallel_world_size(tp_group)
         if self.sequence_parallel and world_size <= 1:
             self.sequence_parallel = False
             # disable sp to avoid global buffer
@@ -137,7 +142,7 @@ class GPTLoss_(nn.Module):
             weight=self.weight,
             bias=None,
             gradient_accumulation_fusion=False,
-            async_grad_allreduce=False,
+            allreduce_dgrad=False,
             sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group,
         )
@@ -171,7 +176,7 @@ class GPTCls_(nn.Module):
             labels = labels[:, self.seq_start_index : self.seq_end_index].contiguous()
 
         if not self.sequence_parallel:
-            hidden_states = tensor_parallel.copy_to_tensor_model_parallel_region_group(hidden_states, self.tp_group)
+            hidden_states = copy_to_tensor_model_parallel_region(hidden_states, self.tp_group)
 
         logits_parallel = self.lm_head(hidden_states)
 
@@ -180,7 +185,7 @@ class GPTCls_(nn.Module):
 
         # loss = tensor_parallel.vocab_parallel_cross_entropy(output.float(), input_ids)
         if not self.parallel_loss:
-            output = tensor_parallel.gather_from_tensor_model_parallel_region_group(logits_parallel, self.tp_group)
+            output = gather_from_tensor_model_parallel_region(logits_parallel, self.tp_group)
             if not self.half_entropy:
                 logits = output.float()
             else:

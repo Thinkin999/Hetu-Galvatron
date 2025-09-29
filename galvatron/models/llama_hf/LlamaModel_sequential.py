@@ -4,30 +4,20 @@ import torch.nn as nn
 # from transformers.models.llama.modeling_llama import LlamaRMSNorm
 # from megatron.legacy.model.rms_norm import RMSNorm as LlamaRMSNorm
 from flash_attn.ops.rms_norm import RMSNorm as LlamaRMSNorm
+from megatron.core import mpu
 from megatron.core import tensor_parallel
-from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_tensor_model_parallel_region,
+    scatter_to_sequence_parallel_region,
+)
 from megatron.core.tensor_parallel.utils import VocabUtility
+from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
 
 from galvatron.core import get_args
 from galvatron.core.runtime import ModelInfo, mixed_precision_dtype
 from galvatron.core.runtime.pipeline import PipeSequential
 from galvatron.core.runtime.tensor_parallel import colummn_row_reset_parameters
-
-
-def get_ltor_masks_and_position_ids(data):
-    """Build masks and position id for left to right model."""
-    micro_batch_size, seq_length = data.size()
-    att_mask_batch = 1
-    attention_mask = torch.tril(torch.ones((att_mask_batch, seq_length, seq_length), device=data.device)).view(
-        att_mask_batch, 1, seq_length, seq_length
-    )
-
-    # position_ids = torch.arange(seq_length, dtype=torch.long,
-    #                             device=data.device)
-    # position_ids = position_ids.unsqueeze(0).expand_as(data)
-    attention_mask = attention_mask < 0.5
-
-    return attention_mask  # , position_ids
 
 class LlamaEmbeddings_(nn.Module):
     def __init__(self, model):
@@ -50,21 +40,14 @@ class LlamaEmbeddings_(nn.Module):
                 torch.distributed.get_world_size(self.sp_group),
             )
 
-    def forward(self, tokens, position_ids=None, attention_mask=None, labels=None):
+    def forward(self, tokens, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
         # tokens = input_ids[:, :-1].contiguous()
         # labels = input_ids[:, 1:].contiguous()
         if self.vocab_sp:
             tokens = tokens[:, self.seq_start_index : self.seq_end_index].contiguous()
+        
+        # [b, s] -> [s /cp / tp, b, h]
         hidden_states = self.embed_tokens(tokens)
-        # [b, s, h] -> [s, b, h]
-        hidden_states = hidden_states.transpose(0, 1).contiguous()
-        if self.sequence_parallel:
-            hidden_states = tensor_parallel.scatter_to_sequence_parallel_region_group(hidden_states, self.tp_group)
-            # `scatter_to_sequence_parallel_region` returns a view, which prevents
-            # the original tensor from being garbage collected. Clone to facilitate GC.
-            # Has a small runtime cost (~0.5%).
-            if self.clone_scatter_output_in_embedding:
-                hidden_states = hidden_states.clone()
         return hidden_states
 
 
@@ -75,9 +58,9 @@ class LlamaLayers_(nn.Module):
         self.layer = model.layers[layer_idx]
         self.layer_idx = layer_idx
 
-    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None):
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
         # attention_mask = get_ltor_masks_and_position_ids(input_ids)
-        hidden_states = self.layer(hidden_states, attention_mask=attention_mask)  # , position_ids = position_ids)
+        hidden_states = self.layer(hidden_states, attention_mask=attention_mask, rotary_embedding=rotary_embedding)  # , position_ids = position_ids)
         return hidden_states
 
 
@@ -86,7 +69,7 @@ class LlamaPreNorm_(nn.Module):
         super().__init__()
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None):
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -97,7 +80,7 @@ class LlamaLoss_(nn.Module):
         self.weight = nn.Parameter(weight.clone())
         self.sequence_parallel = sequence_parallel
         self.tp_group = tp_group
-        world_size = get_tensor_model_parallel_world_size_group(tp_group)
+        world_size = mpu.get_tensor_model_parallel_world_size(tp_group)
         if self.sequence_parallel and world_size <= 1:
             self.sequence_parallel = False
             # disable sp to avoid global buffer
@@ -108,7 +91,7 @@ class LlamaLoss_(nn.Module):
             weight=self.weight,
             bias=None,
             gradient_accumulation_fusion=False,
-            async_grad_allreduce=False,
+            allreduce_dgrad=False,
             sequence_parallel=self.sequence_parallel,
             tp_group=self.tp_group,
         )
@@ -134,16 +117,16 @@ class LlamaCls_(nn.Module):
         self.vocab_sp = args.vocab_sp
         if self.vocab_sp:
             self.seq_start_index, self.seq_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-                int(self.seq_length / self.cp_size),
+                self.seq_length // self.cp_size,
                 torch.distributed.get_rank(self.sp_group),
                 torch.distributed.get_world_size(self.sp_group),
             )
 
-    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None):
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
         if self.vocab_sp:
             labels = labels[:, self.seq_start_index : self.seq_end_index].contiguous()
         if not self.sequence_parallel:
-            hidden_states = tensor_parallel.copy_to_tensor_model_parallel_region_group(hidden_states, self.tp_group)
+            hidden_states = copy_to_tensor_model_parallel_region(hidden_states, self.tp_group)
 
         logits_parallel = self.lm_head(hidden_states)
 
@@ -151,8 +134,8 @@ class LlamaCls_(nn.Module):
         labels = labels.transpose(0, 1).contiguous()
 
         # loss = tensor_parallel.vocab_parallel_cross_entropy(output.float(), input_ids)
-        if not self.parallel_loss:#for random
-            output = tensor_parallel.gather_from_tensor_model_parallel_region_group(logits_parallel, self.tp_group)
+        if not self.parallel_loss:
+            output = gather_from_tensor_model_parallel_region(logits_parallel, self.tp_group)
             if not self.half_entropy:
                 logits = output.float()
             else:
@@ -171,16 +154,10 @@ class LlamaCls_(nn.Module):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
         else:
-            if not self.half_entropy:
-                loss = tensor_parallel.vocab_parallel_cross_entropy(
-                    logits_parallel.float(), labels, tp_group=self.tp_group
-                )
-            else:
-                loss = tensor_parallel.vocab_parallel_cross_entropy(logits_parallel, labels, tp_group=self.tp_group)
+            loss = fused_vocab_parallel_cross_entropy(logits_parallel, labels, self.half_entropy, tp_group=self.tp_group)
+            # loss = tensor_parallel.vocab_parallel_cross_entropy(logits_parallel, labels, self.half_entropy, tp_group=self.tp_group)
             if self.vocab_sp:
-                loss = tensor_parallel.gather_from_tensor_model_parallel_region_group(loss, self.sp_group) #* torch.distributed.get_world_size(self.sp_group)
-            # if self.cp_size > 1:
-            #     loss = tensor_parallel.gather_from_tensor_model_parallel_region_group(loss, self.cp_group)
+                loss = gather_from_tensor_model_parallel_region(loss, self.sp_group)
             # loss = loss.mean()
         loss = loss.transpose(0, 1).contiguous()
         return loss

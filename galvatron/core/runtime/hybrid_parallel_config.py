@@ -32,6 +32,8 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
         tp_consecutive_flags = [1] * total_layer_num
         cp_sizes_enc = [args.global_cp_deg] * total_layer_num if args.global_cp_deg > 0 else [1] * total_layer_num
         dp_types_enc = total_layer_num * [args.sdp]
+        ep_sizes_enc = total_layer_num * [args.global_ep_deg]
+        tp_of_ep_sizes_enc = total_layer_num * [args.global_tp_of_ep_deg]
         checkpoint_flags_enc = [args.global_checkpoint] * total_layer_num
         pp_divide = None
         if args.use_ulysses:
@@ -74,8 +76,8 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
                 print("   global_batch_size =", bsz)
             if args.chunks != chunks:
                 print("   chunks =", chunks)
-            if total_layer_num != len(tp_sizes_enc):
-                assert (False, "Layer_num in json config does not match layer_num in the model!")
+        if total_layer_num != len(tp_sizes_enc):
+            assert (False, "Layer_num in json config does not match layer_num in the model!")
         args.global_train_batch_size = bsz
         args.chunks = chunks
         args.pp_deg = pp_deg
@@ -93,11 +95,14 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
         args.global_train_batch_size % (world_size // pp_deg // min_tp // min_cp) == 0
     ), "global_train_batch_size should be multiple of world_size//pp_deg//min_tp//min_cp!"
     hybrid_parallel_configs = {
+        "is_moe_model": args.is_moe_model,
         "pp_deg": pp_deg,
         "tp_sizes_enc": tp_sizes_enc,
         "tp_consecutive_flags": tp_consecutive_flags,
         "cp_sizes_enc": cp_sizes_enc,
         "dp_types_enc": dp_types_enc,
+        "ep_sizes_enc": ep_sizes_enc,
+        "tp_of_ep_sizes_enc": tp_of_ep_sizes_enc,
         "checkpoint_flags_enc": checkpoint_flags_enc,
         "pp_ranks_enc": pp_ranks_enc,
         "pp_division": pp_divide,
@@ -135,6 +140,8 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
                 "   pp_deg: %d, tp_deg: %d, %s_deg: %d, cp_deg: %d, tp_consecutive_flag: %d, checkpoint_flag: %d"
                 % (pp_deg, tp_deg, dp_type, dp_deg, cp_deg, tp_consec, args.global_checkpoint)
             )
+            if args.is_moe_model:
+                print("   ep_deg: %d, tp_of_ep_deg: %d" % (args.global_ep_deg, args.global_tp_of_ep_deg))
             embed_sdp = ", embed_sdp: 1" if args.embed_sdp else ""
             print(
                 "   pipeline_type: %s, default_dp_type: %s, dtype: %s%s"
@@ -229,10 +236,13 @@ def print_hp_configs(hp_configs):
         print_hp_config(key, val)
     print("================================================================================")
 
+
 def hp_config_whole_model(module_types, hp_configs, embed_sdp=0, embed_ckpt=0, vocab_tp=1, vocab_sp=0, vocab_cp=1):
-    pp_deg, tp_sizes_enc, use_sp, tp_consecutive_flags, dp_types_enc, pp_ranks_enc, checkpoint_flags_enc, cp_sizes_enc  = (
+    pp_deg, tp_sizes_enc, ep_sizes_enc, tp_of_ep_sizes_enc, use_sp, tp_consecutive_flags, dp_types_enc, pp_ranks_enc, checkpoint_flags_enc, cp_sizes_enc = (
         hp_configs["pp_deg"],
         hp_configs["tp_sizes_enc"],
+        hp_configs["ep_sizes_enc"],
+        hp_configs["tp_of_ep_sizes_enc"],
         hp_configs["use_sp"],
         hp_configs["tp_consecutive_flags"],
         hp_configs["dp_types_enc"],
@@ -251,6 +261,8 @@ def hp_config_whole_model(module_types, hp_configs, embed_sdp=0, embed_ckpt=0, v
         "dp_types_whole",
         "pp_ranks_whole",
         "checkpoint_flags_whole",
+        "ep_sizes_whole",
+        "tp_of_ep_sizes_whole",
     ]
     for key in keys:
         hp_configs_whole[key] = []
@@ -269,22 +281,28 @@ def hp_config_whole_model(module_types, hp_configs, embed_sdp=0, embed_ckpt=0, v
             hp_configs_whole["pp_ranks_whole"].append(pp_ranks_enc[idx_enc])
             hp_configs_whole["tp_consec_whole"].append(tp_consecutive_flags[idx_enc])
             hp_configs_whole["checkpoint_flags_whole"].append(checkpoint_flags_enc[idx_enc])
+            hp_configs_whole["ep_sizes_whole"].append(ep_sizes_enc[idx_enc])
+            hp_configs_whole["tp_of_ep_sizes_whole"].append(tp_of_ep_sizes_enc[idx_enc])
             idx_enc += 1
-        else: #for embedding
+        else: # for embedding
             if vocab_sp == 1:
                 hp_configs_whole["sp_sizes_whole"].append(vocab_tp)
                 hp_configs_whole["tp_sizes_whole"].append(1)
             else:
                 hp_configs_whole["tp_sizes_whole"].append(vocab_tp)
                 hp_configs_whole["sp_sizes_whole"].append(1)
-            #hp_configs_whole["cp_sizes_whole"].append(cp_sizes_enc[idx_enc] if idx_enc < len(cp_sizes_enc) else cp_sizes_enc[-1]) 
+            # hp_configs_whole["cp_sizes_whole"].append(cp_sizes_enc[idx_enc] if idx_enc < len(cp_sizes_enc) else cp_sizes_enc[-1]) 
             hp_configs_whole["cp_sizes_whole"].append(vocab_cp)
-            hp_configs_whole["dp_types_whole"].append(embed_sdp)#embed_sdp: Apply SDP (zero-3) for Embeddings and cls
+            hp_configs_whole["dp_types_whole"].append(embed_sdp) # embed_sdp: Apply SDP (zero-3) for Embeddings and cls
             hp_configs_whole["pp_ranks_whole"].append(
                 pp_ranks_enc[idx_enc] if idx_enc < len(pp_ranks_enc) else pp_ranks_enc[-1]
             )
             hp_configs_whole["tp_consec_whole"].append(1)
             hp_configs_whole["checkpoint_flags_whole"].append(embed_ckpt)
+            # for padding
+            hp_configs_whole["ep_sizes_whole"].append(ep_sizes_enc[0 if idx_enc==0 else idx_enc-1])
+            hp_configs_whole["tp_of_ep_sizes_whole"].append(tp_of_ep_sizes_enc[0 if idx_enc==0 else idx_enc-1])
+            
 
     world_size = torch.distributed.get_world_size()
     hp_configs_whole["dp_sizes_whole"] = [
@@ -303,6 +321,7 @@ def hp_config_whole_model(module_types, hp_configs, embed_sdp=0, embed_ckpt=0, v
             if isinstance(hp_configs_whole[key], (list, tuple)):
                 test_dict[key + "_check"] = get_enc_groups(hp_configs_whole[key], module_types)
         # print_hp_configs(test_dict)
+    hp_configs_whole["is_moe_model"] = hp_configs["is_moe_model"]
     return hp_configs_whole
 
 

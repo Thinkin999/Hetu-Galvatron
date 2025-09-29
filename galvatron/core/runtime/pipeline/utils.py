@@ -46,7 +46,7 @@ def chunk_dict(kwargs, chunks):
     batches = [{} for _ in range(chunks)]
     num_chunks = -1
     for k, v in kwargs.items():
-        if torch.is_tensor(v) and not (k.endswith("_mask") and v.shape[0] == 1):
+        if torch.is_tensor(v) and not (k.endswith("_mask") and v.shape[0] == 1) and not k.startswith("rotary"):
             tensors = v.chunk(chunks)
             if num_chunks != -1 and num_chunks != len(tensors):
                 raise RuntimeError(
