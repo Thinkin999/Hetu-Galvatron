@@ -146,10 +146,6 @@ def construct_hybrid_parallel_model_api(
         tp_of_ep_groups_whole,
         tp_and_ep_groups_whole,
         dp_of_ep_groups_whole,
-        # allgather_groups_whole,
-        # split_groups_whole,
-        allgather_tp_sp_groups_whole,
-        split_tp_sp_groups_whole,
         allgather_cp_groups_whole,
         split_cp_groups_whole,
         allgather_tp_sp_cp_groups_whole,
@@ -212,8 +208,8 @@ def construct_hybrid_parallel_model_api(
 
     # [Step 3] Wrap Relocation modules if necessary
     model = wrap_modules_relocation(
-        model, allgather_tp_sp_groups_whole, allgather_cp_groups_whole, allgather_tp_sp_cp_groups_whole, 
-        split_tp_sp_groups_whole, split_cp_groups_whole, split_tp_sp_cp_groups_whole, 
+        model, allgather_cp_groups_whole, allgather_tp_sp_cp_groups_whole, 
+        split_cp_groups_whole, split_tp_sp_cp_groups_whole, 
         fused_allgather_groups_whole, fused_split_groups_whole
     )
     ln_offset, ln_size = get_layernorm_offset(model, layernorm_name)

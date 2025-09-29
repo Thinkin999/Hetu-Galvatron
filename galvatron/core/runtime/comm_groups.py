@@ -321,15 +321,12 @@ def get_sp_group_dict_dist(all_sp_sizes, pp_size, consecutive=True, world_ranks=
 #     return (tp_group_old, tp_group_new)
 
 # When we use ulysses sp, the tp size will be changed into sp size
-def gen_redistributed_group_with_cp(tp_size_old, tp_size_new, tp_consec_old, tp_consec_new, tp_group_old, tp_group_new,
-                                    cp_size_old, cp_size_new, cp_consec_old, cp_consec_new, cp_group_old, cp_group_new, ):
-    if tp_size_old == tp_size_new and tp_consec_old == tp_consec_new and cp_size_old == cp_size_new and cp_consec_old == cp_consec_new:
-        return (None, None, None, None)
-    tp_group_old = None if tp_size_old == 1 else tp_group_old
-    tp_group_new = None if tp_size_new == 1 else tp_group_new
+def gen_redistributed_group_with_cp(cp_size_old, cp_size_new, cp_consec_old, cp_consec_new, cp_group_old, cp_group_new, ):
+    if cp_size_old == cp_size_new and cp_consec_old == cp_consec_new:
+        return (None, None)
     cp_group_old = None if cp_size_old == 1 else cp_group_old
     cp_group_new = None if cp_size_new == 1 else cp_group_new
-    return (tp_group_old, tp_group_new, cp_group_new, cp_group_old)
+    return (cp_group_new, cp_group_old)
 
 # def gen_redistributed_group_with_cp(tp_size_old, tp_size_new, cp_size_old, cp_size_new, tp_group_old, tp_group_new, cp_group_old, cp_group_new):
 #     if tp_size_old * cp_size_old == tp_size_new * cp_size_new:
@@ -487,8 +484,7 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
         ep_groups, tp_of_ep_groups, tp_and_ep_groups, dp_of_ep_groups = [], [], [], []
     else:
         ep_groups, tp_of_ep_groups, tp_and_ep_groups, dp_of_ep_groups = None, None, None, None
-    # allgather_groups, split_groups = [None], [None]
-    allgather_tp_sp_groups, split_tp_sp_groups = [None], [None]
+
     allgather_cp_groups, split_cp_groups = [None], [None]
     allgather_tp_sp_cp_groups, split_tp_sp_cp_groups = [None], [None]
 
@@ -550,8 +546,7 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
         #     split_group, allgather_group, world_ranks=world_ranks
         # )
 
-        split_tp_sp_group, allgather_tp_sp_group, split_cp_group, allgather_cp_group = gen_redistributed_group_with_cp(
-            old_tp_size, new_tp_size, tp_consecutive_flags[i - 1], tp_consecutive_flags[i], old_tp_groups, new_tp_groups, 
+        split_cp_group, allgather_cp_group = gen_redistributed_group_with_cp(
             old_cp_size, new_cp_size, False, False, old_cp_groups, new_cp_groups)
         if old_tp_size == new_tp_size and old_cp_size == new_cp_size:
             split_tp_sp_cp_group = None
@@ -563,12 +558,6 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
         fused_split_group, fused_allgather_group = merge_redistributed_group(
             split_tp_sp_cp_group, allgather_tp_sp_cp_group, world_ranks=world_ranks
         )
-
-        # allgather_groups.append(allgather_group)
-        # split_groups.append(split_group)
-
-        allgather_tp_sp_groups.append(allgather_tp_sp_group)
-        split_tp_sp_groups.append(split_tp_sp_group)
 
         allgather_cp_groups.append(allgather_cp_group)
         split_cp_groups.append(split_cp_group)
@@ -600,10 +589,6 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
         show_groups(seq_data_groups)
         # print("Split groups for rank %d:" % show_rank)
         # show_groups(split_groups)
-        print("Split TP/SP groups for rank %d:" % show_rank)
-        show_groups(split_tp_sp_groups)
-        print("AllGather TP/SP groups for rank %d:" % show_rank)
-        show_groups(allgather_tp_sp_groups)
         print("Split CP groups for rank %d:" % show_rank)
         show_groups(split_cp_groups)
         print("AllGather CP groups for rank %d:" % show_rank)
@@ -639,8 +624,6 @@ def gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_
         dp_of_ep_groups,
         # allgather_groups,
         # split_groups,
-        allgather_tp_sp_groups,
-        split_tp_sp_groups,
         allgather_cp_groups,
         split_cp_groups,
         allgather_tp_sp_cp_groups,
