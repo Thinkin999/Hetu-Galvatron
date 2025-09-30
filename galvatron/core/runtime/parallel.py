@@ -324,7 +324,7 @@ def wrap_modules_data_parallel(
     assert len(module_list) == len(dp_types)
     assert len(module_list) == len(dp_groups)
 
-    process_group = default_process_group.group if default_process_group is not None else torch.distributed.group.WORLD
+    process_group = default_process_group.group if default_process_group is not None else dp_groups[0].group
     from galvatron.core import get_args
 
     args = get_args()
