@@ -236,5 +236,12 @@ def galvatron_training_args(parser, use_megatron=True):
         default=1,
         help="Tensor parallel degree of experts.",
     )
+    
+    group.add_argument(
+        "--profile_unit",
+        choices=["attention", "mlp", "all"],
+        default="all",
+        help="Profile granularity",
+    )
 
     return parser

@@ -8,6 +8,7 @@ from megatron.training.arguments import core_transformer_config_from_args
 from torch import nn
 
 from galvatron.core import get_args
+from galvatron.core.runtime.tensor_parallel import ParallelMLP
 from galvatron.core.runtime.tensor_parallel.mlp import MLPSubmodules
 from galvatron.core.runtime.tensor_parallel.attention import SelfAttention, SelfAttentionSubmodules
 from galvatron.core.runtime.tensor_parallel.attention_impl import DotProductAttention, FlashSelfOrCrossAttention, DistributedAttention, ZigzagRingFlashAttention
@@ -178,6 +179,7 @@ class MoEMLP_tp(nn.Module):
                 self.tp_of_ep_group,
                 self.tp_and_ep_group,
             )
+            
     def forward(self, hidden_states, mlp_residual, probs, routing_map):
         (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
                 hidden_states, probs, routing_map
@@ -211,20 +213,66 @@ class MoELayer_tp(nn.Module):
         layer_output = self.mlp(attention_output, mlp_residual, probs, routing_map)
         return layer_output
 
+class MoELayer_attention(nn.Module):
+    def __init__(self, config, layer_number, tp_group=None, sp_group=None, cp_group=None):
+        super().__init__()
+        self.attention = MoEAttention_tp(config, layer_number, tp_group, sp_group, cp_group)
+        self.idx = layer_number
+    
+    def forward(self, hidden_states, attention_mask=None, rotary_embedding=None):
+        attention_output, mlp_residual = self.attention(hidden_states, attention_mask, rotary_embedding)
+        return attention_output
+    
+class MoELayer_mlp(nn.Module):
+    def __init__(self, config, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None):
+        super().__init__()
+        megatron_config = core_transformer_config_from_args(get_args())
+        assert tp_of_ep_group is not None
+        self.mlp = ParallelMLP(config=megatron_config, is_expert=False, tp_group=tp_of_ep_group.group)
+        self.idx = layer_number
+        
+    def forward(self, hidden_states, attention_mask=None, rotary_embedding=None): # Adding attention_mask and rotary_embedding ensures input consistency when profiling the MLP layer independently
+        residual = hidden_states
+        hidden_states, mlp_bias = self.mlp(hidden_states)
+        hidden_states = hidden_states + residual
+        return hidden_states
 
 def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc, cp_groups_enc, ep_groups_enc, tp_of_ep_groups_enc, tp_and_ep_groups_enc):
-    layers_tp = nn.ModuleList(
-        [
-            MoELayer_tp(config, i, 
-                tp_group=tp_groups_enc[i + 1], 
-                sp_group=sp_groups_enc[i + 1], 
-                cp_group=cp_groups_enc[i + 1],
-                ep_group=ep_groups_enc[i + 1], 
-                tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
-                tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
-            for i in range(config.num_hidden_layers)
-        ]
-    )
+    args = get_args()
+    if hasattr(args, "profile_unit") and args.profile_unit == "attention":
+        layers_tp = nn.ModuleList(
+            [
+                MoELayer_attention(config, i, 
+                    tp_group=tp_groups_enc[i + 1], 
+                    sp_group=sp_groups_enc[i + 1], 
+                    cp_group=cp_groups_enc[i + 1],)
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+    elif hasattr(args, "profile_unit") and args.profile_unit == "mlp":
+        layers_tp = nn.ModuleList(
+            [
+                MoELayer_mlp(config, i, 
+                    tp_group=tp_groups_enc[i + 1], 
+                    ep_group=ep_groups_enc[i + 1], 
+                    tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
+                    tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+    else:
+        layers_tp = nn.ModuleList(
+            [
+                MoELayer_tp(config, i, 
+                    tp_group=tp_groups_enc[i + 1], 
+                    sp_group=sp_groups_enc[i + 1], 
+                    cp_group=cp_groups_enc[i + 1],
+                    ep_group=ep_groups_enc[i + 1], 
+                    tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
+                    tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
     setattr(model.model, "layers", layers_tp)
     args = get_args()
     megatron_config = core_transformer_config_from_args(get_args())

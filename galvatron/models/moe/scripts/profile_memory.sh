@@ -13,12 +13,13 @@ export PROFILE_LAUNCHER="$LAUNCHER"
 export PROFILE_TRAINER="train_dist_random.py"
 
 MODEL_ARGS="
-    --model_size llama-7b \
+    --model_size mixtral-8x7b \
     --set_model_config_manually 0 \
+    --set_experts_manually 0 \
     --vocab_size 32000 \
     --hidden_size 4096 \
     --num_attention_heads 32 \
-    --seq_length 2048"
+    --seq_length 5120"
 
 # profile_flow_control: scripts_only, launch_only, data_only, all
 # profile_unit: attention, mlp, all
@@ -35,7 +36,7 @@ PROFILE_ARGS_BF16="
     --sequence_parallel \
     --use-flash-attn \
     --profile_flow_control all \
-    --profile_unit mlp"
+    --profile_unit attention"
 
 # PROFILE_ARGS_BF16="
 #     --profile_mode sequence \

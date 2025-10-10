@@ -107,7 +107,7 @@ class LlamaMLP_tp(nn.Module):
             tp_group=self.tp_group)
         self.LayerNorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, attention_mask=None, rotary_embedding=None): # Adding attention_mask and rotary_embedding ensures input consistency when profiling the MLP layer independently
         input_tensor = hidden_states
         hidden_states = self.LayerNorm(hidden_states)
         hidden_states, bias = self.mlp(hidden_states)
@@ -138,15 +138,28 @@ class LlamaLayer_tp(nn.Module):
 
 
 def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc, cp_groups_enc):
-    layers_tp = nn.ModuleList(
-        [
-            LlamaLayer_tp(config, i, 
-                tp_group=tp_groups_enc[i + 1], 
-                sp_group=sp_groups_enc[i + 1], 
-                cp_group=cp_groups_enc[i + 1])
-            for i in range(config.num_hidden_layers)
-        ]
-    )
+    args = get_args()
+    if hasattr(args, "profile_unit") and args.profile_unit == "attention":
+        layers_tp = nn.ModuleList(
+            [
+                LlamaAttention_tp(config, i, tp_group=tp_groups_enc[i + 1], sp_group=sp_groups_enc[i + 1], cp_group=cp_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+    elif hasattr(args, "profile_unit") and args.profile_unit == "mlp":
+        layers_tp = nn.ModuleList(
+            [
+                LlamaMLP_tp(config, tp_group=tp_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+    else:
+        layers_tp = nn.ModuleList(
+            [
+                LlamaLayer_tp(config, i, tp_group=tp_groups_enc[i + 1], sp_group=sp_groups_enc[i + 1], cp_group=cp_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
     setattr(model.model, "layers", layers_tp)
     args = get_args()
     megatron_config = core_transformer_config_from_args(get_args())

@@ -87,6 +87,20 @@ def galvatron_profile_args(parser):
         default=128,
         help="Pad the vocab size to be divisible by this value." "This is added for computational efficieny reasons.",
     )
+    
+    group.add_argument(
+        "--profile_unit",
+        choices=["attention", "mlp", "all"],
+        default="all",
+        help="Profile granularity",
+    )
+    
+    group.add_argument(
+        "--profile_flow_control",
+        choices=["all", "scripts_only", "launch_only", "data_only"],
+        default="all",
+        help="Control profiling flow: all steps, data processing only, or script generation only",
+    )
 
     return parser
 

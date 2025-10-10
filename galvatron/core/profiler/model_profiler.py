@@ -212,7 +212,11 @@ class ModelProfiler(BaseProfiler):
         Note:
             Only supports sequence or static profile modes
         """
+        if self.args.profile_flow_control == "data_only":
+            return
+        
         args = self.args
+        CMD_LIST = []
         assert (
             args.profile_mode == "static" or args.profile_mode == "sequence"
         ), "Memory profiling only supports sequence or static profile mode."
@@ -240,8 +244,7 @@ class ModelProfiler(BaseProfiler):
                                 args_["vocab_tp"] = tp_deg if enable_vocab_tp == 1 else 1
                                 ARGS_ = self.args2str(args_)
                                 CMD = LAUNCH_SCRIPTS + MODEL_ARGS + PROFILE_ARGS + ARGS_
-                                print(CMD)
-                                os.system(CMD)
+                                CMD_LIST.append(CMD)
                     if checkpoint:
                         break
                     tp_deg *= 2
@@ -263,10 +266,24 @@ class ModelProfiler(BaseProfiler):
                             args_["vocab_tp"] = tp_deg if enable_vocab_tp == 1 else 1
                             ARGS_ = self.args2str(args_)
                             CMD = LAUNCH_SCRIPTS + MODEL_ARGS + PROFILE_ARGS + ARGS_
-                            print(CMD)
-                            os.system(CMD)
+                            CMD_LIST.append(CMD)
                     tp_deg *= 2
-
+                    
+        if self.args.profile_flow_control == "scripts_only":
+            for CMD in CMD_LIST:
+                print(CMD)
+            print("Start to write memory profiling scripts ...")
+            script_path = os.path.join(self.path, f"scripts/memory_profile_scripts_{self.args.profile_unit}.sh")
+            with open(script_path, "w") as f:
+                for CMD in CMD_LIST:
+                    f.write(CMD + "\n")
+                    f.write("sleep 1\n")
+            print(f"Memory profiling scripts have been written to {script_path}!")
+        else:
+            for CMD in CMD_LIST:
+                print(CMD)
+                os.system(CMD)
+                
     def _launch_computation_profiling(
         self, MODEL_ARGS: str, PROFILE_ARGS: str, LAUNCH_SCRIPTS: str, layernum_lists: List[List[int]]
     ) -> None:
@@ -281,11 +298,16 @@ class ModelProfiler(BaseProfiler):
         Note:
             Supports all profile modes (static, batch, sequence)
         """
+        if self.args.profile_flow_control == "data_only":
+            return
+        
+        CMD_LIST = []
         for layernum_list in layernum_lists:
             args_ = {}
             self.get_layernum_args(args_, layernum_list)
             args_["pp_deg"] = 1
             args_["global_tp_deg"] = 1
+            args_["global_cp_deg"] = 1
             args_["global_checkpoint"] = 0
             batch_size_list = self.get_bsz_list()
             sequence_length_list = list(product(*self.sequence_length_list))
@@ -295,8 +317,22 @@ class ModelProfiler(BaseProfiler):
                     self.get_seqlen_args(args_, seq)
                     ARGS_ = self.args2str(args_)
                     CMD = LAUNCH_SCRIPTS + MODEL_ARGS + PROFILE_ARGS + ARGS_
-                    print(CMD)
-                    os.system(CMD)
+                    CMD_LIST.append(CMD)
+        
+        if self.args.profile_flow_control == "scripts_only":
+            for CMD in CMD_LIST:
+                print(CMD)
+            print("Start to write computation profiling scripts ...")
+            script_path = os.path.join(self.path, f"scripts/computation_profile_scripts_{self.args.profile_unit}.sh")
+            with open(script_path, "w") as f:
+                for CMD in CMD_LIST:
+                    f.write(CMD + "\n")
+                    f.write("sleep 1\n")
+            print(f"Computation profiling scripts have been written to {script_path}!")
+        else:
+            for CMD in CMD_LIST:
+                print(CMD)
+                os.system(CMD)
 
     # =============== For Processing Profiled Memory and Time ===============
     def process_profiled_data(self) -> None:
@@ -337,6 +373,9 @@ class ModelProfiler(BaseProfiler):
         3. Processes results for different batch sizes and sequence lengths
         4. Writes processed results to config file
         """
+        if self.args.profile_flow_control == "scripts_only" or self.args.profile_flow_control == "launch_only":
+            return
+        
         time_config_path = self.time_profiling_path()
         config = read_json_config(time_config_path)
         batch_size_list = self.get_bsz_list()
@@ -390,6 +429,9 @@ class ModelProfiler(BaseProfiler):
         Note:
             Only supports sequence or static profile modes
         """
+        if self.args.profile_flow_control == "scripts_only" or self.args.profile_flow_control == "launch_only":
+            return
+        
         assert (
             self.args.profile_mode == "static" or self.args.profile_mode == "sequence"
         ), "Memory profiling only support sequence or static profile mode."
@@ -844,6 +886,8 @@ class ModelProfiler(BaseProfiler):
             "seq_length",
             "encoder_seq_length",
             "decoder_seq_length",
+            "is_moe_model",
+            "profile_flow_control",
         ]
         exclude_arg_names = profile_arg_names + self.layernum_arg_names
         MODEL_ARGS = self.args2str(self.args._get_kwargs(), exclude_arg_names)
@@ -967,6 +1011,8 @@ class ModelProfiler(BaseProfiler):
             args["use-flash-attn"] = ""
         if self.args.sequence_parallel:
             args["sequence-parallel"] = ""
+        if hasattr(self.args, "is_moe_model") and self.args.is_moe_model:
+            args["is_moe_model"] = ""
         return args
 
     def get_layernum_args(self, args: Dict[str, Any], layernum_list: List[int]) -> None:

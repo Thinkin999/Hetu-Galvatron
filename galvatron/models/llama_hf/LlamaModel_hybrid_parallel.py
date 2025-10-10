@@ -14,9 +14,10 @@ from galvatron.models.llama_hf.LlamaModel_sequential import (
     LlamaPreNorm_,
     construct_sequential_model,
 )
-from galvatron.models.llama_hf.LlamaModel_tensor_parallel import LlamaLayer_tp, construct_tensor_parallel_model
+from galvatron.models.llama_hf.LlamaModel_tensor_parallel import LlamaLayer_tp, construct_tensor_parallel_model, LlamaAttention_tp, LlamaMLP_tp
 from galvatron.models.llama_hf.meta_configs import config_from_meta, model_layer_configs, model_name, set_model_config
 
+from galvatron.core import get_args
 # from megatron.legacy.model.rms_norm import RMSNorm as LlamaRMSNorm
 
 
@@ -26,10 +27,17 @@ def get_hybrid_parallel_configs(model_config, training_args):
 
 
 def construct_hybrid_parallel_model(model, model_config, training_args, hybrid_parallel_configs):
-    wrap_block_name = [LlamaLayer_tp]
-    wrap_checkpoint_block_name = [LlamaLayer_tp]
-    wrap_other_block_name = [LlamaEmbeddings_, LlamaPreNorm_, LlamaCls_]
-    all_block_name = [LlamaEmbeddings_, LlamaLayer_tp, LlamaPreNorm_, LlamaCls_]
+    args = get_args()
+    if hasattr(args, "profile_unit") and args.profile_unit != 'attention' and args.profile_unit != "mlp":
+        wrap_block_name = [LlamaLayer_tp]
+        wrap_checkpoint_block_name = [LlamaLayer_tp]
+        wrap_other_block_name = [LlamaEmbeddings_, LlamaPreNorm_, LlamaCls_]
+        all_block_name = [LlamaEmbeddings_, LlamaLayer_tp, LlamaPreNorm_, LlamaCls_]
+    else:
+        wrap_block_name = [LlamaAttention_tp, LlamaMLP_tp]
+        wrap_checkpoint_block_name = [LlamaAttention_tp, LlamaMLP_tp]
+        wrap_other_block_name = [LlamaEmbeddings_, LlamaPreNorm_, LlamaCls_]
+        all_block_name = [LlamaEmbeddings_, LlamaAttention_tp, LlamaMLP_tp, LlamaPreNorm_, LlamaCls_]
     hp_model = construct_hybrid_parallel_model_api(
         model,
         model_config,
