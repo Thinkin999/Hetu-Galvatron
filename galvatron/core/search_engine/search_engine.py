@@ -63,7 +63,7 @@ class GalvatronSearchEngine():
             return self.mem_path
         assert self.model_name is not None, 'Should specify the model name!'
         args = self.args
-        memory_config_name = 'memory_profiling_%s_%s.json'%(args.mixed_precision, self.model_name)
+        memory_config_name = 'memory_profiling_%s_%s_all.json'%(args.mixed_precision, self.model_name) # TODO dynamic parse profile file
         if args.memory_profiling_path is None:
             memory_config_path = os.path.join(self.path, 'configs')
         else:
@@ -76,7 +76,7 @@ class GalvatronSearchEngine():
             return self.time_path
         assert self.model_name is not None, 'Should specify the model name!'
         args = self.args
-        time_config_name = "computation_profiling_%s_%s.json"%(args.mixed_precision, self.model_name)
+        time_config_name = "computation_profiling_%s_%s_all.json"%(args.mixed_precision, self.model_name) # TODO dynamic parse profile file
         if args.time_profiling_path is None:
             self.time_path = os.path.join(self.path, "configs")
         else:

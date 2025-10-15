@@ -3,7 +3,7 @@ export NUM_GPUS_PER_NODE=8
 
 MODEL_SIZE="llama-7b"
 MEMORY=36
-SEQ=8192
+SEQ=2048
 FINE_GRAINED=1
 MODEL_ARGS="
     --model_size ${MODEL_SIZE} \
@@ -17,8 +17,8 @@ MODEL_ARGS="
     --seq_length ${SEQ}"
 
 BSZ_ARGS="
-    --min_bsz 64 \
-    --max_bsz 64 \
+    --min_bsz 16 \
+    --max_bsz 16 \
     --bsz_scale 1 \
     --settle_bsz -1 \
     --recommend_min_bsz 0
@@ -37,7 +37,8 @@ SEARCH_SPACE_ARGS="
     --max_tp_deg 8 \
     --max_pp_deg 16 \
     --fine_grained_mode ${FINE_GRAINED} \
-    --profile_mode sequence \
+    --time_profile_mode batch \
+    --memory_profile_mode static \
     --no_async_grad_reduce \
     --sequence_parallel
 "
@@ -52,13 +53,15 @@ SEARCH_ARGS="
     --mixed_precision bf16 \
     --pipeline_type pipedream_flush \
     --default_dp_type zero2 \
-    --embed_sdp 0
 "
 
 BACKGROUND=1
 
 if [ $BACKGROUND -eq 1 ]; then
     echo "Search in background..."
+    if [ ! -d "log" ]; then
+        mkdir -p "log"
+    fi
     OUTPUT_FILE="log/Search_${MODEL_SIZE}_${MEMORY}GB_${NUM_NODES}Nodes_${NUM_GPUS_PER_NODE}GPUs_per_node_${SEQ}_${FINE_GRAINED}.log"
     nohup python3 search_dist.py ${SEARCH_ARGS} 1> ${OUTPUT_FILE} 2>&1 &
 else

@@ -14,8 +14,8 @@ from typing import Tuple, List
 import argparse
 
 import galvatron
-from galvatron.core.pipeline import PipelineParallel, PipeSequential
-from galvatron.core.comm_groups import gen_comm_groups
+from galvatron.core.runtime.pipeline import PipelineParallel, PipeSequential
+from galvatron.core.runtime.comm_groups import gen_comm_groups
 from galvatron.utils import read_json_config, write_json_config
 
 def init_method_constant(val):
@@ -151,8 +151,11 @@ def train(args):
 
     all_tp_sizes = [args.global_tp_deg] * 48
     all_sp_sizes = [1] * 48
+    all_cp_sizes = [1] * 48
+    all_ep_sizes = [1] * 48
+    all_tp_of_ep_sizes = [1] * 48
     tp_consecutive_flags = [args.global_tp_consec] * 48
-    pp_group, tp_groups, _, _, _, _, _, _, _, _ = gen_comm_groups(all_tp_sizes, all_sp_sizes, pp_deg, tp_consecutive_flags)
+    pp_group, tp_groups, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ = gen_comm_groups(all_tp_sizes, all_sp_sizes, all_cp_sizes, all_ep_sizes, all_tp_of_ep_sizes, pp_deg, tp_consecutive_flags)
 
     model = PipeSequential()
     model.add_module('pre_sync_module', pre_sync_module())

@@ -35,7 +35,7 @@ PROFILE_ARGS_BF16="
     --sequence_parallel \
     --use-flash-attn \
     --profile_flow_control all \
-    --profile_unit mlp"
+    --profile_unit all"
 
 # PROFILE_ARGS_BF16="
 #     --profile_mode sequence \

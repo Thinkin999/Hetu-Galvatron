@@ -131,6 +131,15 @@ class MoEMLP_tp(nn.Module):
         self.idx = layer_number
         megatron_config = core_transformer_config_from_args(args)
         self.config = megatron_config
+        
+        if hasattr(args, "profile_unit") and args.profile_unit == 'mlp':
+            assert tp_of_ep_group is not None
+            self.mlp = ParallelMLP(config=megatron_config, is_expert=False, tp_group=tp_of_ep_group.group)
+            self.is_profile_mlp = True
+            return
+        else:
+            self.is_profile_mlp = False
+        
         self.tp_group = tp_group.group if tp_group is not None else None
         self.ep_group = ep_group.group if ep_group is not None else None
         self.tp_of_ep_group = tp_of_ep_group.group if tp_of_ep_group is not None else None
@@ -180,13 +189,16 @@ class MoEMLP_tp(nn.Module):
                 self.tp_and_ep_group,
             )
             
-    def forward(self, hidden_states, mlp_residual, probs, routing_map):
-        (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
-                hidden_states, probs, routing_map
-            )
-        expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
-        hidden_states, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
-        hidden_states = hidden_states + mlp_residual
+    def forward(self, hidden_states, mlp_residual=None, probs=None, routing_map=None):
+        if self.is_profile_mlp == False:
+            (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
+                    hidden_states, probs, routing_map
+                )
+            expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
+            hidden_states, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+            hidden_states = hidden_states + mlp_residual
+        else:
+            hidden_states, mlp_bias = self.mlp(hidden_states)
         return hidden_states
 
 
@@ -221,20 +233,16 @@ class MoELayer_attention(nn.Module):
     
     def forward(self, hidden_states, attention_mask=None, rotary_embedding=None):
         attention_output, mlp_residual = self.attention(hidden_states, attention_mask, rotary_embedding)
+        attention_output += mlp_residual # MLP residual connection
         return attention_output
     
 class MoELayer_mlp(nn.Module):
     def __init__(self, config, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None):
         super().__init__()
-        megatron_config = core_transformer_config_from_args(get_args())
-        assert tp_of_ep_group is not None
-        self.mlp = ParallelMLP(config=megatron_config, is_expert=False, tp_group=tp_of_ep_group.group)
-        self.idx = layer_number
+        self.mlp = MoEMLP_tp(config, layer_number, tp_group, ep_group, tp_of_ep_group, tp_and_ep_group)
         
     def forward(self, hidden_states, attention_mask=None, rotary_embedding=None): # Adding attention_mask and rotary_embedding ensures input consistency when profiling the MLP layer independently
-        residual = hidden_states
-        hidden_states, mlp_bias = self.mlp(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states = self.mlp(hidden_states)
         return hidden_states
 
 def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc, cp_groups_enc, ep_groups_enc, tp_of_ep_groups_enc, tp_and_ep_groups_enc):

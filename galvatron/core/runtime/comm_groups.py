@@ -83,6 +83,19 @@ def gen_tp_group_dist(tp_size, pp_size, to_print=True, consecutive=True, world_r
             all_tp_groups.append(group)
             if group.has_rank(rank):
                 tp_group = group
+    else:
+        dp_size = world_size // tp_size // pp_size
+        num_pp_groups = world_size // pp_size
+        for i in range(pp_size):
+            start_rank = i * num_pp_groups
+            end_rank = (i + 1) * num_pp_groups
+            for j in range(dp_size):
+                ranks = range(start_rank + j, end_rank, dp_size)
+                ranks = index_ranks(ranks, world_ranks)
+                group = CommGroup(ranks)
+                all_tp_groups.append(group)
+                if group.has_rank(rank):
+                    tp_group = group
     
     if rank == 0 and to_print:
         print("TP groups:", end=" ")
