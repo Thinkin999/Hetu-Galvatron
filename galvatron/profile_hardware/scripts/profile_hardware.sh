@@ -1,6 +1,6 @@
-NUM_NODES=2
+NUM_NODES=1
 NUM_GPUS_PER_NODE=8
-BACKEND=torch
+BACKEND=nccl
 #====== for NCCL =======
 NCCLTEST_DIR="../site_package/nccl-tests"
 MPI_PATH=/usr/local/mpi/

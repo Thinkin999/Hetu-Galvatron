@@ -4,6 +4,7 @@ from .strategy_utils import form_strategy
 from typing import List
 import numpy as np
 from scipy.optimize import curve_fit
+import torch
 
 def str2array(s):
     return list(map(int,s.split(',')))
@@ -16,6 +17,8 @@ def read_json_config(path):
     return json.load(open(path,'r',encoding="utf-8"))
 
 def write_json_config(config, path):
+    if os.path.exists(path) == False:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path,'w') as fp:
         json.dump(config,fp, indent=4)
 
@@ -136,3 +139,10 @@ def remap_config(config, op):
         time_config["popt"] = popt
         
     return remap_config
+        
+def print_single_rank(message, rank=0):
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() == rank:
+            print(message, flush=True)
+    else:
+        print(message, flush=True)
