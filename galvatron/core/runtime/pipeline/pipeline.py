@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
-
+from megatron.training import get_args  # 直接从 megatron 导入，避免通过 galvatron.core 造成循环导入
 from galvatron.core.runtime.parallel import wrap_modules_checkpoint, wrap_modules_data_parallel
 
 version_str = torch.__version__
@@ -325,14 +325,23 @@ class PipelineParallel(nn.Module):
         Returns dictionary with losses.
         """
         model = self.model_cur_stage
-
+        args = get_args()
         # forward_step_func = forward_step_function(loss_func,**kwargs)
         # Chunk input batch into microbatches
-        if batch[0][0].shape[0] % self.chunks != 0:
-            if self.global_rank == 0:
-                print("[Warning]The global batch size is not divisible by chunks, the results may be skewed.")
-        micro_kwargs = chunk_dict(kwargs, self.chunks)
-        microbatches = [chunk_batch(batch[0], self.chunks), chunk_batch(batch[1], self.chunks)]
+        if not args.use_packing:
+            if batch[0][0].shape[0] % self.chunks != 0:
+                if self.global_rank == 0:
+                    print("[Warning]The global batch size is not divisible by chunks, the results may be skewed.")
+        elif not args.use_adaCPSP:
+            if (batch[0][1].shape[0] - 1 ) % self.chunks != 0:
+                if self.global_rank == 0:
+                    print("[Warning]The global batch size is not divisible by chunks, the results may be skewed.")
+        if not args.use_adaCPSP:
+            #micro_kwargs = chunk_dict(kwargs, self.chunks)#TODO: support chunk kwargs
+            microbatches = [chunk_batch(batch[0], self.chunks), chunk_batch(batch[1], self.chunks)]
+        else:
+            pass#support adaCPSP
+
         self.real_chunks = len(microbatches[0])
         if self.chunks != self.real_chunks and self.chunk_warning:
             if self.global_rank == 0:
@@ -355,9 +364,12 @@ class PipelineParallel(nn.Module):
         for i in range(num_microbatches):
             if i == num_microbatches - 1:
                 self.set_last_batch(True)
-            cur_microbatch = [microbatches[0][i], microbatches[1][i]]
+            cur_microbatch = [microbatches[0][i], microbatches[1][i]] if not args.use_adaCPSP else microbatches[0][i]  
+            if args.use_adaCPSP:
+                args.sp_group = args.sp_groups[i]#TODO: 这里应该怎么去换呢？
             output_tensor = self.forward_step(
-                forward_step_function(loss_func, **micro_kwargs[i]),
+                #forward_step_function(loss_func, **micro_kwargs[i]),
+                forward_step_function(loss_func),
                 # forward_step_func,
                 cur_microbatch,
                 model,
@@ -371,7 +383,7 @@ class PipelineParallel(nn.Module):
                 continue
             input_tensor_grad = self.backward_step(
                 None,
-                output_tensor,
+                output_tensor,#需要看这个output tensor使用什么去换的，
                 None,
             )
 

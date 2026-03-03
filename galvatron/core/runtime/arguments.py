@@ -243,5 +243,18 @@ def galvatron_training_args(parser, use_megatron=True):
         default="all",
         help="Profile granularity",
     )
-
+    #AdaCPSP arguments
+    group.add_argument(
+        "--use-packing", action="store_true", help="Whether to use packing in flash attention",
+    )
+    group.add_argument(
+        "--use-adaCPSP", action="store_true", help="Whether to use adaCPSP to enable sequence parallel hot change",
+    )
+    group.add_argument(
+        "--adaCPSP-strategy", type=str, default="adaptive", help="adaCPSP strategy", choices=['adaptive', 'ulysses', 'cp'],
+    )
+    group.add_argument("--chunk-alg", type=str, default="sort_consec", choices=['sort_consec', 'distribution'], help = "Chunk algorithm for FlexSP sequence blaster")
+    group.add_argument("--bucket-alg", type=str, default="dp", choices=['no_bucket', 'even_bucket', 'dp'], help='Algorithm for FlexSP sequence bucketing')
+    group.add_argument("--min-sp", type=int, default=8, choices=[1,2,4,8], help = "Minimum sp degree for FlexSP to do MINLP serching")
+    group.add_argument("--dataset", type=str, default="fix_length", help="Dataset type for variable length training")
     return parser

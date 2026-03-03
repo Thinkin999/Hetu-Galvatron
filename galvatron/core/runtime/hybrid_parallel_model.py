@@ -52,10 +52,20 @@ class GalvatronModel(nn.Module):
                 and isinstance(batch[0], (tuple, list))
                 and isinstance(batch[1], (tuple, list))
             )
-        else:
+        elif not args.use_packing:
             loss_func = self.fake_loss_func
             assert isinstance(batch, (tuple, list))
             batch = [batch, [self.fake_tensor(batch[0])]]
+        elif not args.use_adaCPSP:
+            # batch: [input_ids, cu_seqlens]
+            loss_func = self.fake_loss_func
+            assert isinstance(batch, (tuple, list))
+            batch = [batch, [self.fake_tensor(batch[1])]]
+        else:
+            loss_func = self.fake_loss_func
+            for mbatch in batch: #[[seqs, cu_seqlens]]
+                mbatch.append([self.fake_tensor(mbatch[0][1])])#在这里这个fake tensor的逻辑
+                
         if args.pp_deg > 1:
             if args.pipeline_type == "gpipe":
                 loss = model.gpipe_forward(batch, loss_func, **kwargs)

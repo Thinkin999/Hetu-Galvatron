@@ -9,5 +9,9 @@ from megatron.legacy.model.enums import AttnMaskType, AttnType, LayerType
 from .reset import colummn_row_reset_parameters, init_reset_parameter
 from .transformer import ParallelAttention, ParallelMLP
 from .utils import init_method_normal, scaled_init_method_normal
+from .attention_impl import (
+    FlashSelfAttentionVarlen,
+    zigzag_ring_flash_attn_varlen_func,
+)
 
 init_reset_parameter()

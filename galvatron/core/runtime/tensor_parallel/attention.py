@@ -14,6 +14,7 @@ from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_with_cos_sin,
 )
+from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
     get_data_parallel_group,
@@ -120,7 +121,10 @@ class Attention(MegatronModule, ABC):
         self.attention_type = attention_type
         self.use_flash_attn = args.use_flash_attn
         self.sequence_parallel = config.sequence_parallel
-        
+        self.sp_group = sp_group
+        self.cp_group = cp_group
+        self.sp_size = torch.distributed.get_world_size(sp_group)
+        self.cp_size = torch.distributed.get_world_size(cp_group)
         # For normal attention without groups, num_query_groups == num_attention_heads,
         # so these two will be the same
         self.query_projection_size = self.config.kv_channels * self.config.num_attention_heads
@@ -184,7 +188,7 @@ class Attention(MegatronModule, ABC):
                 causal=(attn_mask_type == AttnMaskType.causal)
             )
         
-        if self.use_ulysses:
+        if self.use_ulysses:#we must use this in packing
             if self.use_zigzag_cp:
                 local_attention = self.zigzag_ring_flash_attn
             elif self.use_flash_attn:
@@ -219,6 +223,14 @@ class Attention(MegatronModule, ABC):
             is_expert=False,
             tp_comm_buffer_name='proj',
             tp_group=tp_group,
+        )
+        
+        # Initialize rotary position embedding for varlen sequences
+        self.rotary_pos_emb = RotaryEmbedding(
+            kv_channels=self.hidden_size_per_attention_head,
+            rotary_percent=args.rotary_percent,
+            seq_len_interpolation_factor=args.rotary_seq_len_interpolation_factor,
+            rotary_base=args.rotary_base,
         )
 
     def _checkpointed_attention_forward(
@@ -537,8 +549,10 @@ class Attention(MegatronModule, ABC):
 
     def forward(
         self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
+        hidden_states: Tensor,#varlen
+        cu_seqlens: Optional[Tensor] = None,#varlen
+        max_seqlen: Optional[int] = None,#varlen
+        attention_mask: Optional[Tensor] = None,
         key_value_states: Optional[Tensor] = None,
         inference_context: Optional[BaseInferenceContext] = None,
         rotary_pos_emb: Optional[Union[Tensor, Tuple[Tensor, Tensor]]] = None,
@@ -555,6 +569,8 @@ class Attention(MegatronModule, ABC):
 
         Args:
             hidden_states (Tensor): Hidden states.
+            cu_seqlens (Optional[Tensor]): Cumulative sequence lengths.
+            max_seqlen (Optional[int]): Maximum sequence length.
             attention_mask (Tensor): Attention mask.
             key_value_states (Optional[Tensor]): Key/value states (for cross attention).
             inference_context (Optional[BaseInferenceContext]): Inference context that manages
@@ -683,7 +699,8 @@ class Attention(MegatronModule, ABC):
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
-
+        #in packing, we use this function to apply rotary embedding
+        query, key = self._apply_varlen_rotary_emb(query, key, cu_seqlens, max_seqlen, self.sp_group, self.cp_group, self.sp_size, self.cp_size)
         # ==================================
         # core attention computation
         # ==================================
@@ -718,9 +735,9 @@ class Attention(MegatronModule, ABC):
                         ]
                         if not self.sequence_parallel:
                             with tensor_parallel.get_cuda_rng_tracker().fork():
-                                core_attn_out = self.flash_attention(q, k, v)
+                                core_attn_out = self.flash_attention(query, key, value, cu_seqlens, max_seqlen)
                         else:
-                            core_attn_out = self.flash_attention(q, k, v)
+                            core_attn_out = self.flash_attention(query, key, value, cu_seqlens, max_seqlen)
                         core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
                 else:
                     if self.use_flash_attn:
@@ -729,10 +746,10 @@ class Attention(MegatronModule, ABC):
                             rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
                         ]
 
-                        context_layer = self.dist_attn(q, k, v, batch_dim_idx)
+                        context_layer = self.dist_attn(query, key, value, batch_dim_idx, cu_seqlens, max_seqlen)
                         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
                         core_attn_out = context_layer
-                    else:
+                    else:#TODO: we do not use this in packing
                         batch_dim_idx = 1  # [S,B,H,D]
                         context_layer = self.dist_attn(q, k, v, batch_dim_idx, attention_mask)
                         context_layer = rearrange(context_layer, "... h d -> ... (h d)").contiguous()
@@ -764,6 +781,103 @@ class Attention(MegatronModule, ABC):
 
         return output, bias
 
+    def _apply_varlen_rotary_emb(self, query, key, cu_seqlens, max_seqlen,
+                            sp_group=None, cp_group=None, sp_size=None, cp_size=None):
+        """Apply rotary embeddings for varlen sequences.
+        
+        For varlen (packed sequences), each short sequence has its own position ids starting from 0.
+        Similar to: position_ids = torch.cat([torch.arange(cu_seqlens[i+1] - cu_seqlens[i]) for i in range(num_seqs)])
+        """
+        from megatron.core.models.common.embeddings.rope_utils import _rotate_half
+        
+        # Handle query shape: could be (seq, batch, heads, dim) or (seq, heads, dim)
+        # For varlen, batch is typically 1, so we squeeze it
+        orig_shape = query.shape
+        if query.dim() == 4:
+            # (seq, batch, heads, dim) -> (seq, heads, dim)
+            assert query.size(1) == 1, f"For varlen, batch should be 1, got {query.size(1)}"
+            query = query.squeeze(1)
+            key = key.squeeze(1)
+            squeezed = True
+        else:
+            squeezed = False
+        
+        num_seqs = len(cu_seqlens) - 1
+        total_seq_len = query.shape[0]
+        
+        # Generate position_ids for each short sequence
+        # Each sequence starts from position 0
+        position_ids_list = []
+        for i in range(num_seqs):
+            seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+            position_ids_list.append(torch.arange(seq_len, device=query.device))
+        position_ids = torch.cat(position_ids_list, dim=0)  # (total_seq,)
+        
+        # For zigzag CP, the position_ids need to follow zigzag pattern
+        # The data has been zigzag-split, so we need zigzag position embeddings
+        if self.use_zigzag_cp and cp_size > 1:
+            # After zigzag split, each rank has positions [rank, 2*cp_size-1-rank, ...] for each sequence
+            # We need to generate the correct position_ids based on zigzag pattern
+            position_ids = self._get_zigzag_position_ids(cu_seqlens, cp_group, cp_size)
+        
+        # Get rotary embeddings for all positions
+        # inv_freq shape: (dim/2,)
+        inv_freq = self.rotary_pos_emb.inv_freq
+        
+        # position_ids: (total_seq,) -> (total_seq, 1)
+        # freqs: (total_seq, dim/2)
+        freqs = torch.outer(position_ids.float(), inv_freq)
+        
+        # emb: (total_seq, dim)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        
+        # query, key shape: (total_seq, num_heads, head_dim) for varlen
+        # cos, sin: (total_seq, dim) -> (total_seq, 1, dim) to broadcast with (total_seq, heads, dim)
+        cos = emb.cos().unsqueeze(1).to(query.dtype)
+        sin = emb.sin().unsqueeze(1).to(query.dtype)
+        
+        # Apply rotation (rotary_interleaved=False for standard RoPE)
+        # query, key: (total_seq, num_heads, head_dim)
+        query_rot = (query * cos) + (_rotate_half(query, rotary_interleaved=False) * sin)
+        key_rot = (key * cos) + (_rotate_half(key, rotary_interleaved=False) * sin)
+        
+        # Restore original shape if needed
+        if squeezed:
+            query_rot = query_rot.unsqueeze(1)
+            key_rot = key_rot.unsqueeze(1)
+        
+        return query_rot, key_rot
+    
+    def _get_zigzag_position_ids(self, cu_seqlens, cp_group, cp_size):
+        """Generate position ids for zigzag CP pattern.
+        
+        After zigzag split, each rank has [chunk_rank, chunk_(2*cp_size-1-rank)] for each sequence.
+        The position ids should reflect the original positions.
+        """
+        cp_rank = torch.distributed.get_rank(cp_group)
+        num_seqs = len(cu_seqlens) - 1
+        
+        position_ids_list = []
+        for i in range(num_seqs):
+            local_seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+            # Original sequence length before zigzag split
+            original_seq_len = local_seq_len * cp_size
+            chunk_size = original_seq_len // (2 * cp_size)
+            
+            # First half: positions from chunk_rank
+            first_half_start = cp_rank * chunk_size
+            first_half_positions = torch.arange(first_half_start, first_half_start + chunk_size, 
+                                                 device=cu_seqlens.device)
+            
+            # Second half: positions from chunk_(2*cp_size-1-rank)
+            second_half_idx = 2 * cp_size - 1 - cp_rank
+            second_half_start = second_half_idx * chunk_size
+            second_half_positions = torch.arange(second_half_start, second_half_start + chunk_size,
+                                                  device=cu_seqlens.device)
+            
+            position_ids_list.extend([first_half_positions, second_half_positions])
+        
+        return torch.cat(position_ids_list, dim=0)
 
 class SelfAttention(Attention):
     """Self-attention layer class
@@ -902,7 +1016,7 @@ class SelfAttention(Attention):
                 ["q_w", "q_b", "k_w", "k_b"],
                 "TP",
             )
-
+#正是因为这里所以需要unsqueeze(1)
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
