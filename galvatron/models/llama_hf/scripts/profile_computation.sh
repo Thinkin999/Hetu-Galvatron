@@ -14,6 +14,7 @@ export PROFILE_TRAINER="train_dist_random.py"
 
 MODEL_ARGS="
     --model_size qwen2.5-72b \
+    --model_size qwen2.5-72b \
     --set_model_config_manually 0 \
     --vocab_size 32000 \
     --hidden_size 4096 \

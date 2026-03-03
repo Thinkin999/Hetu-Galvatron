@@ -41,6 +41,8 @@ def calculate_predicted_logits(
 
     # Flatten tensors before concatenation to handle different shape layouts
     predicted_logits_sum_exp_logits = torch.cat((predicted_logits.reshape(-1), sum_exp_logits.reshape(-1)))
+    # Flatten tensors before concatenation to handle different shape layouts
+    predicted_logits_sum_exp_logits = torch.cat((predicted_logits.reshape(-1), sum_exp_logits.reshape(-1)))
 
     return target_mask, masked_target_1d, predicted_logits_sum_exp_logits, exp_logits
 

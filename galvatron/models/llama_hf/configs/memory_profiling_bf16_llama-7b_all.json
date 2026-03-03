@@ -11,7 +11,13 @@
         "layernum[2]_bsz8_seq2048_rank0_act_peak": 1835.6875,
         "layernum[2]_bsz8_seq2048_rank7_ms": 1292.37255859375,
         "layernum[2]_bsz8_seq2048_rank7_act": 1343.1708984375,
-        "layernum[2]_bsz8_seq2048_rank7_act_peak": 1835.6875
+        "layernum[2]_bsz8_seq2048_rank7_act_peak": 1835.6875,
+        "layernum[1]_bsz8_seq4096_rank0_ms": 904.32958984375,
+        "layernum[1]_bsz8_seq4096_rank0_act": 828.607421875,
+        "layernum[1]_bsz8_seq4096_rank0_act_peak": 1357.1357421875,
+        "layernum[1]_bsz8_seq4096_rank7_ms": 904.32958984375,
+        "layernum[1]_bsz8_seq4096_rank7_act": 828.607421875,
+        "layernum[1]_bsz8_seq4096_rank7_act_peak": 1357.1357421875
     },
     "1_2_4_sp": {
         "layernum[1]_bsz8_seq2048_rank0_ms": 968.3642578125,
