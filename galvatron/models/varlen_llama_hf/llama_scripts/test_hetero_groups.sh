@@ -1,10 +1,17 @@
 #!/bin/bash
-# Test: AdaCPSP with variable-length sequences (tp=1 heterogeneous groups)
-# This tests that the solver selects different strategies for different sequence lengths
+# ═══════════════════════════════════════════════════════════════
+# Test: Forced Heterogeneous Groups (Ulysses + Ring in same MB)
+# ═══════════════════════════════════════════════════════════════
+# This test BYPASSES the solver and injects a hardcoded strategy:
+#   Ranks 0-3: Ulysses SP ×4
+#   Ranks 4-7: Ring Attention ×4
+# Every microbatch uses this mixed strategy, verifying that the
+# runtime correctly handles heterogeneous groups.
+
 export NUM_NODES=1
 export NUM_GPUS_PER_NODE=8
 export MASTER_ADDR=localhost
-export MASTER_PORT=29505
+export MASTER_PORT=29506
 export NODE_RANK=0
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
@@ -19,7 +26,6 @@ LAUNCHER="${LAUNCHER} --node_rank ${NODE_RANK}"
 
 TRAINER="train_dist_adacpsp.py"
 
-# Longer sequences to force the solver to use larger parallel groups
 MODEL_ARGS="
     --model_size llama-7b \
     --set_model_config_manually 0 \
@@ -29,7 +35,7 @@ MODEL_ARGS="
     --hidden_size 4096 \
     --num_hidden_layers 2 \
     --num_attention_heads 32 \
-    --seq_length 32768"
+    --seq_length 4096"
 
 TRAIN_ARGS="
     --global_train_batch_size 16 \
@@ -39,10 +45,11 @@ TRAIN_ARGS="
     --dropout_prob 0.0 \
     --check_loss 0 \
     --profile 1 \
-    --save_profiled_memory 0 \
-    --dataset random"
+    --save_profiled_memory 0"
 
-# AdaCPSP tp=1 design
+# AdaCPSP with FORCED heterogeneous strategy:
+#   Ranks 0-3: Ulysses SP × 4
+#   Ranks 4-7: Ring Attention × 4
 PARALLEL_ARGS="
     --pp_deg 1 \
     --global_tp_deg 1 \
@@ -58,10 +65,14 @@ PARALLEL_ARGS="
     --use-flash-attn \
     --initialize_on_meta 1 \
     --use-packing \
-    --use-adaCPSP"
+    --use-adaCPSP \
+    --adaCPSP-forced-strategy ulysses:4,ring:4"
 
-echo "==================================================="
-echo "Test: AdaCPSP Variable-Length (tp=1, heterogeneous)"
-echo "==================================================="
+echo "============================================================"
+echo "Test: Forced Heterogeneous Groups"
+echo "  Ranks 0-3: Ulysses SP × 4"
+echo "  Ranks 4-7: Ring Attention × 4"
+echo "============================================================"
 
 ${LAUNCHER} ${TRAINER} ${MODEL_ARGS} ${TRAIN_ARGS} ${PARALLEL_ARGS}
+

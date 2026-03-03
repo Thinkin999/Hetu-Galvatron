@@ -1,8 +1,15 @@
 #!/bin/bash
-# Test: Full AdaCPSP - Solver-driven adaptive strategy selection
-# The solver determines per-microbatch strategies (Ulysses / Ring / Combined)
-# Model is constructed with sp=2 (tp_deg=2 + use-ulysses), cp=4
-# to ensure all attention modules (dist_attn + zigzag_ring) are created
+# ═══════════════════════════════════════════════════════════════
+# Test: AdaCPSP — Solver-driven adaptive heterogeneous groups
+# ═══════════════════════════════════════════════════════════════
+# Key design:
+#   - tp_deg=1 (no tensor parallelism, full weights on every GPU)
+#   - FSDP dp=world_size (all GPUs share model via FSDP)
+#   - sp_size and cp_size are BOTH dynamic per group
+#   - Each microbatch can have HETEROGENEOUS groups:
+#     e.g., ranks 0-3: Ulysses×4, ranks 4-7: Ring×4
+#   - force_all_modules ensures Flash, Ulysses, Ring modules all created
+
 export NUM_NODES=1
 export NUM_GPUS_PER_NODE=8
 export MASTER_ADDR=localhost
@@ -35,7 +42,7 @@ MODEL_ARGS="
     --seq_length 4096"
 
 TRAIN_ARGS="
-    --global_train_batch_size 8 \
+    --global_train_batch_size 16 \
     --train-iters 10 \
     --lr 1e-4 \
     --adam_weight_decay 0.01 \
@@ -44,30 +51,33 @@ TRAIN_ARGS="
     --profile 1 \
     --save_profiled_memory 0"
 
-# AdaCPSP: construct with tp_deg=2 (→sp=2), cp_deg=4 (→cp=4)
-# vocab_tp=2 and vocab_cp=4 must match
+# AdaCPSP: tp=1, dp=world_size
+# --use-adaCPSP triggers:
+#   1. force_all_attn_modules in Attention.__init__
+#   2. Override tp=1, sp=1, cp=1 in train_dist_adacpsp.py
+#   3. Solver-driven heterogeneous groups in collate_fn
 PARALLEL_ARGS="
     --pp_deg 1 \
-    --global_tp_deg 2 \
+    --global_tp_deg 1 \
     --global_tp_consec 1 \
     --sdp 0 \
     --global_checkpoint 0 \
-    --vocab_tp 2 \
-    --vocab_cp 4 \
+    --vocab_tp 1 \
     --chunks 1 \
-    --global_cp_deg 4 \
+    --global_cp_deg 1 \
     --pipeline_type pipedream_flush \
     --default_dp_type zero2 \
     --mixed_precision bf16 \
-    --sequence-parallel \
-    --use-ulysses \
     --use-flash-attn \
     --initialize_on_meta 1 \
     --use-packing \
     --use-adaCPSP"
 
 echo "=============================================="
-echo "Test: AdaCPSP Solver-Driven Adaptive Training"
+echo "Test: AdaCPSP Heterogeneous Groups (tp=1)"
+echo "  - FSDP dp=world_size"
+echo "  - Dynamic sp_size + cp_size per group"
+echo "  - Solver determines heterogeneous strategy"
 echo "=============================================="
 
 ${LAUNCHER} ${TRAINER} ${MODEL_ARGS} ${TRAIN_ARGS} ${PARALLEL_ARGS}

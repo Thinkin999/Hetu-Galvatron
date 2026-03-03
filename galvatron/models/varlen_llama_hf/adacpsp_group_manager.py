@@ -1,20 +1,23 @@
 """
 AdaCPSP Communication Group Manager
 
-Pre-creates all valid (sp_size, cp_size) communication group combinations
-and provides a mechanism to dynamically switch model strategy per microbatch.
+Follows FlexSP's `convert_microbatch_res` pattern:
+  - Each microbatch contains MULTIPLE groups of potentially different sizes
+  - Groups are mapped to CONSECUTIVE GPU ranks
+  - Each rank belongs to exactly ONE group per microbatch  
+  - Different groups can use different attn_types (Ulysses / Ring)
+
+Example: 8 GPUs, microbatch = [("ulysses", 4, [s0,s1,s2]), ("ring", 4, [s3,s4,s5])]
+  → Rank 0-3: Ulysses sp_size=4, processing sequences [s0,s1,s2]
+  → Rank 4-7: Ring cp_size=4, processing sequences [s3,s4,s5]
 
 Design:
-  - For N GPUs, valid strategies have sp * cp * dp = N
-  - Phase 3 constrains dp=1 (sp * cp = N) for simplicity
-  - Groups follow the convention: SP is consecutive, CP spans across SP groups
-  
-  Example for N=8, sp=2, cp=4:
-    SP groups: [0,1], [2,3], [4,5], [6,7]
-    CP groups: [0,2,4,6], [1,3,5,7]
+  - tp_deg = 1 (no tensor parallelism, full weights on every GPU)
+  - FSDP covers all GPUs (dp = world_size at construction)
+  - sp_size and cp_size are BOTH dynamic, determined by solver
+  - Groups are created lazily and cached (like FlexSP's global_group_set)
 """
 
-import math
 import torch
 import torch.distributed as dist
 from typing import Dict, Tuple, Optional, List
@@ -27,175 +30,147 @@ from galvatron.core.runtime.tensor_parallel.attention_impl import (
 )
 
 
-class CommunicationGroupManager:
-    """Manages pre-created communication groups for all valid (sp_size, cp_size) strategies."""
+# Global group cache (all ranks must participate in new_group creation)
+_global_group_set: List[Tuple[int, ...]] = []  # list of rank tuples that have been created
+_group_pool: Dict[Tuple[int, ...], dist.ProcessGroup] = {}  # rank_tuple -> ProcessGroup
+
+
+def convert_microbatch_res(micro_res):
+    """
+    Convert solver's microbatch result to per-rank assignment.
     
-    def __init__(self, world_size: int, max_sp: int = None, max_cp: int = None):
-        """
-        Args:
-            world_size: Total number of GPUs
-            max_sp: Maximum SP size to consider (default: world_size)
-            max_cp: Maximum CP size to consider (default: world_size)
-        """
-        self.world_size = world_size
-        self.rank = dist.get_rank()
-        self.max_sp = max_sp or world_size
-        self.max_cp = max_cp or world_size
-        
-        # (sp_size, cp_size) -> {"sp_group": ProcessGroup, "cp_group": ProcessGroup}
-        self.groups: Dict[Tuple[int, int], Dict[str, dist.ProcessGroup]] = {}
-        
-        self._create_all_groups()
-        
-        if self.rank == 0:
-            strategies = list(self.groups.keys())
-            print(f"[AdaCPSP GroupManager] Created groups for {len(strategies)} strategies: {strategies}")
+    Follows FlexSP's convert_microbatch_res pattern:
+    - Groups are laid out on consecutive GPU ranks
+    - Each rank finds which group it belongs to
+    - Creates communication groups lazily (all ranks MUST call new_group together)
     
-    def _powers_of_two(self, max_val: int) -> List[int]:
-        """Return all powers of 2 up to max_val."""
-        result = []
-        p = 1
-        while p <= max_val:
-            result.append(p)
-            p *= 2
-        return result
+    If the total parallel_sizes don't cover all N GPUs, remaining ranks are
+    assigned to a single-rank dummy group (sp=1, cp=1, no sequences).
     
-    def _create_all_groups(self):
-        """Create communication groups for all valid (sp_size, cp_size) combinations."""
-        for sp_size in self._powers_of_two(min(self.max_sp, self.world_size)):
-            for cp_size in self._powers_of_two(min(self.max_cp, self.world_size // sp_size)):
-                if sp_size * cp_size <= self.world_size:
-                    self._create_group_for_strategy(sp_size, cp_size)
+    Args:
+        micro_res: List of (attn_type, parallel_size, [seq_id_list])
+            e.g. [("ulysses", 4, [0,1,2]), ("ring", 4, [3,4,5])]
+            The sum of all parallel_sizes should equal world_size.
     
-    def _create_group_for_strategy(self, sp_size: int, cp_size: int):
-        """Create SP and CP groups for a specific (sp_size, cp_size) strategy.
-        
-        Rank arrangement within each DP replica (sp_size * cp_size GPUs):
-            - SP groups are consecutive ranks
-            - CP groups span across SP groups
-            
-        For dp_replica base_rank, sp=S, cp=C:
-            rank = base + cp_idx * S + sp_idx
-            SP group: [base + cp_idx*S + 0, base + cp_idx*S + 1, ..., base + cp_idx*S + (S-1)]
-            CP group: [base + 0*S + sp_idx, base + 1*S + sp_idx, ..., base + (C-1)*S + sp_idx]
-        """
-        dp_size = self.world_size // (sp_size * cp_size)
-        
-        my_sp_group = None
-        my_cp_group = None
-        
-        # Create SP groups (collective - all ranks must participate)
-        for dp_idx in range(dp_size):
-            base = dp_idx * sp_size * cp_size
-            for cp_idx in range(cp_size):
-                ranks = [base + cp_idx * sp_size + sp_idx for sp_idx in range(sp_size)]
-                group = dist.new_group(ranks)
-                if self.rank in ranks:
-                    my_sp_group = group
-        
-        # Create CP groups (collective - all ranks must participate)
-        for dp_idx in range(dp_size):
-            base = dp_idx * sp_size * cp_size
-            for sp_idx in range(sp_size):
-                ranks = [base + cp_idx * sp_size + sp_idx for cp_idx in range(cp_size)]
-                group = dist.new_group(ranks)
-                if self.rank in ranks:
-                    my_cp_group = group
-        
-        # For sp_size=1, sp_group should still be valid (size 1 group)
-        # For cp_size=1, cp_group should still be valid (size 1 group)
-        self.groups[(sp_size, cp_size)] = {
-            "sp_group": my_sp_group,
-            "cp_group": my_cp_group,
-            "sp_size": sp_size,
-            "cp_size": cp_size,
-            "dp_size": dp_size,
-        }
+    Returns:
+        batch_indices: List of sequence IDs assigned to the current rank's group
+        group: The ProcessGroup for this rank's communication (None for single-rank groups)
+        attn_type: "ulysses" or "ring" 
+        sp_size: Ulysses parallel size (parallel_size if ulysses, 1 if ring)
+        cp_size: Ring parallel size (1 if ulysses, parallel_size if ring)
+    """
+    global _global_group_set, _group_pool
     
-    def get_groups(self, sp_size: int, cp_size: int) -> Dict:
-        """Get the communication groups for a specific strategy."""
-        key = (sp_size, cp_size)
-        if key not in self.groups:
-            raise ValueError(f"Strategy (sp={sp_size}, cp={cp_size}) not pre-created. "
-                           f"Available: {list(self.groups.keys())}")
-        return self.groups[key]
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
     
-    def get_all_strategies(self) -> List[Tuple[int, int]]:
-        """Return all available (sp_size, cp_size) strategies."""
-        return list(self.groups.keys())
+    # Safety: pad micro_res to cover all N GPUs
+    total_covered = sum(ps for _, ps, _ in micro_res)
+    if total_covered < world_size:
+        remaining = world_size - total_covered
+        # Pad with single-rank dummy groups
+        for _ in range(remaining):
+            micro_res.append(("ulysses", 1, []))
+    
+    cum_cnt = 0
+    my_group = None
+    my_batch_indices = []
+    my_attn_type = "ulysses"
+    my_sp_size = 1
+    my_cp_size = 1
+    
+    for res_tuple in micro_res:
+        attn_type, parallel_size, seq_id_list = res_tuple
+        rank_start = cum_cnt
+        rank_end = cum_cnt + parallel_size
+        ranks = list(range(rank_start, rank_end))
+        
+        # Only create multi-rank groups (single-rank doesn't need a group)
+        if parallel_size > 1:
+            if tuple(ranks) not in _global_group_set:
+                new_group = dist.new_group(ranks)
+                _global_group_set.append(tuple(ranks))
+                if rank in ranks:
+                    _group_pool[tuple(ranks)] = new_group
+        
+        cum_cnt += parallel_size
+        
+        if rank in ranks:
+            if parallel_size > 1:
+                my_group = _group_pool[tuple(ranks)]
+            else:
+                my_group = None  # Single-rank group, no communication needed
+            my_batch_indices = seq_id_list
+            my_attn_type = attn_type
+            if attn_type == "ulysses":
+                my_sp_size = parallel_size
+                my_cp_size = 1
+            elif attn_type == "ring":
+                my_sp_size = 1
+                my_cp_size = parallel_size
+            else:
+                raise ValueError(f"Unknown attn_type: {attn_type}")
+    
+    return my_batch_indices, my_group, my_attn_type, my_sp_size, my_cp_size
 
 
 def set_model_strategy(
     model: torch.nn.Module,
     sp_size: int,
     cp_size: int,
-    group_manager: CommunicationGroupManager,
+    sp_group: Optional[dist.ProcessGroup],
+    cp_group: Optional[dist.ProcessGroup],
+    attn_type: str,
 ):
     """
     Reconfigure all attention and embedding modules in the model 
-    for the given (sp_size, cp_size) strategy.
+    for the given per-rank strategy. Called before each microbatch forward.
     
-    This updates:
+    Following FlexSP pattern:
+        args.sp_group = args.sp_groups[i]  # then model reads it in forward
+    
+    But we update module attributes directly for both SP and CP:
     - SelfAttention: sp_group, cp_group, sp_size, cp_size, use_ulysses, use_zigzag_cp
-    - DistributedAttention: spg (sp process group)
+    - DistributedAttention: spg (sp process group) 
     - ZigzagRingFlashAttentionVarlen: cp_process_group
     - LlamaEmbeddings_: sp_group, cp_group, sp_size, cp_size
-    """
-    groups = group_manager.get_groups(sp_size, cp_size)
-    sp_group = groups["sp_group"]
-    cp_group = groups["cp_group"]
     
-    use_ulysses = sp_size > 1
-    use_zigzag_cp = cp_size > 1
+    Args:
+        model: The full model
+        sp_size: Ulysses parallel size for this rank
+        cp_size: Ring attention parallel size for this rank
+        sp_group: SP process group (for Ulysses All-to-All), or None
+        cp_group: CP process group (for Ring P2P), or None
+        attn_type: "ulysses" or "ring"
+    """
+    use_ulysses = (attn_type == "ulysses") and (sp_size > 1)
+    use_zigzag_cp = (attn_type == "ring") and (cp_size > 1)
     
     for name, module in model.named_modules():
         # Update SelfAttention modules
         if isinstance(module, SelfAttention):
-            module.sp_group = sp_group
-            module.cp_group = cp_group
+            module.sp_group = sp_group if use_ulysses else None
+            module.cp_group = cp_group if use_zigzag_cp else None
             module.sp_size = sp_size
             module.cp_size = cp_size
             module.use_ulysses = use_ulysses
             module.use_zigzag_cp = use_zigzag_cp
             
-            # Update DistributedAttention's sp group and local_attention
-            if hasattr(module, 'dist_attn'):
+            # Update DistributedAttention's sp group
+            # (like FlexSP: self.dist_attn.spg = args.sp_group)
+            if hasattr(module, 'dist_attn') and use_ulysses:
                 module.dist_attn.spg = sp_group
-                # Switch local attention based on new strategy
-                if use_zigzag_cp and hasattr(module, 'zigzag_ring_flash_attn'):
-                    module.dist_attn.local_attn = module.zigzag_ring_flash_attn
-                elif hasattr(module, 'flash_attention'):
+                # Also set local_attention to the correct backend
+                if hasattr(module, 'flash_attention'):
                     module.dist_attn.local_attn = module.flash_attention
             
             # Update ZigzagRingFlashAttention's cp group
-            if hasattr(module, 'zigzag_ring_flash_attn'):
+            if hasattr(module, 'zigzag_ring_flash_attn') and use_zigzag_cp:
                 module.zigzag_ring_flash_attn.cp_process_group = cp_group
         
         # Update LlamaEmbeddings_ modules
         elif hasattr(module, 'embed_tokens') and hasattr(module, 'cp_size') and hasattr(module, 'sp_size'):
-            # This matches LlamaEmbeddings_ which has embed_tokens + cp_size + sp_size
-            if hasattr(module, 'cp_group'):
-                module.sp_group = sp_group
-                module.cp_group = cp_group
-                module.sp_size = sp_size
-                module.cp_size = cp_size
-
-
-def strategy_from_solver_result(attn_type: str, parallel_size: int) -> Tuple[int, int]:
-    """
-    Convert solver's (attn_type, parallel_size) to (sp_size, cp_size).
-    
-    Args:
-        attn_type: "ulysses" or "ring"
-        parallel_size: Number of GPUs for this attention type
-    
-    Returns:
-        (sp_size, cp_size) tuple
-    """
-    if attn_type == "ulysses":
-        return (parallel_size, 1)
-    elif attn_type == "ring":
-        return (1, parallel_size)
-    else:
-        raise ValueError(f"Unknown attn_type: {attn_type}")
-
+            module.sp_group = sp_group if use_ulysses else None
+            module.cp_group = cp_group if use_zigzag_cp else None
+            module.sp_size = sp_size
+            module.cp_size = cp_size

@@ -257,4 +257,8 @@ def galvatron_training_args(parser, use_megatron=True):
     group.add_argument("--bucket-alg", type=str, default="dp", choices=['no_bucket', 'even_bucket', 'dp'], help='Algorithm for FlexSP sequence bucketing')
     group.add_argument("--min-sp", type=int, default=8, choices=[1,2,4,8], help = "Minimum sp degree for FlexSP to do MINLP serching")
     group.add_argument("--dataset", type=str, default="fix_length", help="Dataset type for variable length training")
+    group.add_argument(
+        "--adaCPSP-forced-strategy", type=str, default=None,
+        help="Force heterogeneous groups for testing, e.g. 'ulysses:4,ring:4'",
+    )
     return parser

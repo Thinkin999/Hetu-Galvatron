@@ -562,13 +562,24 @@ class AdaCPSPOptimizer:
         """
         Solve with a fixed strategy using Best-Fit Decreasing.
         All groups use the same strategy.
+        Ensures exactly group_num groups are produced (fills empty bins).
         """
         bin_capacity = self.device_token_capacity * strategy.parallel_size
         A = BestFitDecreasing(seqs, bin_capacity, group_num)
         if A is None:
             return None
 
-        K, P = len(seqs), A.shape[1]
+        K = len(seqs)
+        P_actual = A.shape[1]
+
+        # Pad to ensure exactly group_num columns (fill empty bins)
+        if P_actual < group_num:
+            A = np.append(A, np.zeros((K, group_num - P_actual), dtype=np.int32), axis=1)
+        P = group_num
+
+        # Fill empty bins by stealing 1 sequence from the largest bin
+        self._fill_empty_bins(A, seqs, K, P, bin_capacity)
+
         M = -1
         for p in range(P):
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K)) / strategy.parallel_size
@@ -596,13 +607,24 @@ class AdaCPSPOptimizer:
         """
         Solve with a fixed strategy using First-Fit Decreasing.
         All groups use the same strategy.
+        Ensures exactly group_num groups are produced (fills empty bins).
         """
         bin_capacity = self.device_token_capacity * strategy.parallel_size
         A = FirstFitDecreasing(seqs, bin_capacity, group_num)
         if A is None:
             return None
 
-        K, P = len(seqs), A.shape[1]
+        K = len(seqs)
+        P_actual = A.shape[1]
+
+        # Pad to ensure exactly group_num columns (fill empty bins)
+        if P_actual < group_num:
+            A = np.append(A, np.zeros((K, group_num - P_actual), dtype=np.int32), axis=1)
+        P = group_num
+
+        # Fill empty bins by stealing 1 sequence from the largest bin
+        self._fill_empty_bins(A, seqs, K, P, bin_capacity)
+
         M = -1
         for p in range(P):
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K)) / strategy.parallel_size
@@ -620,6 +642,31 @@ class AdaCPSPOptimizer:
             "A": A,
             "M": M,
         }
+
+    @staticmethod
+    def _fill_empty_bins(A, seqs, K, P, bin_capacity):
+        """
+        Fill empty bins by stealing 1 sequence from the largest non-empty bin.
+        Ensures every bin has at least 1 sequence so all GPU groups are active.
+        (Ported from FlexSP: fill_empty logic in solve_homo_sp_ffd_bfd_globalbatch)
+        """
+        for p in range(P):
+            if np.sum(A[:, p]) == 0:
+                # Find the largest non-empty bin (by sequence count)
+                best_donor = -1
+                best_count = 0
+                for q in range(P):
+                    cnt = int(np.sum(A[:, q]))
+                    if cnt > best_count:
+                        best_count = cnt
+                        best_donor = q
+                if best_donor >= 0 and best_count > 1:
+                    # Steal the smallest sequence from the donor
+                    donor_seqs_idx = [k for k in range(K) if A[k, best_donor] == 1]
+                    donor_seqs_idx.sort(key=lambda k: seqs[k].seq)
+                    k_steal = donor_seqs_idx[0]
+                    A[k_steal, best_donor] = 0
+                    A[k_steal, p] = 1
 
     def solve_adaptive_bfd(self, seqs: List[Sequence]) -> Optional[Dict]:
         """

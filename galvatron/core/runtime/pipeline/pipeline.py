@@ -370,12 +370,19 @@ class PipelineParallel(nn.Module):
             if i == num_microbatches - 1:
                 self.set_last_batch(True)
             cur_microbatch = [microbatches[0][i], microbatches[1][i]] if not args.use_adaCPSP else microbatches[0][i]  
-            if args.use_adaCPSP and hasattr(args, 'adacpsp_strategies') and hasattr(args, 'adacpsp_group_manager'):
+            if args.use_adaCPSP and hasattr(args, 'adacpsp_strategies'):
                 strategy = args.adacpsp_strategies[i]
-                if self.global_rank == 0:
-                    print(f"[AdaCPSP] Microbatch {i}: applying strategy sp={strategy['sp_size']}, cp={strategy['cp_size']}, type={strategy['attn_type']}", flush=True)
+                sp_group = args.adacpsp_sp_groups[i]
+                cp_group = args.adacpsp_cp_groups[i]
                 from galvatron.models.varlen_llama_hf.adacpsp_group_manager import set_model_strategy
-                set_model_strategy(model, strategy["sp_size"], strategy["cp_size"], args.adacpsp_group_manager)
+                set_model_strategy(
+                    model,
+                    sp_size=strategy["sp_size"],
+                    cp_size=strategy["cp_size"],
+                    sp_group=sp_group,
+                    cp_group=cp_group,
+                    attn_type=strategy["attn_type"],
+                )
 
             output_tensor = self.forward_step(
                 forward_step_function(loss_func),

@@ -123,8 +123,9 @@ class Attention(MegatronModule, ABC):
         self.sequence_parallel = config.sequence_parallel
         self.sp_group = sp_group
         self.cp_group = cp_group
-        self.sp_size = torch.distributed.get_world_size(sp_group)
-        self.cp_size = torch.distributed.get_world_size(cp_group)
+        # When group is None, size is 1 (not world_size from default group)
+        self.sp_size = torch.distributed.get_world_size(sp_group) if sp_group is not None else 1
+        self.cp_size = torch.distributed.get_world_size(cp_group) if cp_group is not None else 1
         # For normal attention without groups, num_query_groups == num_attention_heads,
         # so these two will be the same
         self.query_projection_size = self.config.kv_channels * self.config.num_attention_heads
@@ -170,6 +171,11 @@ class Attention(MegatronModule, ABC):
             sp_group=sp_group,
         )
 
+        # AdaCPSP mode: force-create ALL attention modules (flash, zigzag_ring, dist_attn)
+        # so they can be dynamically switched at runtime per microbatch per rank group
+        self.use_adaCPSP = getattr(args, 'use_adaCPSP', False)
+        force_all_modules = self.use_adaCPSP
+
         if self.use_flash_attn:
             self.flash_attention = build_module(
                 submodules.flash_attention,
@@ -177,7 +183,7 @@ class Attention(MegatronModule, ABC):
                 attention_dropout=config.attention_dropout,
             )
         
-        if self.use_zigzag_cp:
+        if self.use_zigzag_cp or force_all_modules:
             assert args.use_flash_attn, "ZigzagRingFlashAttention requires use_flash_attn to be True"
             assert self.attn_mask_type == AttnMaskType.causal, "ZigzagRingFlashAttention is designed for causal attention"
             self.zigzag_ring_flash_attn = build_module(
@@ -188,8 +194,8 @@ class Attention(MegatronModule, ABC):
                 causal=(attn_mask_type == AttnMaskType.causal)
             )
         
-        if self.use_ulysses:#we must use this in packing
-            if self.use_zigzag_cp:
+        if self.use_ulysses or force_all_modules:
+            if self.use_zigzag_cp or force_all_modules:
                 local_attention = self.zigzag_ring_flash_attn
             elif self.use_flash_attn:
                 local_attention = self.flash_attention
@@ -739,12 +745,15 @@ class Attention(MegatronModule, ABC):
                         )
                     else:
                         # Flash attention only (no SP, no CP)
+                        # FlashSelfAttentionVarlen returns [s, b, h, d] format (SBH)
+                        # because it preserves the input format [s, 1, h, d]
                         if not self.sequence_parallel:
                             with tensor_parallel.get_cuda_rng_tracker().fork():
                                 core_attn_out = self.flash_attention(query, key, value, cu_seqlens, max_seqlen)
                         else:
                             core_attn_out = self.flash_attention(query, key, value, cu_seqlens, max_seqlen)
-                        core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
+                        # Output is [s, b, h, d] (SBH) — just flatten h,d
+                        core_attn_out = rearrange(core_attn_out, "s b h d -> s b (h d)").contiguous()
                 else:
                     if self.use_flash_attn:
                         # Ulysses SP path (with or without CP):
@@ -823,10 +832,10 @@ class Attention(MegatronModule, ABC):
         else:
             # No CP: position_ids are simple per-sequence indices
             num_seqs = len(cu_seqlens) - 1
-        position_ids_list = []
-        for i in range(num_seqs):
-            seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
-            position_ids_list.append(torch.arange(seq_len, device=query.device))
+            position_ids_list = []
+            for i in range(num_seqs):
+                seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+                position_ids_list.append(torch.arange(seq_len, device=query.device))
             cp_local_position_ids = torch.cat(position_ids_list, dim=0)  # (cp_local_total_seq,)
         
         # Step 2: Extract SP-local slice of position_ids

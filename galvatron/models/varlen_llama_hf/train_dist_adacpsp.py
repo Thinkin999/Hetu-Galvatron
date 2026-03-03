@@ -1,6 +1,20 @@
+"""
+AdaCPSP Training Script
+=======================
+
+Key design choices (differs from the old tp>=2 approach):
+  - tp_deg = 1 (no tensor parallelism, every GPU has full weights)
+  - FSDP covers ALL GPUs (dp = world_size)
+  - sp_size and cp_size are BOTH dynamic, determined by solver per microbatch
+  - Each microbatch can have HETEROGENEOUS groups with different attn_types
+  - force_all_modules ensures all attention modules (Flash, Ulysses, Ring) are created
+  - Dataloader gives ALL ranks the SAME full global batch;
+    convert_microbatch_res distributes sequences to rank groups.
+"""
+
 import torch
 import torch._dynamo
-torch._dynamo.config.suppress_errors = True  # 抑制 dynamo 编译错误，回退到 eager 模式
+torch._dynamo.config.suppress_errors = True
 
 import torch.distributed
 from transformers import LlamaForCausalLM
@@ -26,6 +40,18 @@ from galvatron.models.varlen_llama_hf.varlen_dataloder import DataLoaderForVarle
 from galvatron.utils import distributed_dataloader, print_loss, set_seed
 
 
+def _parse_forced_strategy(strategy_str):
+    """
+    Parse forced strategy string into list of (attn_type, parallel_size) tuples.
+    Format: "ulysses:4,ring:4" → [("ulysses", 4), ("ring", 4)]
+    """
+    groups = []
+    for part in strategy_str.split(","):
+        attn_type, size = part.strip().split(":")
+        groups.append((attn_type.strip(), int(size.strip())))
+    return groups
+
+
 def train(args):
     local_rank = args.local_rank
     rank = torch.distributed.get_rank()
@@ -49,40 +75,26 @@ def train(args):
         assert args.use_flash_attn, "packing is only supported by flash attention"
 
     # ═══════════════════════════════════════════════════════
-    # AdaCPSP Setup: ensure model is constructed with all
-    # attention modules (Ulysses dist_attn + Ring zigzag_ring)
+    # AdaCPSP Setup
     # ═══════════════════════════════════════════════════════
     adacpsp_optimizer = None
-    group_manager = None
 
     if args.use_adaCPSP:
-        # Force tp_deg >= 2 (→ sp >= 2 when use_ulysses) and cp_deg >= 2
-        # during model construction so that both DistributedAttention
-        # and ZigzagRingFlashAttention modules are created
-        original_tp = args.global_tp_deg
-        original_cp = args.global_cp_deg
+        # tp=1: no tensor parallelism, full weights on every GPU
+        # sp=1, cp=1 during construction: no SP/CP groups initially
+        # dp=world_size: FSDP covers all GPUs
+        # force_all_modules (via args.use_adaCPSP) ensures all attention
+        # modules are created in Attention.__init__
+        args.global_tp_deg = 1
+        args.global_cp_deg = 1
+        # Don't enable Ulysses/SP during construction;
+        # they'll be enabled dynamically per microbatch
+        args.use_ulysses = False
+        args.sequence_parallel = False
 
-        if args.global_tp_deg < 2 or args.global_cp_deg < 2:
-            args.global_tp_deg = max(args.global_tp_deg, 2)
-            args.global_cp_deg = max(args.global_cp_deg, 2)
-            while args.global_tp_deg * args.global_cp_deg > world_size:
-                if args.global_cp_deg > 2:
-                    args.global_cp_deg //= 2
-                elif args.global_tp_deg > 2:
-                    args.global_tp_deg //= 2
-                else:
-                    break
-            # vocab_tp/vocab_cp must match
-            args.vocab_tp = args.global_tp_deg
-            args.vocab_cp = args.global_cp_deg
-
-            if rank == 0:
-                print(f"[AdaCPSP] Overriding construction groups: "
-                      f"tp={original_tp}→{args.global_tp_deg}, cp={original_cp}→{args.global_cp_deg}")
-
-        # Enable both Ulysses and sequence_parallel for model construction
-        args.use_ulysses = True
-        args.sequence_parallel = True
+        if rank == 0:
+            print(f"[AdaCPSP] Model construction: tp=1, sp=1, cp=1, dp={world_size}")
+            print(f"[AdaCPSP] force_all_attn_modules=True (from args.use_adaCPSP)")
 
     # Construct hybrid parallel model
     model = llama_model_hp(config, args)
@@ -92,17 +104,13 @@ def train(args):
         print(f"Model size: {param_size_B:.4f}B parameters")
 
     # ═══════════════════════════════════════════════════════
-    # AdaCPSP: Create CommunicationGroupManager and Optimizer
+    # AdaCPSP: Create Optimizer (no CommunicationGroupManager needed;
+    # convert_microbatch_res creates groups lazily)
     # ═══════════════════════════════════════════════════════
     if args.use_adaCPSP:
-        from galvatron.models.varlen_llama_hf.adacpsp_group_manager import CommunicationGroupManager
         from galvatron.models.varlen_llama_hf.adacpsp_solver import AdaCPSPOptimizer, AdaCPSPCostModel
 
-        # Create group manager with all possible strategies
-        group_manager = CommunicationGroupManager(world_size)
-        args.adacpsp_group_manager = group_manager
-
-        # Create cost model and optimizer
+        # Create cost model
         costmodel = AdaCPSPCostModel(
             cluster_size=world_size,
             hidden_size=config.hidden_size,
@@ -137,15 +145,12 @@ def train(args):
             cluster_size=world_size,
             memory_limit_gb=memory_limit_gb,
             hide_output=(rank != 0),
-            min_parallel_size=args.global_tp_deg,  # sp_size must always = tp_deg
+            # No min_parallel_size constraint now: tp=1, so any sp/cp size works
         )
 
         if rank == 0:
-            strategies = group_manager.get_all_strategies()
             solver_strategies = adacpsp_optimizer.get_strategy_pool()
-            print(f"[AdaCPSP] Group manager strategies (sp,cp): {strategies}")
             print(f"[AdaCPSP] Solver strategies: {solver_strategies}")
-            print(f"[AdaCPSP] Fixed sp_size (=tp_deg): {args.global_tp_deg}")
             print(f"[AdaCPSP] Memory limit: {memory_limit_gb:.1f} GB")
 
     optimizer, opt_param_scheduler = get_optimizer_and_param_scheduler(model, args)
@@ -157,7 +162,16 @@ def train(args):
     if local_rank == 0:
         print("Creating Dataset...")
 
+    # For AdaCPSP: dataloader gives ALL ranks the same data
+    # For non-AdaCPSP: use the dp group for distributed loading
     dataloader_group = model.dp_groups_whole[0].group
+
+    # Parse forced strategy (for heterogeneous group testing)
+    forced_strategy = None
+    if hasattr(args, 'adaCPSP_forced_strategy') and args.adaCPSP_forced_strategy:
+        forced_strategy = _parse_forced_strategy(args.adaCPSP_forced_strategy)
+        if rank == 0:
+            print(f"[AdaCPSP] Forced strategy: {forced_strategy}")
 
     trainloader = distributed_dataloader(
         dataset=DataLoaderForVarlenLlama(args, device),
@@ -166,6 +180,7 @@ def train(args):
         args=args,
         group=dataloader_group,
         adaCPSP_optimizer_=adacpsp_optimizer,
+        adaCPSP_forced_strategy_=forced_strategy,
     )
 
     if local_rank == 0:
