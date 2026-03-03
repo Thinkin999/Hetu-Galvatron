@@ -13,7 +13,7 @@ export PROFILE_LAUNCHER="$LAUNCHER"
 export PROFILE_TRAINER="train_dist_random.py"
 
 MODEL_ARGS="
-    --model_size llama-7b \
+    --model_size qwen2.5-72b \
     --set_model_config_manually 0 \
     --vocab_size 32000 \
     --hidden_size 4096 \
@@ -22,32 +22,33 @@ MODEL_ARGS="
 
 # profile_flow_control: scripts_only, launch_only, data_only, all
 # profile_unit: attention, mlp, all
-PROFILE_ARGS="
-    --profile_mode batch \
-    --profile_type computation \
-    --profile_seq_length_list 2048 \
-    --profile_min_batch_size 1 \
-    --profile_max_batch_size 12 \
-    --profile_batch_size_step 1 \
-    --layernum_min 2 \
-    --layernum_max 4 \
-    --mixed_precision bf16 \
-    --use-flash-attn \
-    --sequence_parallel \
-    --profile_flow_control all \
-    --profile_unit all"
-
 # PROFILE_ARGS="
-#     --profile_mode sequence \
+#     --profile_mode batch \
 #     --profile_type computation \
-#     --profile_batch_size 1 \
-#     --profile_min_seq_length 4096 \
-#     --profile_max_seq_length 32768 \
-#     --profile_seq_length_step 4096 \
-#     --layernum_min 1 \
-#     --layernum_max 2 \
+#     --profile_seq_length_list 2048 \
+#     --profile_min_batch_size 1 \
+#     --profile_max_batch_size 12 \
+#     --profile_batch_size_step 1 \
+#     --layernum_min 2 \
+#     --layernum_max 4 \
 #     --mixed_precision bf16 \
-#     --use-flash-attn"
+#     --use-flash-attn \
+#     --sequence_parallel \
+#     --profile_flow_control all \
+#     --profile_unit all"
+
+PROFILE_ARGS="
+    --profile_mode sequence \
+    --profile_type computation \
+    --profile_batch_size 1 \
+    --profile_min_seq_length 4096 \
+    --profile_max_seq_length  65536 \
+    --profile_seq_length_step 4096 \
+    --layernum_min 1 \
+    --layernum_max 2 \
+    --mixed_precision bf16 \
+    --profile_flow_control data_only \
+    --profile_unit attention"
 
 # models in flash_attn cannot use fp32 without flash_attn
 # PROFILE_ARGS="

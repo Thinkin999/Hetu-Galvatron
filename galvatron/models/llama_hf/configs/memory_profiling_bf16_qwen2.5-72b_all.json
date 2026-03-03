@@ -1,0 +1,194 @@
+{
+    "1_1_8_sp": {
+        "layernum[1]_bsz8_seq1024_rank0_ms": 6442.82568359375,
+        "layernum[1]_bsz8_seq1024_rank0_act": 602.5283203125,
+        "layernum[1]_bsz8_seq1024_rank0_act_peak": 6534.001953125,
+        "layernum[1]_bsz8_seq1024_rank7_ms": 6442.82568359375,
+        "layernum[1]_bsz8_seq1024_rank7_act": 602.5283203125,
+        "layernum[1]_bsz8_seq1024_rank7_act_peak": 6534.001953125,
+        "layernum[2]_bsz8_seq1024_rank0_ms": 8117.37744140625,
+        "layernum[2]_bsz8_seq1024_rank0_act": 876.044921875,
+        "layernum[2]_bsz8_seq1024_rank0_act_peak": 6534.001953125,
+        "layernum[2]_bsz8_seq1024_rank7_ms": 8117.37744140625,
+        "layernum[2]_bsz8_seq1024_rank7_act": 876.044921875,
+        "layernum[2]_bsz8_seq1024_rank7_act_peak": 6534.001953125,
+        "layernum[1]_bsz8_seq4096_rank0_ms": 6444.34912109375,
+        "layernum[1]_bsz8_seq4096_rank0_act": 2410.107421875,
+        "layernum[1]_bsz8_seq4096_rank0_act_peak": 6743.595703125,
+        "layernum[1]_bsz8_seq4096_rank7_ms": 6444.34912109375,
+        "layernum[1]_bsz8_seq4096_rank7_act": 2410.107421875,
+        "layernum[1]_bsz8_seq4096_rank7_act_peak": 6743.595703125,
+        "layernum[2]_bsz8_seq4096_rank0_ms": 8120.40087890625,
+        "layernum[2]_bsz8_seq4096_rank0_act": 3504.1708984375,
+        "layernum[2]_bsz8_seq4096_rank0_act_peak": 7419.146484375,
+        "layernum[2]_bsz8_seq4096_rank7_ms": 8120.40087890625,
+        "layernum[2]_bsz8_seq4096_rank7_act": 3504.1708984375,
+        "layernum[2]_bsz8_seq4096_rank7_act_peak": 7419.146484375
+    },
+    "1_1_8_c_sp": {
+        "layernum[1]_bsz8_seq1024_rank0_ms": 6442.82568359375,
+        "layernum[1]_bsz8_seq1024_rank0_act": 345.01171875,
+        "layernum[1]_bsz8_seq1024_rank0_act_peak": 6534.001953125,
+        "layernum[1]_bsz8_seq1024_rank7_ms": 6442.82568359375,
+        "layernum[1]_bsz8_seq1024_rank7_act": 345.01171875,
+        "layernum[1]_bsz8_seq1024_rank7_act_peak": 6534.001953125,
+        "layernum[2]_bsz8_seq1024_rank0_ms": 8117.37744140625,
+        "layernum[2]_bsz8_seq1024_rank0_act": 361.01171875,
+        "layernum[2]_bsz8_seq1024_rank0_act_peak": 6534.001953125,
+        "layernum[2]_bsz8_seq1024_rank7_ms": 8117.37744140625,
+        "layernum[2]_bsz8_seq1024_rank7_act": 361.01171875,
+        "layernum[2]_bsz8_seq1024_rank7_act_peak": 6534.001953125,
+        "layernum[1]_bsz8_seq4096_rank0_ms": 6444.34912109375,
+        "layernum[1]_bsz8_seq4096_rank0_act": 1380.0439453125,
+        "layernum[1]_bsz8_seq4096_rank0_act_peak": 6641.6416015625,
+        "layernum[1]_bsz8_seq4096_rank7_ms": 6444.34912109375,
+        "layernum[1]_bsz8_seq4096_rank7_act": 1380.0439453125,
+        "layernum[1]_bsz8_seq4096_rank7_act_peak": 6641.6416015625,
+        "layernum[2]_bsz8_seq4096_rank0_ms": 8120.40087890625,
+        "layernum[2]_bsz8_seq4096_rank0_act": 1444.0439453125,
+        "layernum[2]_bsz8_seq4096_rank0_act_peak": 6641.6416015625,
+        "layernum[2]_bsz8_seq4096_rank7_ms": 8120.40087890625,
+        "layernum[2]_bsz8_seq4096_rank7_act": 1444.0439453125,
+        "layernum[2]_bsz8_seq4096_rank7_act_peak": 6641.6416015625
+    },
+    "2_1_4_sp": {
+        "layernum[2]_bsz8_seq1024_rank0_ms": 8117.8583984375,
+        "layernum[2]_bsz8_seq1024_rank0_act": 611.01708984375,
+        "layernum[2]_bsz8_seq1024_rank0_act_peak": 6004.00048828125,
+        "layernum[2]_bsz8_seq1024_rank7_ms": 8118.86474609375,
+        "layernum[2]_bsz8_seq1024_rank7_act": 1237.05517578125,
+        "layernum[2]_bsz8_seq1024_rank7_act_peak": 5745.0576171875,
+        "layernum[2]_bsz8_seq4096_rank0_ms": 8119.4521484375,
+        "layernum[2]_bsz8_seq4096_rank0_act": 2444.06396484375,
+        "layernum[2]_bsz8_seq4096_rank0_act_peak": 6196.00048828125,
+        "layernum[2]_bsz8_seq4096_rank7_ms": 8120.45849609375,
+        "layernum[2]_bsz8_seq4096_rank7_act": 4948.21337890625,
+        "layernum[2]_bsz8_seq4096_rank7_act_peak": 10050.2841796875
+    },
+    "4_1_2_sp": {
+        "layernum[4]_bsz8_seq1024_rank0_ms": 16217.0166015625,
+        "layernum[4]_bsz8_seq1024_rank0_act": 1222.03271484375,
+        "layernum[4]_bsz8_seq1024_rank0_act_peak": 4880.00048828125,
+        "layernum[4]_bsz8_seq1024_rank7_ms": 16217.07958984375,
+        "layernum[4]_bsz8_seq1024_rank7_act": 2474.10791015625,
+        "layernum[4]_bsz8_seq1024_rank7_act_peak": 4364.0458984375,
+        "layernum[4]_bsz8_seq4096_rank0_ms": 16218.7041015625,
+        "layernum[4]_bsz8_seq4096_rank0_act": 4888.12646484375,
+        "layernum[4]_bsz8_seq4096_rank0_act_peak": 7454.25146484375,
+        "layernum[4]_bsz8_seq4096_rank7_ms": 16218.76708984375,
+        "layernum[4]_bsz8_seq4096_rank7_act": 9896.42431640625,
+        "layernum[4]_bsz8_seq4096_rank7_act_peak": 17726.4990234375
+    },
+    "layertype_0_sp": {
+        "1024": {
+            "parameter_size": 3349.103515625,
+            "tp_activation_per_bsz_dict": {
+                "1": 273.5166015625,
+                "checkpoint": 16.0,
+                "2": 136.75830078125,
+                "4": 68.379150390625,
+                "8": 34.1895751953125
+            }
+        },
+        "4096": {
+            "parameter_size": 3352.103515625,
+            "tp_activation_per_bsz_dict": {
+                "1": 1094.0634765625,
+                "checkpoint": 64.0,
+                "2": 547.03173828125,
+                "4": 273.515869140625,
+                "8": 136.7579345703125
+            }
+        }
+    },
+    "other_memory_pp_off_sp": {
+        "1024": {
+            "model_states": {
+                "1": 38146.19140625,
+                "2": 19073.095703125,
+                "4": 9536.5478515625,
+                "8": 4768.27392578125
+            },
+            "activation": {
+                "1": 6260.4853515625,
+                "2": 3130.24267578125,
+                "4": 1565.121337890625,
+                "8": 782.5606689453125
+            }
+        },
+        "4096": {
+            "model_states": {
+                "1": 38146.37890625,
+                "2": 19073.189453125,
+                "4": 9536.5947265625,
+                "8": 4768.29736328125
+            },
+            "activation": {
+                "1": 5649.5322265625,
+                "2": 2824.76611328125,
+                "4": 1412.383056640625,
+                "8": 706.1915283203125
+            }
+        }
+    },
+    "other_memory_pp_on_first_sp": {
+        "1024": {
+            "model_states": {
+                "1": 19037.619140625,
+                "2": 9518.8095703125,
+                "4": 4759.40478515625,
+                "8": 2379.702392578125
+            },
+            "activation": {
+                "1": 946.4835205078125,
+                "2": 473.24176025390625,
+                "4": 236.62088012695312,
+                "8": 118.31044006347656
+            }
+        },
+        "4096": {
+            "model_states": {
+                "1": 19028.994140625,
+                "2": 9514.4970703125,
+                "4": 4757.24853515625,
+                "8": 2378.624267578125
+            },
+            "activation": {
+                "1": 769.4993896484375,
+                "2": 384.74969482421875,
+                "4": 192.37484741210938,
+                "8": 96.18742370605469
+            }
+        }
+    },
+    "other_memory_pp_on_last_sp": {
+        "1024": {
+            "model_states": {
+                "1": 19037.7451171875,
+                "2": 9518.87255859375,
+                "4": 4759.436279296875,
+                "8": 2379.7181396484375
+            },
+            "activation": {
+                "1": 817.494873046875,
+                "2": 408.7474365234375,
+                "4": 204.37371826171875,
+                "8": 102.18685913085938
+            }
+        },
+        "4096": {
+            "model_states": {
+                "1": 19029.1201171875,
+                "2": 9514.56005859375,
+                "4": 4757.280029296875,
+                "8": 2378.6400146484375
+            },
+            "activation": {
+                "1": 3337.561279296875,
+                "2": 1668.7806396484375,
+                "4": 834.3903198242188,
+                "8": 417.1951599121094
+            }
+        }
+    }
+}

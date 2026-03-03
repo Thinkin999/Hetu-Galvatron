@@ -39,7 +39,8 @@ def calculate_predicted_logits(
         )
     )
 
-    predicted_logits_sum_exp_logits = torch.cat((predicted_logits, sum_exp_logits))
+    # Flatten tensors before concatenation to handle different shape layouts
+    predicted_logits_sum_exp_logits = torch.cat((predicted_logits.reshape(-1), sum_exp_logits.reshape(-1)))
 
     return target_mask, masked_target_1d, predicted_logits_sum_exp_logits, exp_logits
 
@@ -53,7 +54,10 @@ def calculate_cross_entropy_loss(
     """
     split_val = predicted_logits_sum_exp_logits.size()[0] // 2
     predicted_logits, sum_exp_logits = torch.split(predicted_logits_sum_exp_logits, split_val)
-
+     # Reshape back to match exp_logits shape (without the last vocab dimension)
+    original_shape = exp_logits.shape[:-1]
+    predicted_logits = predicted_logits.view(original_shape)
+    sum_exp_logits = sum_exp_logits.view(original_shape)
     exp_logits, loss = VocabParallelCrossEntropy.calculate_cross_entropy_loss(
         exp_logits, predicted_logits, sum_exp_logits
     )

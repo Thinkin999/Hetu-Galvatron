@@ -34,6 +34,19 @@ def get_default_causal_mask(sq: int) -> torch.Tensor:
 
 # pylint: disable=missing-function-docstring
 def attention_mask_func(attention_scores, attention_mask):
+    # Handle shape mismatch between attention_scores and attention_mask
+    # attention_scores: [b, np, sq, sk]
+    # attention_mask: [1, 1, mask_sq, mask_sk] or compatible shape
+    if attention_mask.dim() == 4 and attention_scores.dim() == 4:
+        sq, sk = attention_scores.size(2), attention_scores.size(3)
+        mask_sq, mask_sk = attention_mask.size(2), attention_mask.size(3)
+        
+        # If mask dimensions don't match, slice the mask to fit
+        if mask_sq != sq or mask_sk != sk:
+            # For cases like KV cache where sq=sk=1 but mask is full size
+            # Take the last sq rows and last sk columns of the mask
+            attention_mask = attention_mask[:, :, -sq:, -sk:]
+    
     attention_scores.masked_fill_(attention_mask, -10000.0)
     return attention_scores
 

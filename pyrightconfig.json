@@ -1,0 +1,9 @@
+{
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.autoSearchPaths": true,
+    "python.analysis.extraPaths": [
+      "/home/pkuhetu/lqs/galvatron_lxy/Hetu-Galvatron",
+      "/home/pkuhetu/lqs/galvatron_lxy/Hetu-Galvatron/galvatron/site_package"
+    ]
+  }

@@ -13,7 +13,7 @@ export PROFILE_LAUNCHER="$LAUNCHER"
 export PROFILE_TRAINER="train_dist_random.py"
 
 MODEL_ARGS="
-    --model_size llama-7b \
+    --model_size qwen2.5-72b \
     --set_model_config_manually 0 \
     --vocab_size 32000 \
     --hidden_size 4096 \
@@ -29,7 +29,7 @@ PROFILE_ARGS_BF16="
     --profile_seq_length_list 4096 \
     --layernum_min 1 \
     --layernum_max 2 \
-    --max_tp_deg 8 \
+    --max_tp_deg 1 \
     --profile_dp_type zero3 \
     --mixed_precision bf16 \
     --sequence_parallel \

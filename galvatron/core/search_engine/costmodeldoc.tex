@@ -1,0 +1,281 @@
+%!xelatex = 'xelatex --halt-on-error %O %S'
+
+\documentclass{thuemp}
+
+\usepackage{amsfonts,amssymb} 
+\usepackage{flushend}
+
+\newcommand{\bbb}{\noindent\textbf}
+\begin{document}
+
+
+\newcommand{\red}[1]{{\textcolor{red}{{#1}}}}
+\newcommand{\blue}[1]{{\textcolor{blue}{{#1}}}}
+\newcommand{\acheck}[1]{{\textcolor{gray}{{#1}}}}
+
+% 标题，作者
+\emptitle{Galvatron代价建模技术文档}
+% \empauthor{作者}
+
+% 奇数页页眉 % 请在这里写出第一作者以及论文题目
+% \fancyhead[CO]{{\footnotesize 课程名字}}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 关键词 摘要 首页脚注
+%%%%%%%%关键词
+% \Keyword{关键词内容}
+\twocolumn[
+\begin{@twocolumnfalse}
+\maketitle
+
+% %%%%%%%%摘要
+% \begin{empAbstract}
+
+% 摘要内容
+% \end{empAbstract}
+
+%%%%%%%%首页角注，依次为实验时间、报告时间、学号、email
+% \empfirstfoot{2022-02-22}{2033-33-33}{2018123236}{lmytime@hotmail.com}
+\end{@twocolumnfalse}
+]
+%%%%%%%%！首页角注可能与正文重叠，请通过调整正文中第一页的\enlarethispage{-3.3cm}位置手动校准正文底部位置：
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  正文由此开始
+\wuhao 
+%  分栏开始
+
+\section{概述}
+Galvatron提供了一个代价估计模块(Cost Estimator)来对分布式并行训练中的计算、通信、内存开销做估计。Galvatron使用了profiling和simulating相结合的方式，来估计各项开销。由于Galvatron对并行策略做逐层的细粒度优化，因此Galvatron对内存和时间开销也会逐层做建模，并对于不同的混合并行策略均提供准确的建模方案。
+
+
+\section{内存开销建模}
+深度学习模型训练的内存开销由两部分组成：模型状态(Model States)和激活值(Activations)。Galvatron对这两部分内存开销分开建模并求和。
+\subsection{模型状态内存开销}
+模型状态内存开销包括三部分：模型参数、参数梯度、优化器状态。参数梯度与模型参数通常等量，优化器状态在常用的Adam优化器下为模型参数的两倍。将模型参数量记作 $p$，则模型状态的总量为 $ms=4 \times p$。
+需要注意在开启张量并行(Tensor Parallel, TP)时，若设$N_t$为TP degree，则Galvatron估计单卡上的模型参数量为$p/N_t$（忽略不做切分的LayerNorm等算子），对应模型状态为 $ms=4p/N_t$。
+Galvatron对模型参数量进行profiling，然后基于理论进行simulating。
+
+% \acheck{需要解释fp32/bf16下ddp/zero-1/zero-2/zero-3下的建模公式，以及当开启梯度累积时gradient不做shard时的计算公式。}
+
+针对 $1B$ 参数量的模型，模型状态相关开销为：
+\begin{itemize}
+    \item FP32，一个FP32数占4字节。
+    \begin{enumerate}
+        \item 模型参数：$4\ bytes \times 1B = 4\ GB$
+        \item 参数梯度：$4\ bytes \times 1B = 4\ GB$
+        \item 优化器状态：参数梯度的mean和variance (FP32) $2\times 4\ bytes \times 1B = 8\ GB$
+    \end{enumerate}
+
+   \item BF16，一个BF16数占2字节，混合精度训练需要一份FP32模型参数拷贝。
+    \begin{enumerate}
+        \item 模型参数：$2\ bytes \times 1B = 2\ GB$
+        \item 参数梯度：$2\ bytes \times 1B = 2\ GB$
+        \item 优化器状态：参数梯度的mean和variance (FP32) 以及一份FP32模型参数拷贝 $3\times 4\ bytes \times 1B = 12\ GB$
+    \end{enumerate}
+\end{itemize}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{image/zero-memory-consumption.png}
+    \caption{不同SDP ZeRO stage的模型状态内存开销示例图，以BF16混合精度训练为例，取$K=12$。}
+    \label{fig:zero-memory}
+\end{figure}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{image/pipedream-flush.pdf}
+    \caption{PipeDream-Flush的流水线示意图。图中展示了1个完整的global batch。}
+    \label{fig:pipedream-flush}
+\end{figure*}
+
+另一方面，Galvatron对分片数据并行(Sharded Data Parallel, SDP)不同ZeRO stage的内存开销做了建模。
+图~\ref{fig:zero-memory}展示了不同ZeRO stage的内存消耗情况，以BF16混合精度训练为例。
+我们设$N_d$表示DP (SDP) degree。
+Galvatron在构建模型状态的内存开销建模时，使用\texttt{zero2\_ratio}和\texttt{zero3\_ratio}作为原始DP模型状态 $ms$ （可能带TP）的放缩因子。
+在未开启混合精度训练的情况下(FP32)，
+\begin{align*}
+    \texttt{zero2\_ratio} &= \frac{P_{\text{os+g}}}{P_{\text{baseline}}} \\
+    &= \frac{4+(4+8)/N_d}{4+4+8} = \frac{1}{4}+\frac{3}{4}\frac{1}{N_d}, \\
+    \texttt{zero3\_ratio} &= \frac{P_{\text{os+g+p}}}{P_{\text{baseline}}} \\
+    &= \frac{(4+4+8)/N_d}{4+4+8}=\frac{1}{N_d}.
+\end{align*}
+特别地，当梯度累积(Gradient Accumulation)开启时（例如开启流水并行(Pipeline Parallel, PP)且microbatch数量大于1时），参数梯度通常不参与ZeRO切分，即所有设备上都持有完整的参数梯度，这是为了避免每个计算step都需要反复同步梯度而引起过大的通信开销。此时，由于梯度不做切分，故ZeRO-2、ZeRO-3的显存表现分别退化为ZeRO-1、ZeRO-2的显存表现。
+因此，
+\begin{align*}
+    \texttt{zero2\_ratio} &= \frac{P_{\text{os}}}{P_{\text{baseline}}} \\
+    &= \frac{4+4+8/N_d}{4+4+8} = \frac{1}{2}+\frac{1}{2}\frac{1}{N_d}, \\
+    \texttt{zero3\_ratio} &= \frac{P_{\text{os+p}}}{P_{\text{baseline}}} = \frac{P_{\text{os+g}}}{P_{\text{baseline}}} = \frac{1}{4}+\frac{3}{4}\frac{1}{N_d}.
+\end{align*}
+
+类似地可以推导开启混合精度训练的情况(BF16)。
+无梯度累积时，
+\begin{align*}
+    \texttt{zero2\_ratio} &= \frac{P_{\text{os+g}}}{P_{\text{baseline}}} \\
+    &= \frac{2+(2+12)/N_d}{2+2+12} = \frac{1}{8}+\frac{7}{8}\frac{1}{N_d}, \\
+    \texttt{zero3\_ratio} &= \frac{P_{\text{os+g+p}}}{P_{\text{baseline}}} = \frac{1}{N_d}.
+\end{align*}
+有梯度累积时，
+\begin{align*}
+    \texttt{zero2\_ratio} &= \frac{P_{\text{os}}}{P_{\text{baseline}}} \\
+    &= \frac{2+2+12/N_d}{2+2+12}=\frac{1}{4}+\frac{3}{4}\frac{1}{N_d}, \\
+    \texttt{zero3\_ratio} &= \frac{P_{\text{os+p}}}{P_{\text{baseline}}} = \frac{P_{\text{os+g}}}{P_{\text{baseline}}} = \frac{1}{8}+\frac{7}{8}\frac{1}{N_d}.
+\end{align*}
+
+% 最新版本Galvatron支持梯度累积(Gradient Accumulation)。
+% 在开启梯度累积的情况下，参数梯度不参与ZeRO的切分，\texttt{zero2\_ratio}和\texttt{zero3\_ratio}计算与开启流水并行相同。
+
+\subsection{激活值内存开销}
+激活值内存开销由逐样本激活值开销与当前层的local batch size相乘得到。
+
+% \acheck{profile逐样本激活值开销，对不同tp deg分别profile。}
+% \acheck{global batch size换算到local batch size的公式，需要提当pipeline为pipedream-flush时，每个stage的local batch size不同}
+
+Galvatron对不同TP degree $N_t$ 分别profile得到各自的逐样本激活值开销$act(N_t)$。
+特别地，对于开启激活值重计算（Activation Checkpointing，也称Gradient Checkpointing，简记为CKPT）的情况，我们单独做了profile结果$act_{\text{ckpt}}$，其激活值在正向阶段算完即释放。
+在同一个PP stage内，local batch size $b$不变，一般情况下为 $b=B/N_d$, 这里 $B$ 为global batch size。
+
+需要注意的是，对PipeDream-Flush（即PP类型为\texttt{pipedream\_flush}），每个PP stage的local batch size不同。
+越靠前的PP stage含有越多的in-flight microbatch，因而对应的local batch size越大。
+假设$N_p$为PP degree，共有$m$个microbatch（$m$ 也称为chunk个数）：$mbs_1,mbs_2,\dots,mbs_m$，
+Galvatron定义第$i$个PP stage $M_i$实际的1F1B\footnote{PipeDream-Flush的计算调度模式为1F1B，即流水线处于稳态时，每个设备交替执行1次Forward 1次Backward。}比例为
+\begin{equation*}
+    \texttt{1f1b\_ratio}(M_i) = \frac{\sum_{m=1}^{m_i} mbs_i}{\sum_{i=1}^m mbs_i}, \forall\ 0 \leq i < N_p.
+\end{equation*}
+其中，$m_i=\min (N_p-i, m)$ 为stage $M_i$的in-flight microbatch数。
+于是，stage $M_i$的local batch size为$b_i=\texttt{1f1b\_ratio}(M_i) \times b$。
+
+以图~\ref{fig:pipedream-flush}为例，$N_p=4,m=8$。
+stage $M_0$需要存储4个microbatch的激活值，等stage $M_3$ 结束第1个microbatch的正向计算后进入空闲等待(Idle)，直到stage $M_1$ 完成第1个microbatch的反向计算才开始做第1个microbatch的反向计算，从而释放第1个microbatch的激活值。
+同理，stage $M_1$需要存储3个microbatch的激活值，以此类推。
+
+% \blue{这个公式不太好懂，考虑简单画个图示意一下，可以把pipedream-flush的schedule图拿过来，然后示意一下每个stage需要保存哪几份microbatch，用具体例子讲解一下in-flight microbatch的含义。另外公式里的符号m和c感觉有点混乱？}
+
+% \subsection{Other Memory Cost}
+% % 感觉这块没必要写，一些encoder层以外的开销
+% \red{是否需要介绍？如有需要，驭捷师兄可以帮忙写一下嘛，我看代码里情况比较繁琐，还带有特定模型结构的判断，我不太能get。可以简单说一下}
+
+% \red{重计算的部分放在了Other Memory Cost里，是否需要介绍}
+
+
+\section{时间开销建模}
+分布式训练的时间开销主要由计算开销(Computation)、通信开销(Communication)组成，不同的并行策略会带来不同的通信开销，同时通信与计算之间、通信与通信之间都可能发生重叠(Overlapping)，Galvatron对这些复杂情况均提供估计方案。
+
+\subsection{每层时间建模}
+\subsubsection{计算时间开销}
+首先，对于给定模型负载，Galvatron通过profiling的方式得到该模型逐层逐样本计算时间，在同构集群下，这一过程通常可以在单卡上进行。
+其次，Galvatron认为计算时间与计算量近似成正比，而每一层的计算量与local batch size成正比，与TP degree $N_t$成反比，因此，Galvatron将逐层逐样本计算时间与当前层local batch size相乘，并除以TP degree $N_t$，来估计该层计算时间。
+
+目前，Galvatron对正向计算时间提供三种建模方式：static、batch和sequence，对于static模式，Galvatron在对计算做profile时默认GPU kernel近似被打满，这在大模型训练中是常态，因此总计算时间可被近似认为关于计算量成正比；对于batch模式，Galvatron将kernel launch等时间考虑在内，将计算时间被近似认为关于计算量成一次函数，采用profile多个不同batch size下的计算时间，拟合成一次函数的方式，估计不同计算量和计算时间的关系；对于sequence模式，Galvatron则是可以估计不同序列长度的计算时间，具体来说，计算时间被近似认为关于序列长度成二次函数，采用profile多个不同序列长度下的计算时间，拟合成二次函数的方式，估计不同序列长度和计算时间的关系。前两种模式是只能用于估计固定序列长度的计算时间，后一种方式则是可以估计任意长度序列的计算时间。
+
+除此之外，反向计算开销被近似估计为正向计算的两倍，这是因为对于密集矩阵乘法构成的Transformer模型，反向传播的计算量通常是正向传播的两倍。Galvatron未来也可以支持更加精确的计算时间profiling和估计，例如以profile散点和拟合曲线的方式，将GPU kernel计算效率的变化也考虑在内，精确估计计算量和计算时间的关系。
+
+% 其次，Galvatron默认profiling和计算建模时GPU均处于利用率峰值，因而计算每层的计算时间只需乘上local batch size，再除以TP degree $N_t$。
+% 反向计算通常被估计为正向2倍，该倍数由\texttt{bct\_fct\_coe}控制。
+
+特别地，当重计算技术开启时，Galvatron会在反向传播计算的开销上加上一份额外的正向计算开销，以此模拟重计算的开销。
+
+\subsubsection{通信时间开销}
+首先，Galvatron使用\texttt{NCCL Tests} \ profile机内和机间的通信带宽(\texttt{AllReduce} for DP \& TP, \texttt{P2P} for PP)。
+然后，Galvatron计算理论通信量，将之与对应通信速率相乘以建模通信时间开销。
+
+不同的并行技术会带来不同的通信量。具体而言，DP、ZeRO-1/2的通信量均为约2倍的模型参数量 $p$，其计算公式具体为 $2 \frac{N_d-1}{N_d} \times p$，ZeRO-3额外需要在正向计算时引入\texttt{AllGather}拉取模型参数，总通信量为DDP的1.5倍。
+TP在MLP和Attention模块的正向和反向需各做一次\texttt{AllReduce}，每次通信的张量形状为$[b, \texttt{seq\_len}, \texttt{hidden\_size}]$, 通信量计算公式同前类似。
+对于Encoder和不含Cross Attention的Decoder，共进行4次TP \texttt{AllReduce}；对于含Cross Attention的Decoder，共进行6次TP \texttt{AllReduce}。
+PP在stage间进行P2P通信，其通信开销同样可以由通信的张量形状和通信速率相乘计算得到。
+
+特别地，当重计算技术开启时，某些并行技术也会带来额外通信，例如，TP在正向阶段的\texttt{AllReduce}时间会在反向阶段被额外执行一次，以及ZeRO-3的\texttt{AllGather}参数拉取同样会在反向执行一次，这些开销也将被估计在内。
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{image/comp-comm-overlap.pdf}
+    \caption{计算与通信重叠示意图。图中重叠(overlap)部分在建模开销时乘上overlap delay系数以模拟降速，其余部分时间开销为简单相加。}
+    \label{fig:comp_comm_overlap}
+\end{figure*}
+
+\subsubsection{重叠建模}
+Overlapping会发生在通信与通信之间，也会发生在通信与计算之间。
+
+对于通信与通信overlap，我们通过实验发现通信与通信overlap
+\footnote{例如TP \texttt{AllReduce}和DP \texttt{AllReduce}。}
+时，其总时间和两者不overlap先后执行的时间几乎完全一致。
+因此，Galvatron直接将两部分通信单独执行的预估时间相加，得到其总时间估计。
+
+当计算与通信发生overlap时，CUDA内核(Kernel)会同时被计算和通信抢占导致降速。
+Galvatron通过提前profile硬件环境得到overlap delay系数$c_{\text{overlap}}$，代表kernel降速比例\footnote{在Titan RTX上这个值约为1.3，在A100上这个值约为1.15，在Ascend 910B4上这个值为1.3。}。
+
+如图~\ref{fig:comp_comm_overlap} 所示，计算与通信overlap的部分主要为模型反向计算部分和数据并行的参数梯度的同步（例如DP的\texttt{AllReduce}，SDP的\texttt{ReduceScatter})。
+因此Galvatron将考虑计算和通信overlap后的单层时间开销时间建模为
+% \begin{align*}
+%     T_{\text{overall}} = T_{\text{fct}} & + T_{\text{tp\_comm}} + T_{\text{dp\_allgather}} \\
+%     & + \operatorname{overlap}(T_{\text{bct}}, T_{\text{dp\_overlap}}) \times c_{\text{overlap}} \\
+%     & + \operatorname{rest}(T_{\text{bct}}, T_{\text{dp\_overlap}}).
+% \end{align*}
+% 上式中 $T_{\text{fct}}, T_{\text{bct}}$ 分别表示正向计算时间和反向计算时间，$T_{\text{tp\_comm}}, T_{\text{dp\_allgather}}, T_{\text{dp\_overlap}}$ 分别表示TP \texttt{AllReduce}时间、ZeRO \texttt{AllGather}时间和参与overlap的DP通信时间。
+\begin{align*}
+    T_{\text{overall}} = T_{\text{fct}} & + T_{\text{comm\_no\_overlap}} \\
+    & + \operatorname{overlap}(T_{\text{bct}}, T_{\text{comm\_overlap}}) \times c_{\text{overlap}} \\
+    & + \operatorname{rest}(T_{\text{bct}}, T_{\text{comm\_overlap}}).
+\end{align*}
+上式中 $T_{\text{fct}}, T_{\text{bct}}$ 分别表示正向计算时间和反向计算时间，$T_{\text{comm\_no\_overlap}}, T_{\text{comm\_overlap}}$ 分别表示不与计算发生overlap的通信的时间（例如TP的\texttt{AllReduce}，SDP ZeRO-3正向拉取参数的\texttt{AllGather}），以及可以与计算发生overlap的通信事件（例如DP的\texttt{AllReduce}，SDP的\texttt{ReduceScatter}）。公式中overlap表示两者重叠部分可以并发进行，但执行速度会由于kernel抢占而降速，开销将被乘上overlap delay系数，而rest部分指的是计算和通信中更长的一项在另一项执行完毕后继续正常执行，这部分不存在kernel抢占因此不会降速。
+
+% \blue{overlap这里也可以画个图讲解一下，overlap的部分乘上降速系数，剩余部分正常执行}
+
+\subsection{总时间建模}
+Galvatron对每层时间求和得到PP stage $M_i$的时间$C(M_i, b_m)$，这里$m$是该stage microbatch个数，$b_m=b/m$为microbatch size。
+考虑到每个PP stage只有最后一个microbatch要做梯度同步(Gradient Synchronization)，故所有PP stage时间总和为
+\begin{align*}
+    C(M,b) =\ & (m-1) \times  C_{\text{no\_grad\_sync}}(M_{N_p-1}, b_m) \\
+    & + \sum_{i=0}^{N_p-1} C(M_i, b_m),
+\end{align*}
+这里$C_{\text{no\_grad\_sync}}(M_i, b_m)$为PP stage $M_i$ microbatch size为$b_m$时不做梯度同步的时间开销，对应前$m-1$个microbatch。
+而$C(M_i,b_m)$给出了最后一个microbatch的时间开销。
+
+然而，因为不同PP stage计算时间可能不同，因此这里Galvatron还提出了针对负载不均情况下的时间建模方式：Galvatron首先假设$C(M_0,b_m) > C(M_1,b_m) > ... > C(M_{N_p-1},b_m)$，这一点是符合经验的，因为通常靠前的PP stage会承担更大的显存压力，更有可能去选择较慢的并行策略来换取较优的内存使用。据此，Galvatron先不考虑梯度同步时间，将其他部分时间分为warmup、cooldown和1F1B三部分分别进行估计，对于warmup，时间估计为
+\begin{align*}
+C(M,b)_{\text{warmup}}  & = \max( \\
+\min (N_p -1, m-1) & \times C_{\text{no\_grad\_sync}}(M_0,b_m),  \\
+\sum_{i=1}^{N_p-1} & C_{\text{no\_grad\_sync}}(M_i,b_m)) * \frac 1 3,
+\end{align*}
+对于cooldown，时间估计为
+\begin{align*}
+C(M,b)_{\text{cooldown}}  & = \max( \\
+\min (N_p -1, m-1) & \times C_{\text{no\_grad\_sync}}(M_0,b_m),  \\
+\sum_{i=1}^{N_p-1} & C_{\text{no\_grad\_sync}}(M_i,b_m)) * \frac 2 3,
+\end{align*}
+对于1F1B，时间估计为
+\begin{align*}
+C(M,b)_{\text{1F1B}}  & = \\
+C_{\text{no\_grad\_sync}}(M_0,b_m)  & \times \max(0, m + 1 - N_p),
+\end{align*}
+最后总时间则建模为
+\begin{align*}
+C(M,b)  & = C(M,b)_{\text{warmup}} + \\
+C(M,b)&_{\text{cooldown}} + C(M,b)_{\text{1F1B}} + \\
+C(M_0,b_m)& - C_{\text{no\_grad\_sync}}(M_0,b_m)
+\end{align*}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  参考文献
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  参考文献按GB/T 7714－2015《文后参考文献著录规则》的要求著录. 
+%  参考文献在正文中的引用方法：\cite{bib文件条目的第一行}
+
+% \renewcommand\refname{\heiti\wuhao\centerline{参考文献}\global\def\refname{参考文献}}
+% \vskip 12pt
+
+% \let\OLDthebibliography\thebibliography
+% \renewcommand\thebibliography[1]{
+%   \OLDthebibliography{#1}
+%   \setlength{\parskip}{0pt}
+%   \setlength{\itemsep}{0pt plus 0.3ex}
+% }
+
+% {
+% \renewcommand{\baselinestretch}{0.9}
+% \liuhao
+% \bibliographystyle{plain}
+% \bibliography{TempExample}
+% }
+
+
+\end{document}

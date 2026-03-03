@@ -59,7 +59,7 @@ class LlamaAttention_tp(nn.Module):
             rotary_base=args.rotary_base,
             cp_group=self.cp_group, sp_group=self.sp_group
         )
-
+#attention mask还真得有
     def forward(self, hidden_states, attention_mask, rotary_embedding):
         input_tensor = hidden_states
         hidden_states = self.LayerNorm(hidden_states)
