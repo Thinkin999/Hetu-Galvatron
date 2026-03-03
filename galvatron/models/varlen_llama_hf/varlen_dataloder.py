@@ -16,7 +16,11 @@ class DataLoaderForVarlenLlama(Dataset):
         if args.dataset == "fix_length":
             self.data_length = np.full((self.dataset_size,), self.sentence_length)
         elif args.dataset == "random":
-            self.data_length = np.random.randint(2,self.sentence_length,(self.dataset_size,))
+            raw_lengths = np.random.randint(2,self.sentence_length,(self.dataset_size,))
+            # Pad lengths to be multiples of 2*world_size for CP/SP compatibility
+            align = 2 * world_size
+            self.data_length = ((raw_lengths - 1) // align + 1) * align
+            self.data_length = np.minimum(self.data_length, self.sentence_length)
         else:
             text_length = []
             tmp = 0

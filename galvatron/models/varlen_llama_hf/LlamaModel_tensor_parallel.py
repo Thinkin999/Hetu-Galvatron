@@ -157,7 +157,10 @@ def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc,
             megatron_config.hidden_size,
             config=megatron_config,
             init_method=megatron_config.init_method,
-            reduce_scatter_embeddings=args.sequence_parallel,
+            # For varlen packing, the embedding input is 1D (packed_tokens,).
+            # VocabParallelEmbedding's reduce_scatter does a transpose(0,1) assuming [b,s,h]->[s,b,h]
+            # which is wrong for 1D packed input. Disable it for packing mode.
+            reduce_scatter_embeddings=args.sequence_parallel and not getattr(args, 'use_packing', False),
             tp_group=tp_groups_enc[0].group,
             sp_group=sp_groups_enc[0].group,
             cp_group=cp_groups_enc[0].group

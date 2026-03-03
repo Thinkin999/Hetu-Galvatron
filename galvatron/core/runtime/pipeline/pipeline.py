@@ -340,16 +340,21 @@ class PipelineParallel(nn.Module):
             #micro_kwargs = chunk_dict(kwargs, self.chunks)#TODO: support chunk kwargs
             microbatches = [chunk_batch(batch[0], self.chunks), chunk_batch(batch[1], self.chunks)]
         else:
-            pass#support adaCPSP
+            # AdaCPSP: microbatches already organized by solver in collate_fn
+            # batch = [[[tokens_0, cu_0], [labels_0]], [[tokens_1, cu_1], [labels_1]], ...]
+            microbatches = [batch, None]  # wrap so microbatches[0] = list of microbatch data
 
         self.real_chunks = len(microbatches[0])
         if self.chunks != self.real_chunks and self.chunk_warning:
             if self.global_rank == 0:
-                print(
-                    "\nWarning from PipelineParallel Module: Real chunks is %d !" % self.real_chunks,
-                    "Microbatch sizes is",
-                    [m[0][0].shape[0] for m in microbatches],
-                )
+                if not args.use_adaCPSP:
+                    print(
+                        "\nWarning from PipelineParallel Module: Real chunks is %d !" % self.real_chunks,
+                        "Microbatch sizes is",
+                        [m[0][0].shape[0] for m in microbatches],
+                    )
+                else:
+                    print(f"\n[AdaCPSP] Using {self.real_chunks} microbatch(es)")
                 print()
                 self.chunk_warning = False
 
@@ -365,12 +370,15 @@ class PipelineParallel(nn.Module):
             if i == num_microbatches - 1:
                 self.set_last_batch(True)
             cur_microbatch = [microbatches[0][i], microbatches[1][i]] if not args.use_adaCPSP else microbatches[0][i]  
-            if args.use_adaCPSP:
-                args.sp_group = args.sp_groups[i]#TODO: 这里应该怎么去换呢？
+            if args.use_adaCPSP and hasattr(args, 'adacpsp_strategies') and hasattr(args, 'adacpsp_group_manager'):
+                strategy = args.adacpsp_strategies[i]
+                if self.global_rank == 0:
+                    print(f"[AdaCPSP] Microbatch {i}: applying strategy sp={strategy['sp_size']}, cp={strategy['cp_size']}, type={strategy['attn_type']}", flush=True)
+                from galvatron.models.varlen_llama_hf.adacpsp_group_manager import set_model_strategy
+                set_model_strategy(model, strategy["sp_size"], strategy["cp_size"], args.adacpsp_group_manager)
+
             output_tensor = self.forward_step(
-                #forward_step_function(loss_func, **micro_kwargs[i]),
                 forward_step_function(loss_func),
-                # forward_step_func,
                 cur_microbatch,
                 model,
                 None,

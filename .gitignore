@@ -10,3 +10,8 @@ coverage.xml
 .eggs/
 *.tar.gz
 __pycache__
+
+# Binary / generated files
+*.png
+*.jpg
+*.jpeg

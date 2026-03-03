@@ -358,11 +358,18 @@ class FlashSelfAttentionVarlen(torch.nn.Module):
         cu_seqlens_int32 = cu_seqlens.to(torch.int32)
         
         # Ensure q, k, v are 3D: (total_seq, num_heads, head_dim)
-        # Input might be (seq, batch=1, heads, dim), need to squeeze batch dim
+        # Input might be (batch=1, seq, heads, dim) or (seq, batch=1, heads, dim)
         squeezed = False
-        if q.dim() == 4 and q.size(1) == 1:
-            q, k, v = [x.squeeze(1) for x in [q, k, v]]
-            squeezed = True
+        squeeze_dim = -1
+        if q.dim() == 4:
+            if q.size(0) == 1:
+                # [1, s, h, d] format (from Ulysses all-to-all with batch_dim_idx=0)
+                q, k, v = [x.squeeze(0) for x in [q, k, v]]
+                squeezed, squeeze_dim = True, 0
+            elif q.size(1) == 1:
+                # [s, 1, h, d] format (direct call with packed sequences)
+                q, k, v = [x.squeeze(1) for x in [q, k, v]]
+                squeezed, squeeze_dim = True, 1
 
         output = flash_attn_unpadded_func(
             q,
@@ -378,9 +385,8 @@ class FlashSelfAttentionVarlen(torch.nn.Module):
         )
         
         # Add back the batch dimension if it was squeezed
-        # Output should be (b, s, h, d) format to match rearrange expectation
         if squeezed:
-            output = output.unsqueeze(0)  # (s, h, d) -> (1, s, h, d) = (b, s, h, d)
+            output = output.unsqueeze(squeeze_dim)
 
         return output
 
@@ -1540,6 +1546,8 @@ class ZigZagRingFlashAttnVarlenFunc(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         assert alibi_slopes is None
+        # Flash attention requires cu_seqlens to be int32
+        cu_seqlens = cu_seqlens.to(torch.int32)
         k = k.contiguous()
         v = v.contiguous()
         half_index0 = get_half_index(cu_seqlens, front=True)
@@ -1658,10 +1666,10 @@ class ZigzagRingFlashAttentionVarlen(torch.nn.Module):
             q, k, v,
             cu_seqlens,
             max_seqlen,
-            self.attention_dropout,
-            self.softmax_scale,
-            self.causal,
-            self.cp_process_group,
+            dropout_p=self.attention_dropout,
+            softmax_scale=self.softmax_scale,
+            causal=self.causal,
+            group=self.cp_process_group,
         )
         return context.unsqueeze(0)#adapt to ulysses
 
@@ -1983,6 +1991,8 @@ class ZigZagRingFlashAttnVarlenFunc(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         assert alibi_slopes is None
+        # Flash attention requires cu_seqlens to be int32
+        cu_seqlens = cu_seqlens.to(torch.int32)
         k = k.contiguous()
         v = v.contiguous()
         half_index0 = get_half_index(cu_seqlens, front=True)
@@ -2101,9 +2111,9 @@ class ZigzagRingFlashAttentionVarlen(torch.nn.Module):
             q, k, v,
             cu_seqlens,
             max_seqlen,
-            self.attention_dropout,
-            self.softmax_scale,
-            self.causal,
-            self.cp_process_group,
+            dropout_p=self.attention_dropout,
+            softmax_scale=self.softmax_scale,
+            causal=self.causal,
+            group=self.cp_process_group,
         )
         return context.unsqueeze(0)#adapt to ulysses

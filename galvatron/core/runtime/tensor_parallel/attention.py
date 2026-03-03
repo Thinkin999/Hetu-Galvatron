@@ -719,7 +719,15 @@ class Attention(MegatronModule, ABC):
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
                 if not self.use_ulysses:
-                    if not self.use_flash_attn:
+                    if self.use_zigzag_cp:
+                        # CP-only path: use zigzag ring flash attention (P2P ring communication)
+                        # ZigzagRingFlashAttentionVarlen expects [b, s, h, d] format (squeezes dim 0)
+                        q, k, v = [
+                            rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
+                        ]
+                        core_attn_out = self.zigzag_ring_flash_attn(q, k, v, cu_seqlens, max_seqlen)
+                        core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
+                    elif not self.use_flash_attn:
                         core_attn_out = self.core_attention(
                             query,
                             key,
@@ -730,9 +738,7 @@ class Attention(MegatronModule, ABC):
                             packed_seq_params=packed_seq_params,
                         )
                     else:
-                        q, k, v = [
-                            rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
-                        ]
+                        # Flash attention only (no SP, no CP)
                         if not self.sequence_parallel:
                             with tensor_parallel.get_cuda_rng_tracker().fork():
                                 core_attn_out = self.flash_attention(query, key, value, cu_seqlens, max_seqlen)
@@ -741,17 +747,18 @@ class Attention(MegatronModule, ABC):
                         core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
                 else:
                     if self.use_flash_attn:
+                        # Ulysses SP path (with or without CP):
+                        # DistributedAttention expects [b, s, h, d] format with batch_dim_idx=0
                         batch_dim_idx = 0
                         q, k, v = [
                             rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
                         ]
-
-                        context_layer = self.dist_attn(query, key, value, batch_dim_idx, cu_seqlens, max_seqlen)
+                        context_layer = self.dist_attn(q, k, v, batch_dim_idx, cu_seqlens, max_seqlen)
                         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
                         core_attn_out = context_layer
                     else:#TODO: we do not use this in packing
                         batch_dim_idx = 1  # [S,B,H,D]
-                        context_layer = self.dist_attn(q, k, v, batch_dim_idx, attention_mask)
+                        context_layer = self.dist_attn(query, key, value, batch_dim_idx, attention_mask)
                         context_layer = rearrange(context_layer, "... h d -> ... (h d)").contiguous()
                         core_attn_out = context_layer
             else:
@@ -786,13 +793,18 @@ class Attention(MegatronModule, ABC):
         """Apply rotary embeddings for varlen sequences.
         
         For varlen (packed sequences), each short sequence has its own position ids starting from 0.
-        Similar to: position_ids = torch.cat([torch.arange(cu_seqlens[i+1] - cu_seqlens[i]) for i in range(num_seqs)])
+        Handles four cases:
+        1. No SP, no CP: position_ids are simple per-sequence [0, 1, ..., seq_len-1]
+        2. Ulysses SP only: local tokens are a contiguous slice of the packed sequence;
+           position_ids must correspond to the local tokens' positions within their sequences
+        3. Zigzag CP only: position_ids follow the zigzag pattern for the local tokens
+        4. Ulysses SP + Zigzag CP: zigzag position ids are computed first (for CP-local tokens),
+           then the SP-local slice is extracted
         """
         from megatron.core.models.common.embeddings.rope_utils import _rotate_half
         
         # Handle query shape: could be (seq, batch, heads, dim) or (seq, heads, dim)
         # For varlen, batch is typically 1, so we squeeze it
-        orig_shape = query.shape
         if query.dim() == 4:
             # (seq, batch, heads, dim) -> (seq, heads, dim)
             assert query.size(1) == 1, f"For varlen, batch should be 1, got {query.size(1)}"
@@ -802,42 +814,44 @@ class Attention(MegatronModule, ABC):
         else:
             squeezed = False
         
-        num_seqs = len(cu_seqlens) - 1
-        total_seq_len = query.shape[0]
+        local_seq_len = query.shape[0]
         
-        # Generate position_ids for each short sequence
-        # Each sequence starts from position 0
+        # Step 1: Generate position_ids for CP-local tokens
+        if self.use_zigzag_cp and cp_size > 1:
+            # Zigzag CP: position_ids follow zigzag pattern based on CP-local cu_seqlens
+            cp_local_position_ids = self._get_zigzag_position_ids(cu_seqlens, cp_group, cp_size)
+        else:
+            # No CP: position_ids are simple per-sequence indices
+            num_seqs = len(cu_seqlens) - 1
         position_ids_list = []
         for i in range(num_seqs):
             seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
             position_ids_list.append(torch.arange(seq_len, device=query.device))
-        position_ids = torch.cat(position_ids_list, dim=0)  # (total_seq,)
+            cp_local_position_ids = torch.cat(position_ids_list, dim=0)  # (cp_local_total_seq,)
         
-        # For zigzag CP, the position_ids need to follow zigzag pattern
-        # The data has been zigzag-split, so we need zigzag position embeddings
-        if self.use_zigzag_cp and cp_size > 1:
-            # After zigzag split, each rank has positions [rank, 2*cp_size-1-rank, ...] for each sequence
-            # We need to generate the correct position_ids based on zigzag pattern
-            position_ids = self._get_zigzag_position_ids(cu_seqlens, cp_group, cp_size)
+        # Step 2: Extract SP-local slice of position_ids
+        if self.use_ulysses and sp_size > 1:
+            total_cp_local_len = cp_local_position_ids.shape[0]
+            sp_rank = torch.distributed.get_rank(sp_group)
+            local_start = sp_rank * (total_cp_local_len // sp_size)
+            local_end = (sp_rank + 1) * (total_cp_local_len // sp_size)
+            position_ids = cp_local_position_ids[local_start:local_end]
+        else:
+            position_ids = cp_local_position_ids
+        
+        assert position_ids.shape[0] == local_seq_len, \
+            f"position_ids length {position_ids.shape[0]} != local_seq_len {local_seq_len}"
         
         # Get rotary embeddings for all positions
-        # inv_freq shape: (dim/2,)
         inv_freq = self.rotary_pos_emb.inv_freq
-        
-        # position_ids: (total_seq,) -> (total_seq, 1)
-        # freqs: (total_seq, dim/2)
         freqs = torch.outer(position_ids.float(), inv_freq)
-        
-        # emb: (total_seq, dim)
         emb = torch.cat((freqs, freqs), dim=-1)
         
-        # query, key shape: (total_seq, num_heads, head_dim) for varlen
-        # cos, sin: (total_seq, dim) -> (total_seq, 1, dim) to broadcast with (total_seq, heads, dim)
+        # cos, sin: (local_seq, 1, dim) to broadcast with (local_seq, heads, dim)
         cos = emb.cos().unsqueeze(1).to(query.dtype)
         sin = emb.sin().unsqueeze(1).to(query.dtype)
         
-        # Apply rotation (rotary_interleaved=False for standard RoPE)
-        # query, key: (total_seq, num_heads, head_dim)
+        # Apply rotation
         query_rot = (query * cos) + (_rotate_half(query, rotary_interleaved=False) * sin)
         key_rot = (key * cos) + (_rotate_half(key, rotary_interleaved=False) * sin)
         

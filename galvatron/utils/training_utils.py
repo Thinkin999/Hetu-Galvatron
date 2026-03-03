@@ -9,7 +9,6 @@ from torch.utils.data.distributed import DistributedSampler
 import multiprocessing as mp
 
 def get_args():
-    # 延迟导入以避免循环导入
     from galvatron.core import get_args as _get_args
     return _get_args()
 
@@ -18,8 +17,9 @@ group_pool = {}#通信的进程池
 is_first_iter = True
 solve_process = None
 mp_manager = mp.Manager()
-solved_globalbatch_gps =mp_manager.list()#已经解决的microbatch的分配
+solved_globalbatch_gps =mp_manager.list()#已经解决的microbatch的分配 []
 flexSP_optimizer = None
+adaCPSP_optimizer = None
 prev_batch = None
 
 def solve_target(seqs, shared_globalbatch_gps):
@@ -97,77 +97,111 @@ def collate_fn(batch):#这里的batch应该是一个list
         return padded_batch#padding在一起的风格
     else:
         if adaCPSP_optimizer:
-            pass
-            # seqs = [Sequence(sentence.shape[0], id = i) for i, sentence in enumerate(batch)]#先把他们都转化为sequence
-            # rank = dist.get_rank()
-            # # flexSP_optimizer.seqs = seqs
-            # if rank == 0:
-            #     if not is_first_iter:
-            #         solve_process.join()
-            #         globalbatch_groups = list(solved_globalbatch_gps)
-            #         solved_globalbatch_gps = mp_manager.list()
-            #     solve_process = mp.Process(target=solve_target, args = (seqs, solved_globalbatch_gps))
-            #     solve_process.start()
-            # if is_first_iter:
-            #     is_first_iter = False
-            #     prev_batch = batch
-            #     return None
+            # ═══════════════════════════════════════════════
+            # AdaCPSP: solver determines microbatch strategy
+            # ═══════════════════════════════════════════════
+            from galvatron.models.varlen_llama_hf.adacpsp_solver import Sequence
             
-            # # flexSP_results = flexSP_optimizer.solve_flexSP_bucket_seqs(seqs, bucket_num = 10)
-            # # flexSP_results = flexSP_optimizer.solve_flexSP()
-            # torch.distributed.barrier()
-            # args = get_args()
-            # args.sp_groups = []
-            # microbatches = []
-            # n_mbatch = 0
-            # if rank == 0:
-            #     micro_bsz = torch.LongTensor([len(globalbatch_groups)]).cuda()
-            #     dist.broadcast(micro_bsz, 0)
-            # else:
-            #     micro_bsz = torch.LongTensor([0]).cuda()
-            #     dist.broadcast(micro_bsz, 0)
-            # # batch_indices, sp_group = flexSP_optimizer.convert_solve_res(flexSP_result)
-            # # note: with time limit ,solver may get different results, use broadcast to unify results
-            # for _  in range(micro_bsz.item()):
-            #     n_mbatch += 1
-            #     if rank == 0:
-            #         microbatch_group = globalbatch_groups[_]
-            #         ele_num = torch.LongTensor([len(microbatch_group)]).cuda()
-            #         dist.broadcast(ele_num, 0)
-            #         for i in range(ele_num):
-            #             sp_size_, seq_ids_ =  microbatch_group[i]
-            #             sp_size_, seq_ids_ = torch.LongTensor([sp_size_]).cuda(), torch.LongTensor(seq_ids_).cuda()
-            #             num_seqs = torch.LongTensor([len(seq_ids_)]).cuda()
-            #             dist.broadcast(sp_size_, 0)
-            #             dist.broadcast(num_seqs, 0)
-            #             dist.broadcast(seq_ids_, 0)
-                        
-            #     else:
-            #         microbatch_group = []
-            #         ele_num = torch.LongTensor([0]).cuda()
-            #         dist.broadcast(ele_num, 0)
-            #         for i in range(ele_num):
-            #             sp_size_, num_seqs = torch.LongTensor([0]).cuda(), torch.LongTensor([0]).cuda()
-            #             dist.broadcast(sp_size_, 0)
-            #             dist.broadcast(num_seqs, 0)
-            #             seq_ids_ = torch.LongTensor(num_seqs.item()).cuda()
-            #             dist.broadcast(seq_ids_, 0)
-            #             seqs_ = [j.item() for j in seq_ids_]
-            #             microbatch_group.append((sp_size_.item(), seqs_))
-            #     batch_indices, sp_group = convert_microbatch_res(microbatch_group)
-            #     m_batch = [prev_batch[idx] for idx in batch_indices]
-            #     args.sp_groups.append(sp_group)
-            #     # if torch.distributed.get_rank(sp_group) == 0:
-            #     #     print(f"sp_group ranks:{torch.distributed.get_process_group_ranks(sp_group)} micro_batch_rank: {n_mbatch}, \tallocated_seqs: {seqlens}, \ttot_seqlens:{sum(seqlens)}, \tsp_size: {torch.distributed.get_world_size(sp_group)}")
-            #     torch.distributed.barrier()
-            #     cu_seqlens = torch.empty(len(m_batch)+1, dtype=torch.int64)
-            #     cu_seqlens[0] = 0
-            #     for _ in range(1, len(cu_seqlens)):
-            #         cu_seqlens[_] = cu_seqlens[_-1] + len(m_batch[_ - 1])
-            #     m_batch = torch.concat(m_batch)
-            #     microbatches.append([[m_batch, cu_seqlens]])
-            # prev_batch = batch
-            # return microbatches
+            rank = dist.get_rank()
+            args = get_args()
+            args.adacpsp_strategies = []
+            
+            if rank == 0:
+                # Create Sequence objects for solver
+                seqs = [Sequence(seq=s.shape[0], id=i) for i, s in enumerate(batch)]
+                
+                # Run solver
+                all_groups, all_results = adaCPSP_optimizer.solve_globalbatch(seqs)
+                
+                if len(all_groups) == 0:
+                    # Solver failed → fallback: single microbatch, Ulysses×N
+                    world_size = torch.distributed.get_world_size()
+                    print("[AdaCPSP] Solver failed, fallback to Ulysses×" + str(world_size))
+                    all_groups = [[(type('S', (), {'attn_type': 'ulysses', 'parallel_size': world_size})(), seqs)]]
+                
+                # Encode microbatch plans for broadcasting
+                # Each microbatch: [sp_size, cp_size, num_seqs, seq_id_0, seq_id_1, ...]
+                # Per-microbatch homogeneous: first group's strategy used for the whole microbatch
+                encoded_mbs = []
+                for mb_groups in all_groups:
+                    all_seq_ids = []
+                    strategy = None
+                    for strat, group_seqs in mb_groups:
+                        if strategy is None:
+                            strategy = strat
+                        for seq in group_seqs:
+                            all_seq_ids.append(seq.id)
+                    
+                    # Encode as (total_parallel_size, 1) for broadcasting
+                    # The receiver side will re-derive (sp, cp) using fixed tp_deg
+                    total_parallel = strategy.parallel_size
+                    encoded_mbs.append([total_parallel, 1] + all_seq_ids)
+                
+                # Broadcast number of microbatches
+                num_mb = torch.LongTensor([len(encoded_mbs)]).cuda()
+                dist.broadcast(num_mb, 0)
+                
+                for enc in encoded_mbs:
+                    enc_t = torch.LongTensor(enc).cuda()
+                    length_t = torch.LongTensor([len(enc_t)]).cuda()
+                    dist.broadcast(length_t, 0)
+                    dist.broadcast(enc_t, 0)
+            else:
+                num_mb = torch.LongTensor([0]).cuda()
+                dist.broadcast(num_mb, 0)
+                
+                encoded_mbs = []
+                for _ in range(num_mb.item()):
+                    length_t = torch.LongTensor([0]).cuda()
+                    dist.broadcast(length_t, 0)
+                    enc_t = torch.zeros(length_t.item(), dtype=torch.long).cuda()
+                    dist.broadcast(enc_t, 0)
+                    encoded_mbs.append(enc_t.cpu().tolist())
+            
+            # Decode and build microbatches
+            # Return format: list of [[packed_tokens, cu_seqlens]] per microbatch
+            # Strategy info stored in args.adacpsp_strategies
+            #
+            # CRITICAL: sp_size (Ulysses) must always equal the model's construction-time
+            # tp_deg because QKV weights are physically sharded by TP degree.
+            # Only cp_size (Ring) can vary dynamically.
+            # The solver's parallel_size is the TOTAL GPU count per group.
+            # We derive: sp_size = tp_deg (fixed), cp_size = total / tp_deg.
+            fixed_sp = args.global_tp_deg  # = tp_deg from model construction
+            
+            microbatches = []
+            for mb_idx, enc in enumerate(encoded_mbs):
+                if isinstance(enc, torch.Tensor):
+                    enc = enc.cpu().tolist()
+                raw_sp_size = int(enc[0])
+                raw_cp_size = int(enc[1])
+                seq_ids = [int(x) for x in enc[2:]]
+                
+                # Derive correct (sp, cp) from total parallel size
+                total_parallel = raw_sp_size * raw_cp_size
+                sp_size = fixed_sp
+                cp_size = max(1, total_parallel // fixed_sp)
+                
+                strat_info = {
+                    "sp_size": sp_size,
+                    "cp_size": cp_size,
+                    "attn_type": "combined" if cp_size > 1 else "ulysses",
+                }
+                # Store strategy for this microbatch
+                args.adacpsp_strategies.append(strat_info)
+                
+                # Build packed tokens + cu_seqlens
+                sequences = [batch[sid] for sid in seq_ids]
+                cu_seqlens = torch.empty(len(sequences) + 1, dtype=torch.int64,
+                                        device=batch[0].device)
+                cu_seqlens[0] = 0
+                for j in range(len(sequences)):
+                    cu_seqlens[j + 1] = cu_seqlens[j] + len(sequences[j])
+                packed_tokens = torch.cat(sequences)
+                
+                microbatches.append([[packed_tokens, cu_seqlens]])
+            
+            return microbatches
         else:
             cu_seqlens = torch.empty(len(batch)+1, dtype=torch.int64)
             cu_seqlens[0] = 0

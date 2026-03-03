@@ -83,32 +83,30 @@ class LlamaEmbeddings_(nn.Module):
         #     )
 
     def forward(self, inputs_ids, cu_seqlens = None):
-        # tokens = input_ids[:, :-1].contiguous()
-        # labels = input_ids[:, 1:].contiguous()
-        # if self.vocab_sp:
-        #     tokens = tokens[:, self.seq_start_index : self.seq_end_index].contiguous()
         tokens = inputs_ids.clone()
         args = get_args()
-        #TODO: add adaCPSP logic
+        local_tokens = tokens
+        new_cu_seqlens = cu_seqlens
+        
+        # Step 1: CP split (zigzag ring attention data distribution)
         if self.cp_size > 1:
-            local_tokens, new_cu_seqlens = get_zigzag_local_tokens_and_cu_seqlens(tokens, cu_seqlens, self.cp_group, self.cp_size)
+            local_tokens, new_cu_seqlens = get_zigzag_local_tokens_and_cu_seqlens(
+                local_tokens, new_cu_seqlens, self.cp_group, self.cp_size
+            )
             local_tokens = local_tokens.contiguous()
             new_cu_seqlens = new_cu_seqlens.contiguous()
-            labels = local_tokens.clone()
-        elif self.sp_size > 1:
-            total_seq_length = cu_seqlens[-1]
+        
+        # Step 2: SP split (Ulysses sequence parallel data distribution)
+        if self.sp_size > 1:
+            total_local_seq = new_cu_seqlens[-1] if isinstance(new_cu_seqlens[-1], int) else new_cu_seqlens[-1].item()
             self.seq_start_index, self.seq_end_index = VocabUtility.vocab_range_from_global_vocab_size(
-                total_seq_length,
+                total_local_seq,
                 torch.distributed.get_rank(self.sp_group),
                 torch.distributed.get_world_size(self.sp_group),
             )
-            local_tokens = tokens[self.seq_start_index: self.seq_end_index]
-            new_cu_seqlens = cu_seqlens
-            labels = local_tokens.clone()
-        else:
-            local_tokens = tokens
-            new_cu_seqlens = cu_seqlens
-            labels = local_tokens.clone()
+            local_tokens = local_tokens[self.seq_start_index: self.seq_end_index]
+        
+        labels = local_tokens.clone()
         hidden_states = self.embed_tokens(local_tokens)
         if args.use_packing:
             hidden_states = hidden_states.unsqueeze(1)

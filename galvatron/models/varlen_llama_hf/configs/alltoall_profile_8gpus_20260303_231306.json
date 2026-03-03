@@ -1,0 +1,547 @@
+{
+  "type": "alltoall_profiling",
+  "world_size": 8,
+  "hidden_size": 4096,
+  "num_attention_heads": 32,
+  "num_layers": 32,
+  "timestamp": "20260303_231306",
+  "results": {
+    "2": {
+      "model": [
+        {
+          "seq_len": 1024,
+          "local_seq": 512,
+          "tensor_shape": [
+            1024,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 4.0,
+          "time_ms": 0.05446079969406128,
+          "bandwidth_GBs": 38.5075506011838
+        },
+        {
+          "seq_len": 2048,
+          "local_seq": 1024,
+          "tensor_shape": [
+            2048,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 8.0,
+          "time_ms": 0.06336799860000611,
+          "bandwidth_GBs": 66.18962398474103
+        },
+        {
+          "seq_len": 4096,
+          "local_seq": 2048,
+          "tensor_shape": [
+            4096,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 16.0,
+          "time_ms": 0.11221120357513428,
+          "bandwidth_GBs": 74.75731239602258
+        },
+        {
+          "seq_len": 8192,
+          "local_seq": 4096,
+          "tensor_shape": [
+            8192,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 32.0,
+          "time_ms": 0.15827200412750245,
+          "bandwidth_GBs": 106.00242343860404
+        },
+        {
+          "seq_len": 16384,
+          "local_seq": 8192,
+          "tensor_shape": [
+            16384,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 64.0,
+          "time_ms": 0.2715503931045532,
+          "bandwidth_GBs": 123.56613303476517
+        },
+        {
+          "seq_len": 32768,
+          "local_seq": 16384,
+          "tensor_shape": [
+            32768,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 128.0,
+          "time_ms": 0.5005616188049317,
+          "bandwidth_GBs": 134.06713874751205
+        },
+        {
+          "seq_len": 65536,
+          "local_seq": 32768,
+          "tensor_shape": [
+            65536,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 256.0,
+          "time_ms": 0.9579536437988281,
+          "bandwidth_GBs": 140.10879218304424
+        },
+        {
+          "seq_len": 131072,
+          "local_seq": 65536,
+          "tensor_shape": [
+            131072,
+            1,
+            16,
+            128
+          ],
+          "total_bytes_MB": 512.0,
+          "time_ms": 1.8797983169555663,
+          "bandwidth_GBs": 142.80013636502534
+        }
+      ],
+      "raw": [
+        {
+          "msg_size_MB": 1,
+          "actual_bytes": 1048576,
+          "time_ms": 0.043988800048828124,
+          "bandwidth_GBs": 11.918670193731897
+        },
+        {
+          "msg_size_MB": 2,
+          "actual_bytes": 2097152,
+          "time_ms": 0.04909439980983734,
+          "bandwidth_GBs": 21.35836274731055
+        },
+        {
+          "msg_size_MB": 4,
+          "actual_bytes": 4194304,
+          "time_ms": 0.048728001117706296,
+          "bandwidth_GBs": 43.03792381990317
+        },
+        {
+          "msg_size_MB": 8,
+          "actual_bytes": 8388608,
+          "time_ms": 0.06680799722671509,
+          "bandwidth_GBs": 62.781465903947016
+        },
+        {
+          "msg_size_MB": 16,
+          "actual_bytes": 16777216,
+          "time_ms": 0.1064687967300415,
+          "bandwidth_GBs": 78.78935667198209
+        },
+        {
+          "msg_size_MB": 32,
+          "actual_bytes": 33554432,
+          "time_ms": 0.1588752031326294,
+          "bandwidth_GBs": 105.59996569127493
+        },
+        {
+          "msg_size_MB": 64,
+          "actual_bytes": 67108864,
+          "time_ms": 0.2790719985961914,
+          "bandwidth_GBs": 120.2357533854632
+        },
+        {
+          "msg_size_MB": 128,
+          "actual_bytes": 134217728,
+          "time_ms": 0.48445281982421873,
+          "bandwidth_GBs": 138.52507665111767
+        },
+        {
+          "msg_size_MB": 256,
+          "actual_bytes": 268435456,
+          "time_ms": 0.9337247848510742,
+          "bandwidth_GBs": 143.7444203876491
+        },
+        {
+          "msg_size_MB": 512,
+          "actual_bytes": 536870912,
+          "time_ms": 1.6918224334716796,
+          "bandwidth_GBs": 158.66644790207735
+        },
+        {
+          "msg_size_MB": 1024,
+          "actual_bytes": 1073741824,
+          "time_ms": 3.0428464889526365,
+          "bandwidth_GBs": 176.43706770918757
+        }
+      ],
+      "summary_bandwidth_GBs": 131.71401262839314
+    },
+    "4": {
+      "model": [
+        {
+          "seq_len": 1024,
+          "local_seq": 256,
+          "tensor_shape": [
+            1024,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 2.0,
+          "time_ms": 0.06348639726638794,
+          "bandwidth_GBs": 24.77481898051778
+        },
+        {
+          "seq_len": 2048,
+          "local_seq": 512,
+          "tensor_shape": [
+            2048,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 4.0,
+          "time_ms": 0.06840000152587891,
+          "bandwidth_GBs": 45.99017441263981
+        },
+        {
+          "seq_len": 4096,
+          "local_seq": 1024,
+          "tensor_shape": [
+            4096,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 8.0,
+          "time_ms": 0.06985120177268982,
+          "bandwidth_GBs": 90.06940239158222
+        },
+        {
+          "seq_len": 8192,
+          "local_seq": 2048,
+          "tensor_shape": [
+            8192,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 16.0,
+          "time_ms": 0.16382559537887573,
+          "bandwidth_GBs": 76.80675275984676
+        },
+        {
+          "seq_len": 16384,
+          "local_seq": 4096,
+          "tensor_shape": [
+            16384,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 32.0,
+          "time_ms": 0.18842079639434814,
+          "bandwidth_GBs": 133.56181738734477
+        },
+        {
+          "seq_len": 32768,
+          "local_seq": 8192,
+          "tensor_shape": [
+            32768,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 64.0,
+          "time_ms": 0.3277951955795288,
+          "bandwidth_GBs": 153.5460210483429
+        },
+        {
+          "seq_len": 65536,
+          "local_seq": 16384,
+          "tensor_shape": [
+            65536,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 128.0,
+          "time_ms": 0.6022240161895752,
+          "bandwidth_GBs": 167.15257660583237
+        },
+        {
+          "seq_len": 131072,
+          "local_seq": 32768,
+          "tensor_shape": [
+            131072,
+            1,
+            8,
+            128
+          ],
+          "total_bytes_MB": 256.0,
+          "time_ms": 1.1293744087219237,
+          "bandwidth_GBs": 178.26381618460323
+        }
+      ],
+      "raw": [
+        {
+          "msg_size_MB": 1,
+          "actual_bytes": 1048576,
+          "time_ms": 0.04635840058326721,
+          "bandwidth_GBs": 16.964174563948568
+        },
+        {
+          "msg_size_MB": 2,
+          "actual_bytes": 2097152,
+          "time_ms": 0.05904800295829773,
+          "bandwidth_GBs": 26.637039716835556
+        },
+        {
+          "msg_size_MB": 4,
+          "actual_bytes": 4194304,
+          "time_ms": 0.05050879716873169,
+          "bandwidth_GBs": 62.280794165247215
+        },
+        {
+          "msg_size_MB": 8,
+          "actual_bytes": 8388608,
+          "time_ms": 0.0699072003364563,
+          "bandwidth_GBs": 89.99725306863753
+        },
+        {
+          "msg_size_MB": 16,
+          "actual_bytes": 16777216,
+          "time_ms": 0.12084959745407105,
+          "bandwidth_GBs": 104.12042956768758
+        },
+        {
+          "msg_size_MB": 32,
+          "actual_bytes": 33554432,
+          "time_ms": 0.1873968005180359,
+          "bandwidth_GBs": 134.29164174858968
+        },
+        {
+          "msg_size_MB": 64,
+          "actual_bytes": 67108864,
+          "time_ms": 0.3258080005645752,
+          "bandwidth_GBs": 154.48254159745306
+        },
+        {
+          "msg_size_MB": 128,
+          "actual_bytes": 134217728,
+          "time_ms": 0.5928656101226807,
+          "bandwidth_GBs": 169.79108634614497
+        },
+        {
+          "msg_size_MB": 256,
+          "actual_bytes": 268435456,
+          "time_ms": 1.115880012512207,
+          "bandwidth_GBs": 180.41956997396943
+        },
+        {
+          "msg_size_MB": 512,
+          "actual_bytes": 536870912,
+          "time_ms": 2.045510482788086,
+          "bandwidth_GBs": 196.84728452291913
+        },
+        {
+          "msg_size_MB": 1024,
+          "actual_bytes": 1073741824,
+          "time_ms": 3.8377185821533204,
+          "bandwidth_GBs": 209.8398699021197
+        }
+      ],
+      "summary_bandwidth_GBs": 164.25606052269765
+    },
+    "8": {
+      "model": [
+        {
+          "seq_len": 1024,
+          "local_seq": 128,
+          "tensor_shape": [
+            1024,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 1.0,
+          "time_ms": 0.06909760236740112,
+          "bandwidth_GBs": 13.278376796947446
+        },
+        {
+          "seq_len": 2048,
+          "local_seq": 256,
+          "tensor_shape": [
+            2048,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 2.0,
+          "time_ms": 0.059011197090148924,
+          "bandwidth_GBs": 31.095929086080655
+        },
+        {
+          "seq_len": 4096,
+          "local_seq": 512,
+          "tensor_shape": [
+            4096,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 4.0,
+          "time_ms": 0.06054400205612183,
+          "bandwidth_GBs": 60.61733409360756
+        },
+        {
+          "seq_len": 8192,
+          "local_seq": 1024,
+          "tensor_shape": [
+            8192,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 8.0,
+          "time_ms": 0.09116640090942382,
+          "bandwidth_GBs": 80.51246870316304
+        },
+        {
+          "seq_len": 16384,
+          "local_seq": 2048,
+          "tensor_shape": [
+            16384,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 16.0,
+          "time_ms": 0.12941759824752808,
+          "bandwidth_GBs": 113.43174497739062
+        },
+        {
+          "seq_len": 32768,
+          "local_seq": 4096,
+          "tensor_shape": [
+            32768,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 32.0,
+          "time_ms": 0.20882558822631836,
+          "bandwidth_GBs": 140.59640990059344
+        },
+        {
+          "seq_len": 65536,
+          "local_seq": 8192,
+          "tensor_shape": [
+            65536,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 64.0,
+          "time_ms": 0.3685328006744385,
+          "bandwidth_GBs": 159.3352230589467
+        },
+        {
+          "seq_len": 131072,
+          "local_seq": 16384,
+          "tensor_shape": [
+            131072,
+            1,
+            4,
+            128
+          ],
+          "total_bytes_MB": 128.0,
+          "time_ms": 0.6709680080413818,
+          "bandwidth_GBs": 175.03146289019028
+        }
+      ],
+      "raw": [
+        {
+          "msg_size_MB": 1,
+          "actual_bytes": 1048576,
+          "time_ms": 0.05299360156059265,
+          "bandwidth_GBs": 17.313486401767392
+        },
+        {
+          "msg_size_MB": 2,
+          "actual_bytes": 2097152,
+          "time_ms": 0.0589743971824646,
+          "bandwidth_GBs": 31.115332884583005
+        },
+        {
+          "msg_size_MB": 4,
+          "actual_bytes": 4194304,
+          "time_ms": 0.05980960130691528,
+          "bandwidth_GBs": 61.361652975534334
+        },
+        {
+          "msg_size_MB": 8,
+          "actual_bytes": 8388608,
+          "time_ms": 0.07693439722061157,
+          "bandwidth_GBs": 95.40637562873535
+        },
+        {
+          "msg_size_MB": 16,
+          "actual_bytes": 16777216,
+          "time_ms": 0.1322783946990967,
+          "bandwidth_GBs": 110.97854667342926
+        },
+        {
+          "msg_size_MB": 32,
+          "actual_bytes": 33554432,
+          "time_ms": 0.20970239639282226,
+          "bandwidth_GBs": 140.00854785179243
+        },
+        {
+          "msg_size_MB": 64,
+          "actual_bytes": 67108864,
+          "time_ms": 0.36840798854827883,
+          "bandwidth_GBs": 159.3892038861282
+        },
+        {
+          "msg_size_MB": 128,
+          "actual_bytes": 134217728,
+          "time_ms": 0.672049617767334,
+          "bandwidth_GBs": 174.74976384951734
+        },
+        {
+          "msg_size_MB": 256,
+          "actual_bytes": 268435456,
+          "time_ms": 1.2293071746826172,
+          "bandwidth_GBs": 191.06780537634268
+        },
+        {
+          "msg_size_MB": 512,
+          "actual_bytes": 536870912,
+          "time_ms": 2.390972709655762,
+          "bandwidth_GBs": 196.47319524095846
+        },
+        {
+          "msg_size_MB": 1024,
+          "actual_bytes": 1073741824,
+          "time_ms": 4.274249649047851,
+          "bandwidth_GBs": 219.81029961815454
+        }
+      ],
+      "summary_bandwidth_GBs": 170.35390892804614
+    }
+  },
+  "bandwidth_dict_GBs": {
+    "2": 131.71401262839314,
+    "4": 164.25606052269765,
+    "8": 170.35390892804614,
+    "1": 10000000000.0
+  }
+}

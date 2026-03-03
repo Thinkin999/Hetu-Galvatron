@@ -1,0 +1,596 @@
+{
+  "type": "p2p_ring_profiling",
+  "world_size": 8,
+  "hidden_size": 4096,
+  "num_attention_heads": 32,
+  "num_kv_heads": 32,
+  "num_layers": 32,
+  "timestamp": "20260303_231358",
+  "results": {
+    "2": {
+      "model": [
+        {
+          "seq_len": 1024,
+          "local_seq": 512,
+          "kv_shape": [
+            512,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 8.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 0.13210560083389283,
+          "per_step_time_ms": 0.13210560083389283,
+          "bandwidth_GBs": 63.499260796275266
+        },
+        {
+          "seq_len": 2048,
+          "local_seq": 1024,
+          "kv_shape": [
+            1024,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 16.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 0.19743039608001708,
+          "per_step_time_ms": 0.19743039608001708,
+          "bandwidth_GBs": 84.977877434842
+        },
+        {
+          "seq_len": 4096,
+          "local_seq": 2048,
+          "kv_shape": [
+            2048,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 32.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 0.28299679756164553,
+          "per_step_time_ms": 0.28299679756164553,
+          "bandwidth_GBs": 118.56823924903533
+        },
+        {
+          "seq_len": 8192,
+          "local_seq": 4096,
+          "kv_shape": [
+            4096,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 64.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 0.49420480728149413,
+          "per_step_time_ms": 0.49420480728149413,
+          "bandwidth_GBs": 135.79160504154194
+        },
+        {
+          "seq_len": 16384,
+          "local_seq": 8192,
+          "kv_shape": [
+            8192,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 128.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 0.9023584365844727,
+          "per_step_time_ms": 0.9023584365844727,
+          "bandwidth_GBs": 148.7410352232413
+        },
+        {
+          "seq_len": 32768,
+          "local_seq": 16384,
+          "kv_shape": [
+            16384,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 256.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 1.6344783782958985,
+          "per_step_time_ms": 1.6344783782958985,
+          "bandwidth_GBs": 164.23310308935987
+        },
+        {
+          "seq_len": 65536,
+          "local_seq": 32768,
+          "kv_shape": [
+            32768,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 512.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 2.903011131286621,
+          "per_step_time_ms": 2.903011131286621,
+          "bandwidth_GBs": 184.93587785936515
+        },
+        {
+          "seq_len": 131072,
+          "local_seq": 65536,
+          "kv_shape": [
+            65536,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 1024.0,
+          "num_ring_steps": 1,
+          "total_ring_time_ms": 4.912799835205078,
+          "per_step_time_ms": 4.912799835205078,
+          "bandwidth_GBs": 218.56005944015385
+        }
+      ],
+      "raw": [
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "time_ms": 0.07220799922943115,
+          "bandwidth_GBs": 14.521604409343784
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "time_ms": 0.07236959934234619,
+          "bandwidth_GBs": 28.97835581594656
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "time_ms": 0.07177600264549255,
+          "bandwidth_GBs": 58.43602102942406
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "time_ms": 0.07815359830856324,
+          "bandwidth_GBs": 107.33489156673757
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "time_ms": 0.12693599462509156,
+          "bandwidth_GBs": 132.17067427999365
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "time_ms": 0.22190239429473876,
+          "bandwidth_GBs": 151.212573017269
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "time_ms": 0.40071840286254884,
+          "bandwidth_GBs": 167.4713802026685
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "time_ms": 0.7599520206451416,
+          "bandwidth_GBs": 176.61342341857232
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "time_ms": 1.4694000244140626,
+          "bandwidth_GBs": 182.68371548928022
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "time_ms": 2.444526481628418,
+          "bandwidth_GBs": 219.62163880604157
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "time_ms": 4.955502319335937,
+          "bandwidth_GBs": 216.67668680334444
+        }
+      ],
+      "summary_bandwidth_GBs": 178.06429885959568
+    },
+    "4": {
+      "model": [
+        {
+          "seq_len": 1024,
+          "local_seq": 256,
+          "kv_shape": [
+            256,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 4.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 0.3228287935256958,
+          "per_step_time_ms": 0.10760959784189861,
+          "bandwidth_GBs": 38.977043722088105
+        },
+        {
+          "seq_len": 2048,
+          "local_seq": 512,
+          "kv_shape": [
+            512,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 8.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 0.5015967845916748,
+          "per_step_time_ms": 0.16719892819722493,
+          "bandwidth_GBs": 50.1714220925205
+        },
+        {
+          "seq_len": 4096,
+          "local_seq": 1024,
+          "kv_shape": [
+            1024,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 16.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 0.6730735778808594,
+          "per_step_time_ms": 0.22435785929361982,
+          "bandwidth_GBs": 74.77882010829609
+        },
+        {
+          "seq_len": 8192,
+          "local_seq": 2048,
+          "kv_shape": [
+            2048,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 32.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 1.211911964416504,
+          "per_step_time_ms": 0.4039706548055013,
+          "bandwidth_GBs": 83.06155806330875
+        },
+        {
+          "seq_len": 16384,
+          "local_seq": 4096,
+          "kv_shape": [
+            4096,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 64.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 2.3173711776733397,
+          "per_step_time_ms": 0.7724570592244465,
+          "bandwidth_GBs": 86.87714507700646
+        },
+        {
+          "seq_len": 32768,
+          "local_seq": 8192,
+          "kv_shape": [
+            8192,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 128.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 4.508222579956055,
+          "per_step_time_ms": 1.5027408599853516,
+          "bandwidth_GBs": 89.31528487307408
+        },
+        {
+          "seq_len": 65536,
+          "local_seq": 16384,
+          "kv_shape": [
+            16384,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 256.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 7.556364440917969,
+          "per_step_time_ms": 2.5187881469726565,
+          "bandwidth_GBs": 106.57325679519091
+        },
+        {
+          "seq_len": 131072,
+          "local_seq": 32768,
+          "kv_shape": [
+            32768,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 512.0,
+          "num_ring_steps": 3,
+          "total_ring_time_ms": 8.665280151367188,
+          "per_step_time_ms": 2.888426717122396,
+          "bandwidth_GBs": 185.86966697734306
+        }
+      ],
+      "raw": [
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "time_ms": 0.06962080001831054,
+          "bandwidth_GBs": 15.061246060433383
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "time_ms": 0.08532320261001587,
+          "bandwidth_GBs": 24.578917994738052
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "time_ms": 0.0754800021648407,
+          "bandwidth_GBs": 55.56841388054102
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "time_ms": 0.09111999869346618,
+          "bandwidth_GBs": 92.06110755356619
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "time_ms": 0.16857600212097168,
+          "bandwidth_GBs": 99.52315744183159
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "time_ms": 0.3119760036468506,
+          "bandwidth_GBs": 107.55452857836727
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "time_ms": 0.6096032142639161,
+          "bandwidth_GBs": 110.08613870422687
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "time_ms": 1.236736011505127,
+          "bandwidth_GBs": 108.52577005229672
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "time_ms": 1.4679136276245117,
+          "bandwidth_GBs": 182.8686994577484
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "time_ms": 2.5787679672241213,
+          "bandwidth_GBs": 208.18891766284318
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "time_ms": 4.994761657714844,
+          "bandwidth_GBs": 214.97358584498468
+        }
+      ],
+      "summary_bandwidth_GBs": 147.38868539175698
+    },
+    "8": {
+      "model": [
+        {
+          "seq_len": 1024,
+          "local_seq": 128,
+          "kv_shape": [
+            128,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 2.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 0.7962048053741455,
+          "per_step_time_ms": 0.11374354362487793,
+          "bandwidth_GBs": 18.43754760196615
+        },
+        {
+          "seq_len": 2048,
+          "local_seq": 256,
+          "kv_shape": [
+            256,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 4.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 0.9787167549133301,
+          "per_step_time_ms": 0.13981667927333288,
+          "bandwidth_GBs": 29.998595459418667
+        },
+        {
+          "seq_len": 4096,
+          "local_seq": 512,
+          "kv_shape": [
+            512,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 8.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 1.5181952476501466,
+          "per_step_time_ms": 0.21688503537859236,
+          "bandwidth_GBs": 38.67767080083202
+        },
+        {
+          "seq_len": 8192,
+          "local_seq": 1024,
+          "kv_shape": [
+            1024,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 16.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 2.717075157165527,
+          "per_step_time_ms": 0.38815359388078957,
+          "bandwidth_GBs": 43.22313708926433
+        },
+        {
+          "seq_len": 16384,
+          "local_seq": 2048,
+          "kv_shape": [
+            2048,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 32.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 5.1663566589355465,
+          "per_step_time_ms": 0.7380509512765067,
+          "bandwidth_GBs": 45.46357123714217
+        },
+        {
+          "seq_len": 32768,
+          "local_seq": 4096,
+          "kv_shape": [
+            4096,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 64.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 8.117436981201172,
+          "per_step_time_ms": 1.1596338544573102,
+          "bandwidth_GBs": 57.8707354412362
+        },
+        {
+          "seq_len": 65536,
+          "local_seq": 8192,
+          "kv_shape": [
+            8192,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 128.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 16.3238037109375,
+          "per_step_time_ms": 2.331971958705357,
+          "bandwidth_GBs": 57.55546394928083
+        },
+        {
+          "seq_len": 131072,
+          "local_seq": 16384,
+          "kv_shape": [
+            16384,
+            1,
+            32,
+            128
+          ],
+          "kv_bytes_per_step_MB": 256.0,
+          "num_ring_steps": 7,
+          "total_ring_time_ms": 17.153030395507812,
+          "per_step_time_ms": 2.450432913643973,
+          "bandwidth_GBs": 109.54613550338614
+        }
+      ],
+      "raw": [
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "time_ms": 0.06894400119781494,
+          "bandwidth_GBs": 15.209096974099506
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "time_ms": 0.06958240270614624,
+          "bandwidth_GBs": 30.13911446628959
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "time_ms": 0.09172639846801758,
+          "bandwidth_GBs": 45.72624751491182
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "time_ms": 0.1552448034286499,
+          "bandwidth_GBs": 54.03471043625226
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "time_ms": 0.2947168111801147,
+          "bandwidth_GBs": 56.92656598997567
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "time_ms": 0.5828544139862061,
+          "bandwidth_GBs": 57.56914796358411
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "time_ms": 1.1663968086242675,
+          "bandwidth_GBs": 57.53519171503309
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "time_ms": 1.2433568000793458,
+          "bandwidth_GBs": 107.94787786694438
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "time_ms": 1.467632007598877,
+          "bandwidth_GBs": 182.90378964899688
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "time_ms": 2.875667190551758,
+          "bandwidth_GBs": 186.69438305097816
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "time_ms": 5.739044952392578,
+          "bandwidth_GBs": 187.0941651280084
+        }
+      ],
+      "summary_bandwidth_GBs": 119.5244459090744
+    }
+  },
+  "bandwidth_dict_GBs": {
+    "2": 178.06429885959568,
+    "4": 147.38868539175698,
+    "8": 119.5244459090744,
+    "1": 10000000000.0
+  }
+}
