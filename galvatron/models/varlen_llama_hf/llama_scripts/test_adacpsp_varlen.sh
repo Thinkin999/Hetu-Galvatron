@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.." || exit 1
 # Test: AdaCPSP with variable-length sequences (tp=1 heterogeneous groups)
 # This tests that the solver selects different strategies for different sequence lengths
 export NUM_NODES=1

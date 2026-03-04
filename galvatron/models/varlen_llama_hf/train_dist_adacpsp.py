@@ -59,21 +59,21 @@ def train(args):
     device = torch.device("cuda", local_rank)
     world_size = torch.distributed.get_world_size()
     max_len = args.seq_length
-
+    
     # Get model configuration
     config = config_from_meta(args.model_size)
     config = set_model_config(config, args, True)
     config.max_position_embeddings = max_len
     args.seq_length = max_len
-
+    
     if local_rank == 0:
         print(config)
         _print_args("arguments", args)
-
+    
     # Validation
     if args.use_packing:
         assert args.use_flash_attn, "packing is only supported by flash attention"
-
+    
     # ═══════════════════════════════════════════════════════
     # AdaCPSP Setup
     # ═══════════════════════════════════════════════════════
@@ -109,7 +109,7 @@ def train(args):
     # ═══════════════════════════════════════════════════════
     if args.use_adaCPSP:
         from galvatron.models.varlen_llama_hf.adacpsp_solver import AdaCPSPOptimizer, AdaCPSPCostModel
-
+        
         # Create cost model
         costmodel = AdaCPSPCostModel(
             cluster_size=world_size,
@@ -129,7 +129,7 @@ def train(args):
                 alltoall_json=alltoall_file,
                 p2p_json=p2p_file,
                 cluster_size=world_size,
-            )
+        )
             if rank == 0:
                 print("[AdaCPSP] Loaded profiling data for cost model")
         else:
@@ -147,12 +147,12 @@ def train(args):
             hide_output=(rank != 0),
             # No min_parallel_size constraint now: tp=1, so any sp/cp size works
         )
-
+        
         if rank == 0:
             solver_strategies = adacpsp_optimizer.get_strategy_pool()
             print(f"[AdaCPSP] Solver strategies: {solver_strategies}")
             print(f"[AdaCPSP] Memory limit: {memory_limit_gb:.1f} GB")
-
+    
     optimizer, opt_param_scheduler = get_optimizer_and_param_scheduler(model, args)
     path = os.path.dirname(os.path.abspath(__file__))
     profiler = get_runtime_profiler(args, path, config, start_iter=0)
@@ -161,11 +161,11 @@ def train(args):
     # Create dataset and dataloader
     if local_rank == 0:
         print("Creating Dataset...")
-
+    
     # For AdaCPSP: dataloader gives ALL ranks the same data
     # For non-AdaCPSP: use the dp group for distributed loading
     dataloader_group = model.dp_groups_whole[0].group
-
+    
     # Parse forced strategy (for heterogeneous group testing)
     forced_strategy = None
     if hasattr(args, 'adaCPSP_forced_strategy') and args.adaCPSP_forced_strategy:
@@ -182,15 +182,15 @@ def train(args):
         adaCPSP_optimizer_=adacpsp_optimizer,
         adaCPSP_forced_strategy_=forced_strategy,
     )
-
+    
     if local_rank == 0:
         print("Start training...")
-
+    
     # Training loop
     for ep in range(args.epochs):
         if not args.check_loss and not args.profile:
             trainloader = tqdm(trainloader) if rank == 0 else trainloader
-
+        
         for iter, batch in enumerate(trainloader):
             profiler.profile_time_start(iter)
             profiler.profile_memory(iter, "Before Forward")
@@ -198,7 +198,7 @@ def train(args):
             # Handle batch format
             if not args.use_packing:
                 batch = [batch]
-
+            
             # Forward and backward
             loss = model.forward_backward(batch, iter, profiler)
             profiler.profile_memory(iter, "After Backward")
@@ -219,7 +219,7 @@ def train(args):
 
             if local_rank == 0:
                 print_loss(args, loss, ep, iter)
-            torch.distributed.barrier()
+            torch.distributed.barrier()    
 
 
 if __name__ == '__main__':

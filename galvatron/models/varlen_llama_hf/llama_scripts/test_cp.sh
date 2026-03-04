@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.." || exit 1
 # Test: Pure Ring Attention CP (sp=1, cp=8) with varlen packing
 export NUM_NODES=1
 export NUM_GPUS_PER_NODE=8

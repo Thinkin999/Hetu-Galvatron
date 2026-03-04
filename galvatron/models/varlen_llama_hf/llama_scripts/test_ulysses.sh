@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.." || exit 1
 # Test: Pure Ulysses SP (sp=8, cp=1) with varlen packing
 export NUM_NODES=1
 export NUM_GPUS_PER_NODE=8

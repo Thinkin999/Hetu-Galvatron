@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.." || exit 1
 # Test: Combined Ulysses(sp=2) + Ring Attention(cp=4) with varlen packing
 # 8 GPUs total: tp=2 (Ulysses sp_size=2), cp_size=4, dp=1
 export NUM_NODES=1

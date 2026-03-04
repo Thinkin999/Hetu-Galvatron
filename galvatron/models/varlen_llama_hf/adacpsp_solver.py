@@ -496,6 +496,12 @@ class AdaCPSPOptimizer:
         self.max_parallel_size = max_parallel_size if max_parallel_size > 0 else cluster_size
         self.min_parallel_size = min_parallel_size
 
+        # Solver cache: maps a frozen set of sequence lengths to solver result
+        # Avoids re-solving for batches with identical length distributions
+        self._cache: Dict[tuple, Tuple[List, List]] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+
     def _log(self, msg):
         if not self.hide_output:
             print(msg)
@@ -678,7 +684,7 @@ class AdaCPSPOptimizer:
 
         for strat in strategies:
             if strat.parallel_size > self.N:
-                continue
+                    continue
             group_num = self.N // strat.parallel_size
             result = self.solve_homo_strategy_bfd(seqs, strat, group_num)
             if result is not None:
@@ -722,16 +728,278 @@ class AdaCPSPOptimizer:
         else:
             raise ValueError(f"Unknown heuristic: {heuristic}")
 
+    # ---- Heterogeneous BFD/FFD heuristic ----
+
+    def _generate_gpu_partitions(self) -> List[List[int]]:
+        """
+        Generate all valid partitions of N GPUs into groups where each group
+        size is a power of 2 (≥ min_parallel_size, ≤ max_parallel_size).
+
+        E.g. for N=8, min=1, max=8:
+          [8], [4,4], [4,2,2], [2,2,2,2], [2,2,4], ...
+        Partitions are sorted descending to avoid duplicates.
+        """
+        min_ps = max(1, self.min_parallel_size)
+        max_ps = min(self.N, self.max_parallel_size)
+
+        # Collect valid group sizes (powers of 2)
+        valid_sizes = []
+        ps = min_ps
+        while ps <= max_ps:
+            valid_sizes.append(ps)
+            ps *= 2
+
+        partitions = []
+
+        def _partition(remaining: int, max_allowed: int, current: List[int]):
+            if remaining == 0:
+                partitions.append(current[:])
+                return
+            for sz in valid_sizes:
+                if sz > remaining or sz > max_allowed:
+                    continue
+                current.append(sz)
+                _partition(remaining - sz, sz, current)  # descending order to avoid duplicates
+                current.pop()
+
+        _partition(self.N, max_ps, [])
+        return partitions
+
+    def solve_heterogeneous_bfd(self, seqs: List[Sequence]) -> Optional[Dict]:
+        """
+        Heterogeneous BFD: enumerate all valid GPU partitions and strategy
+        assignments, assign sequences with BFD, pick the best overall.
+
+        Unlike solve_adaptive_bfd (which only tries homogeneous strategies),
+        this can produce mixed groups like [ulysses×4, ring×4] in one microbatch.
+
+        Complexity: O(partitions × strategy_combos × K log K)
+        For N=8, 2 attn_types: ~50 combinations — fast.
+        For N=64, pruning needed (see max_hetero_combos).
+        """
+        partitions = self._generate_gpu_partitions()
+        base_strategies = self.get_strategy_pool(seqs)
+        attn_types = list(set(s.attn_type for s in base_strategies))
+
+        best_result = None
+        max_combos = 500  # safety limit for large N
+
+        combo_count = 0
+        for partition in partitions:
+            num_groups = len(partition)
+
+            # Generate all strategy assignments for this partition
+            # Each group in the partition gets assigned an attn_type
+            def _gen_assignments(idx, current):
+                nonlocal combo_count, best_result
+                if combo_count > max_combos:
+                    return
+                if idx == num_groups:
+                    combo_count += 1
+                    strategies = [ParallelStrategy(current[i], partition[i]) for i in range(num_groups)]
+                    result = self._hetero_bfd_assign(seqs, strategies)
+                    if result is not None:
+                        if best_result is None or result["M"] < best_result["M"]:
+                            best_result = result
+                    return
+                for at in attn_types:
+                    current.append(at)
+                    _gen_assignments(idx + 1, current)
+                    current.pop()
+
+            _gen_assignments(0, [])
+
+        if best_result is not None:
+            self._log(f"[Hetero BFD] Best: {best_result['M']:.2f} ms, "
+                      f"strategies={[str(s) for s in best_result['strategies']]}")
+        return best_result
+
+    def _hetero_bfd_assign(
+        self,
+        seqs: List[Sequence],
+        strategies: List[ParallelStrategy],
+    ) -> Optional[Dict]:
+        """
+        Assign sequences to heterogeneous groups using Best-Fit Decreasing.
+
+        Each group has its own strategy (attn_type, parallel_size) and thus
+        its own memory capacity and time cost function.
+
+        Args:
+            seqs: list of sequences
+            strategies: list of strategies, one per group
+
+        Returns:
+            result dict or None if infeasible
+        """
+        K = len(seqs)
+        P = len(strategies)
+        A = np.zeros((K, P), dtype=np.int32)
+
+        # Compute per-group capacity
+        capacities = [self.device_token_capacity * s.parallel_size for s in strategies]
+        remaining = list(capacities)
+
+        # Sort sequences descending by length
+        seqs_sorted = sorted(enumerate(seqs), key=lambda x: x[1].seq, reverse=True)
+
+        for orig_idx, seq in seqs_sorted:
+            # Check if seq can fit in memory with any group's strategy
+            min_ps = self._min_parallel_size(seq.seq)
+            best_group = -1
+            best_remaining = float('inf')
+
+            for p in range(P):
+                if strategies[p].parallel_size < min_ps:
+                    continue
+                if remaining[p] >= seq.seq:
+                    # Best-fit: choose the group with the least remaining capacity after adding this seq
+                    leftover = remaining[p] - seq.seq
+                    if leftover < best_remaining:
+                        best_remaining = leftover
+                        best_group = p
+
+            if best_group == -1:
+                return None  # Infeasible
+
+            A[seq.id, best_group] = 1
+            remaining[best_group] -= seq.seq
+
+        # Verify feasibility and compute max time
+        M = -1
+        for p in range(P):
+            strat = strategies[p]
+            group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K))
+            local_tokens = group_tokens / strat.parallel_size
+            if local_tokens > self.device_token_capacity:
+                return None
+
+            group_seqs_lens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
+            if not group_seqs_lens:
+                # Empty group — still counts GPUs but does no work
+                continue
+
+            group_time = self.costmodel.total_time(group_seqs_lens, strat)
+            M = max(group_time, M)
+
+        if M < 0:
+            return None
+
+        return {
+            "seqs": seqs,
+            "strategies": strategies,
+            "A": A,
+            "M": M,
+        }
+
+    def solve_heterogeneous_ffd(self, seqs: List[Sequence]) -> Optional[Dict]:
+        """
+        Heterogeneous FFD: like heterogeneous BFD but uses First-Fit Decreasing.
+        """
+        partitions = self._generate_gpu_partitions()
+        base_strategies = self.get_strategy_pool(seqs)
+        attn_types = list(set(s.attn_type for s in base_strategies))
+
+        best_result = None
+        max_combos = 500
+
+        combo_count = 0
+        for partition in partitions:
+            num_groups = len(partition)
+
+            def _gen_assignments(idx, current):
+                nonlocal combo_count, best_result
+                if combo_count > max_combos:
+                    return
+                if idx == num_groups:
+                    combo_count += 1
+                    strategies = [ParallelStrategy(current[i], partition[i]) for i in range(num_groups)]
+                    result = self._hetero_ffd_assign(seqs, strategies)
+                    if result is not None:
+                        if best_result is None or result["M"] < best_result["M"]:
+                            best_result = result
+                    return
+                for at in attn_types:
+                    current.append(at)
+                    _gen_assignments(idx + 1, current)
+                    current.pop()
+
+            _gen_assignments(0, [])
+
+        if best_result is not None:
+            self._log(f"[Hetero FFD] Best: {best_result['M']:.2f} ms, "
+                      f"strategies={[str(s) for s in best_result['strategies']]}")
+        return best_result
+
+    def _hetero_ffd_assign(
+        self,
+        seqs: List[Sequence],
+        strategies: List[ParallelStrategy],
+    ) -> Optional[Dict]:
+        """
+        Assign sequences to heterogeneous groups using First-Fit Decreasing.
+        """
+        K = len(seqs)
+        P = len(strategies)
+        A = np.zeros((K, P), dtype=np.int32)
+
+        capacities = [self.device_token_capacity * s.parallel_size for s in strategies]
+        remaining = list(capacities)
+
+        seqs_sorted = sorted(enumerate(seqs), key=lambda x: x[1].seq, reverse=True)
+
+        for orig_idx, seq in seqs_sorted:
+            min_ps = self._min_parallel_size(seq.seq)
+            placed = False
+
+            for p in range(P):
+                if strategies[p].parallel_size < min_ps:
+                    continue
+                if remaining[p] >= seq.seq:
+                    A[seq.id, p] = 1
+                    remaining[p] -= seq.seq
+                    placed = True
+                    break
+
+            if not placed:
+                return None
+
+        # Verify feasibility and compute max time
+        M = -1
+        for p in range(P):
+            strat = strategies[p]
+            group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K))
+            local_tokens = group_tokens / strat.parallel_size
+            if local_tokens > self.device_token_capacity:
+                return None
+
+            group_seqs_lens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
+            if not group_seqs_lens:
+                continue
+
+            group_time = self.costmodel.total_time(group_seqs_lens, strat)
+            M = max(group_time, M)
+
+        if M < 0:
+            return None
+
+        return {
+            "seqs": seqs,
+            "strategies": strategies,
+            "A": A,
+            "M": M,
+        }
+
     # ---- Sequence bucketing ----
 
     def bucket_seqs(self, seqs: List[Sequence], bucket_num: int):
         """
         Bucket sequences for ILP complexity reduction.
         (Ported from FlexSP: bucket_seqs)
-
+        
         Args:
             bucket_num: > 0 for DP bucketing, < 0 for even-distance bucketing
-
+            
         Returns:
             (buckets, avg_error, actual_bucket_num)
         """
@@ -1300,9 +1568,22 @@ class AdaCPSPOptimizer:
         Methods:
           - "adaptive_bfd": BFD heuristic, try all strategies, pick best (fast)
           - "adaptive_ffd": FFD heuristic, try all strategies, pick best (fast)
+          - "hetero_bfd": Heterogeneous BFD (tries mixed strategy groups)
+          - "hetero_ffd": Heterogeneous FFD (tries mixed strategy groups)
           - "ilp": ILP per-sequence (exact, slow for large K)
           - "bucket_ilp": ILP with sequence bucketing (exact, faster for large K)
         """
+        # --- Solver cache lookup ---
+        cache_key = (method, tuple(sorted(s.seq for s in seqs_gb)))
+        if cache_key in self._cache:
+            self._cache_hits += 1
+            self._log(f"[AdaCPSP] Cache HIT ({self._cache_hits}/{self._cache_hits+self._cache_misses})")
+            cached_groups, cached_results = self._cache[cache_key]
+            # Deep copy and remap IDs to current seqs
+            from copy import deepcopy
+            return deepcopy(cached_groups), deepcopy(cached_results)
+        self._cache_misses += 1
+
         mb_num = self.get_min_valid_microbatch_num(seqs_gb, chunk_alg)
 
         self._log(f"[AdaCPSP] Using {mb_num} microbatch(es)")
@@ -1362,6 +1643,9 @@ class AdaCPSPOptimizer:
                 self._log(f"[AdaCPSP] Too many retries, giving up")
                 return [], []
 
+        # --- Store in cache ---
+        self._cache[cache_key] = (all_groups, all_results)
+
         return all_groups, all_results
 
     def _solve_microbatch(
@@ -1375,6 +1659,10 @@ class AdaCPSPOptimizer:
             return self.solve_adaptive_bfd(seqs)
         elif method == "adaptive_ffd":
             return self.solve_adaptive_ffd(seqs)
+        elif method == "hetero_bfd":
+            return self.solve_heterogeneous_bfd(seqs)
+        elif method == "hetero_ffd":
+            return self.solve_heterogeneous_ffd(seqs)
         elif method == "ilp":
             return self.solve_adacpsp_ilp(seqs, bucket_num=bucket_num)
         elif method == "bucket_ilp":
@@ -1809,7 +2097,7 @@ def main():
     parser.add_argument("--iter_num", type=int, default=5)
     parser.add_argument("--start_iter", type=int, default=3)
     parser.add_argument("--method", type=str, default="adaptive_bfd",
-                        choices=["adaptive_bfd", "adaptive_ffd", "ilp", "bucket_ilp"])
+                        choices=["adaptive_bfd", "adaptive_ffd", "hetero_bfd", "hetero_ffd", "ilp", "bucket_ilp"])
     parser.add_argument("--solve_mode", type=str, default="sequential",
                         choices=["sequential", "mp", "mp_gbmb"],
                         help="sequential: solve MBs one by one; "

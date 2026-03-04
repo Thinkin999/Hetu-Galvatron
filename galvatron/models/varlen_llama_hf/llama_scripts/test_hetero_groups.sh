@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$0")/.." || exit 1
 # ═══════════════════════════════════════════════════════════════
 # Test: Forced Heterogeneous Groups (Ulysses + Ring in same MB)
 # ═══════════════════════════════════════════════════════════════
@@ -75,4 +76,5 @@ echo "  Ranks 4-7: Ring Attention × 4"
 echo "============================================================"
 
 ${LAUNCHER} ${TRAINER} ${MODEL_ARGS} ${TRAIN_ARGS} ${PARALLEL_ARGS}
+
 
