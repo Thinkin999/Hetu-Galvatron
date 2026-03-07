@@ -1,0 +1,36 @@
+{
+  "timestamp": "20260304_130217",
+  "model_name": "llama-7b",
+  "memory_validation": [
+    {
+      "seq_len": 1024,
+      "measured_activation_MB": 32.1259765625,
+      "predicted_activation_MB": 4823.04,
+      "error_pct": 14912.89771103748
+    },
+    {
+      "seq_len": 2048,
+      "measured_activation_MB": 64.25048828125,
+      "predicted_activation_MB": 9646.08,
+      "error_pct": 14913.239989360489
+    },
+    {
+      "seq_len": 4096,
+      "measured_activation_MB": 128.50048828125,
+      "predicted_activation_MB": 19292.16,
+      "error_pct": 14913.297037265027
+    },
+    {
+      "seq_len": 8192,
+      "measured_activation_MB": 257.00048828125,
+      "predicted_activation_MB": 38584.32,
+      "error_pct": 14913.325561379876
+    },
+    {
+      "seq_len": 16384,
+      "measured_activation_MB": 514.00048828125,
+      "predicted_activation_MB": 77168.64,
+      "error_pct": 14913.339823477947
+    }
+  ]
+}

@@ -1,0 +1,350 @@
+{
+  "timestamp": "20260304_124909",
+  "model_name": "llama-7b",
+  "compute_validation": [
+    {
+      "seq_len": 512,
+      "measured_per_layer_ms": 0.056550399462382,
+      "predicted_per_layer_ms": 0.07202910541994545,
+      "error_pct": 27.37152364035919
+    },
+    {
+      "seq_len": 1024,
+      "measured_per_layer_ms": 0.1167680025100708,
+      "predicted_per_layer_ms": 0.11578345304801776,
+      "error_pct": 0.8431671698487112
+    },
+    {
+      "seq_len": 2048,
+      "measured_per_layer_ms": 0.31850881576538087,
+      "predicted_per_layer_ms": 0.2617552235886496,
+      "error_pct": 17.818531031975247
+    },
+    {
+      "seq_len": 4096,
+      "measured_per_layer_ms": 0.990072504679362,
+      "predicted_per_layer_ms": 0.7875510658078622,
+      "error_pct": 20.45521291767284
+    },
+    {
+      "seq_len": 8192,
+      "measured_per_layer_ms": 3.4360885620117188,
+      "predicted_per_layer_ms": 2.774551954798083,
+      "error_pct": 19.252606423692626
+    },
+    {
+      "seq_len": 16384,
+      "measured_per_layer_ms": 10.458732096354167,
+      "predicted_per_layer_ms": 10.648232613488869,
+      "error_pct": 1.8118880509498887
+    },
+    {
+      "seq_len": 32768,
+      "measured_per_layer_ms": 40.837040201822916,
+      "predicted_per_layer_ms": 41.50507222284511,
+      "error_pct": 1.6358482831289327
+    }
+  ],
+  "comm_validation": [
+    {
+      "seq_len": 2048,
+      "comm_type": "alltoall",
+      "group_size": 2,
+      "measured_ms": 16.253201293945313,
+      "predicted_ms": 30.67245972730976,
+      "error_pct": 88.716420676682,
+      "single_op_ms": 0.06348906755447388,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 4096,
+      "comm_type": "alltoall",
+      "group_size": 2,
+      "measured_ms": 29.774369303385416,
+      "predicted_ms": 36.71183738101576,
+      "error_pct": 23.30013444429716,
+      "single_op_ms": 0.11630613009134928,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 8192,
+      "comm_type": "alltoall",
+      "group_size": 2,
+      "measured_ms": 43.751285807291666,
+      "predicted_ms": 48.790592688427765,
+      "error_pct": 11.518077213392981,
+      "single_op_ms": 0.17090346018473307,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 16384,
+      "comm_type": "alltoall",
+      "group_size": 2,
+      "measured_ms": 69.92145182291667,
+      "predicted_ms": 72.94810330325177,
+      "error_pct": 4.328645074476448,
+      "single_op_ms": 0.2731306711832682,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 32768,
+      "comm_type": "alltoall",
+      "group_size": 2,
+      "measured_ms": 128.536572265625,
+      "predicted_ms": 121.26312453289977,
+      "error_pct": 5.658660103129582,
+      "single_op_ms": 0.5020959854125977,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 2048,
+      "comm_type": "p2p",
+      "group_size": 2,
+      "measured_ms": 6.6772308349609375,
+      "predicted_ms": 5.358807379542309,
+      "error_pct": 19.745063305518347,
+      "ring_time_ms": 0.2086634635925293,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 4096,
+      "comm_type": "p2p",
+      "group_size": 2,
+      "measured_ms": 8.977135213216146,
+      "predicted_ms": 7.789015660258691,
+      "error_pct": 13.234952183947325,
+      "ring_time_ms": 0.28053547541300455,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 8192,
+      "comm_type": "p2p",
+      "group_size": 2,
+      "measured_ms": 14.940500895182291,
+      "predicted_ms": 12.649432221691455,
+      "error_pct": 15.334617557766173,
+      "ring_time_ms": 0.4668906529744466,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 16384,
+      "comm_type": "p2p",
+      "group_size": 2,
+      "measured_ms": 27.265024820963543,
+      "predicted_ms": 22.370265344556987,
+      "error_pct": 17.95252162265802,
+      "ring_time_ms": 0.8520320256551107,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 32768,
+      "comm_type": "p2p",
+      "group_size": 2,
+      "measured_ms": 51.9771484375,
+      "predicted_ms": 41.81193159028805,
+      "error_pct": 19.557088360542004,
+      "ring_time_ms": 1.624285888671875,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 2048,
+      "comm_type": "alltoall",
+      "group_size": 4,
+      "measured_ms": 29.394535319010416,
+      "predicted_ms": 25.87397499253676,
+      "error_pct": 11.976921180301137,
+      "single_op_ms": 0.11482240358988444,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 4096,
+      "comm_type": "alltoall",
+      "group_size": 4,
+      "measured_ms": 17.917816162109375,
+      "predicted_ms": 29.67507174174819,
+      "error_pct": 65.6176817155975,
+      "single_op_ms": 0.06999146938323975,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 8192,
+      "comm_type": "alltoall",
+      "group_size": 4,
+      "measured_ms": 30.3458984375,
+      "predicted_ms": 37.27726524017106,
+      "error_pct": 22.841198183493596,
+      "single_op_ms": 0.11853866577148438,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 16384,
+      "comm_type": "alltoall",
+      "group_size": 4,
+      "measured_ms": 48.02696533203125,
+      "predicted_ms": 52.48165223701679,
+      "error_pct": 9.275387012667471,
+      "single_op_ms": 0.18760533332824708,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 32768,
+      "comm_type": "alltoall",
+      "group_size": 4,
+      "measured_ms": 84.0002197265625,
+      "predicted_ms": 82.89042623070826,
+      "error_pct": 1.3211792772290925,
+      "single_op_ms": 0.3281258583068848,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 2048,
+      "comm_type": "p2p",
+      "group_size": 4,
+      "measured_ms": 15.094032796223958,
+      "predicted_ms": 25.043131557159658,
+      "error_pct": 65.9141191439881,
+      "ring_time_ms": 0.4716885248819987,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 4096,
+      "comm_type": "p2p",
+      "group_size": 4,
+      "measured_ms": 21.432421875,
+      "predicted_ms": 28.60154352993393,
+      "error_pct": 33.44989052915389,
+      "ring_time_ms": 0.66976318359375,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 8192,
+      "comm_type": "p2p",
+      "group_size": 4,
+      "measured_ms": 38.98542073567708,
+      "predicted_ms": 35.71836747548248,
+      "error_pct": 8.38019238613678,
+      "ring_time_ms": 1.2182943979899088,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 16384,
+      "comm_type": "p2p",
+      "group_size": 4,
+      "measured_ms": 73.35560709635416,
+      "predicted_ms": 49.95201536657957,
+      "error_pct": 31.90429832996061,
+      "ring_time_ms": 2.2923627217610676,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 32768,
+      "comm_type": "p2p",
+      "group_size": 4,
+      "measured_ms": 123.06653645833333,
+      "predicted_ms": 78.41931114877377,
+      "error_pct": 36.278932189398034,
+      "ring_time_ms": 3.8458292643229166,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 2048,
+      "comm_type": "alltoall",
+      "group_size": 8,
+      "measured_ms": 16.57651163736979,
+      "predicted_ms": 26.60113938192766,
+      "error_pct": 60.47489341459833,
+      "single_op_ms": 0.06475199858347574,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 4096,
+      "comm_type": "alltoall",
+      "group_size": 8,
+      "measured_ms": 16.58934631347656,
+      "predicted_ms": 28.72705482448876,
+      "error_pct": 73.16568285244598,
+      "single_op_ms": 0.06480213403701782,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 8192,
+      "comm_type": "alltoall",
+      "group_size": 8,
+      "measured_ms": 19.44371134440104,
+      "predicted_ms": 32.978885709610964,
+      "error_pct": 69.61209269910023,
+      "single_op_ms": 0.07595199743906657,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 16384,
+      "comm_type": "alltoall",
+      "group_size": 8,
+      "measured_ms": 32.97416585286458,
+      "predicted_ms": 41.482547479855356,
+      "error_pct": 25.80317471852475,
+      "single_op_ms": 0.12880533536275227,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 32768,
+      "comm_type": "alltoall",
+      "group_size": 8,
+      "measured_ms": 53.03610026041667,
+      "predicted_ms": 58.489871020344154,
+      "error_pct": 10.28312928957541,
+      "single_op_ms": 0.2071722666422526,
+      "num_ops": 256
+    },
+    {
+      "seq_len": 2048,
+      "comm_type": "p2p",
+      "group_size": 8,
+      "measured_ms": 39.675663248697916,
+      "predicted_ms": 82.51110575395562,
+      "error_pct": 107.96402378141336,
+      "ring_time_ms": 1.2398644765218099,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 4096,
+      "comm_type": "p2p",
+      "group_size": 8,
+      "measured_ms": 48.8149658203125,
+      "predicted_ms": 87.17974269328974,
+      "error_pct": 78.59224364551984,
+      "ring_time_ms": 1.5254676818847657,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 8192,
+      "comm_type": "p2p",
+      "group_size": 8,
+      "measured_ms": 86.61660970052084,
+      "predicted_ms": 96.51701657195795,
+      "error_pct": 11.430148219455859,
+      "ring_time_ms": 2.7067690531412762,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 16384,
+      "comm_type": "p2p",
+      "group_size": 8,
+      "measured_ms": 134.89220377604167,
+      "predicted_ms": 115.19156432929442,
+      "error_pct": 14.604727994106872,
+      "ring_time_ms": 4.215381368001302,
+      "num_layers": 32
+    },
+    {
+      "seq_len": 32768,
+      "comm_type": "p2p",
+      "group_size": 8,
+      "measured_ms": 260.717333984375,
+      "predicted_ms": 152.54065984396732,
+      "error_pct": 41.49193783444057,
+      "ring_time_ms": 8.147416687011718,
+      "num_layers": 32
+    }
+  ]
+}

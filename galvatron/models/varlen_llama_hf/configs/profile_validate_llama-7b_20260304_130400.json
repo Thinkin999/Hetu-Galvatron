@@ -1,0 +1,61 @@
+{
+  "timestamp": "20260304_130400",
+  "model_name": "llama-7b",
+  "memory_validation": [
+    {
+      "seq_len": 1024,
+      "attn_peak_MB": 32.1259765625,
+      "ffn_activation_MB": 104.125,
+      "per_layer_MB": 136.2509765625,
+      "total_measured_MB": 4360.03125,
+      "total_predicted_MB": 4823.04,
+      "per_token_measured": 4.257843017578125,
+      "per_token_predicted": 4.71,
+      "error_pct": 10.619390629367622
+    },
+    {
+      "seq_len": 2048,
+      "attn_peak_MB": 64.25048828125,
+      "ffn_activation_MB": 192.0,
+      "per_layer_MB": 256.25048828125,
+      "total_measured_MB": 8200.015625,
+      "total_predicted_MB": 9646.08,
+      "per_token_measured": 4.003913879394531,
+      "per_token_predicted": 4.71,
+      "error_pct": 17.634897799356327
+    },
+    {
+      "seq_len": 4096,
+      "attn_peak_MB": 128.50048828125,
+      "ffn_activation_MB": 376.0,
+      "per_layer_MB": 504.50048828125,
+      "total_measured_MB": 16144.015625,
+      "total_predicted_MB": 19292.16,
+      "per_token_measured": 3.9414100646972656,
+      "per_token_predicted": 4.71,
+      "error_pct": 19.500379881476977
+    },
+    {
+      "seq_len": 8192,
+      "attn_peak_MB": 257.00048828125,
+      "ffn_activation_MB": 752.0,
+      "per_layer_MB": 1009.00048828125,
+      "total_measured_MB": 32288.015625,
+      "total_predicted_MB": 38584.32,
+      "per_token_measured": 3.941408157348633,
+      "per_token_predicted": 4.71,
+      "error_pct": 19.50043771077988
+    },
+    {
+      "seq_len": 16384,
+      "attn_peak_MB": 514.00048828125,
+      "ffn_activation_MB": 1504.0,
+      "per_layer_MB": 2018.00048828125,
+      "total_measured_MB": 64576.015625,
+      "total_predicted_MB": 77168.64,
+      "per_token_measured": 3.9414072036743164,
+      "per_token_predicted": 4.71,
+      "error_pct": 19.50046662545232
+    }
+  ]
+}

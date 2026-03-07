@@ -1,0 +1,904 @@
+{
+  "timestamp": "20260304_122852",
+  "model_name": "llama-7b",
+  "communication": {
+    "results": {
+      "alltoall_gs2": [
+        {
+          "msg_size_MB": 0.5,
+          "total_bytes": 524288,
+          "data_moved_bytes": 262144.0,
+          "time_ms": 0.04984447956085205,
+          "bandwidth_GBs": 5.2592383812527235
+        },
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "data_moved_bytes": 524288.0,
+          "time_ms": 0.04404543876647949,
+          "bandwidth_GBs": 11.903343789573192
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "data_moved_bytes": 1048576.0,
+          "time_ms": 0.059192957878112795,
+          "bandwidth_GBs": 17.714539661274838
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "data_moved_bytes": 2097152.0,
+          "time_ms": 0.04771711826324463,
+          "bandwidth_GBs": 43.94967836134787
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "data_moved_bytes": 4194304.0,
+          "time_ms": 0.06475008010864258,
+          "bandwidth_GBs": 64.77681561107691
+        },
+        {
+          "msg_size_MB": 12,
+          "total_bytes": 12582912,
+          "data_moved_bytes": 6291456.0,
+          "time_ms": 0.0750048017501831,
+          "bandwidth_GBs": 83.88070967715932
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "data_moved_bytes": 8388608.0,
+          "time_ms": 0.11190784454345704,
+          "bandwidth_GBs": 74.95996401523455
+        },
+        {
+          "msg_size_MB": 24,
+          "total_bytes": 25165824,
+          "data_moved_bytes": 12582912.0,
+          "time_ms": 0.12880895614624024,
+          "bandwidth_GBs": 97.68662348070178
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "data_moved_bytes": 16777216.0,
+          "time_ms": 0.15719679832458497,
+          "bandwidth_GBs": 106.72746632764026
+        },
+        {
+          "msg_size_MB": 48,
+          "total_bytes": 50331648,
+          "data_moved_bytes": 25165824.0,
+          "time_ms": 0.21353343963623048,
+          "bandwidth_GBs": 117.85425291173028
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "data_moved_bytes": 33554432.0,
+          "time_ms": 0.27317567825317385,
+          "bandwidth_GBs": 122.83096436170432
+        },
+        {
+          "msg_size_MB": 96,
+          "total_bytes": 100663296,
+          "data_moved_bytes": 50331648.0,
+          "time_ms": 0.387894401550293,
+          "bandwidth_GBs": 129.7560568000984
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "data_moved_bytes": 67108864.0,
+          "time_ms": 0.5000096130371093,
+          "bandwidth_GBs": 134.21514756961156
+        },
+        {
+          "msg_size_MB": 192,
+          "total_bytes": 201326592,
+          "data_moved_bytes": 100663296.0,
+          "time_ms": 0.729552001953125,
+          "bandwidth_GBs": 137.9796035519176
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "data_moved_bytes": 134217728.0,
+          "time_ms": 0.9560479736328125,
+          "bandwidth_GBs": 140.38806806942594
+        },
+        {
+          "msg_size_MB": 384,
+          "total_bytes": 402653184,
+          "data_moved_bytes": 201326592.0,
+          "time_ms": 1.3139903259277343,
+          "bandwidth_GBs": 153.21771251082438
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "data_moved_bytes": 268435456.0,
+          "time_ms": 1.6872160339355469,
+          "bandwidth_GBs": 159.09963549472437
+        },
+        {
+          "msg_size_MB": 768,
+          "total_bytes": 805306368,
+          "data_moved_bytes": 402653184.0,
+          "time_ms": 2.310563201904297,
+          "bandwidth_GBs": 174.26624974731067
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "data_moved_bytes": 536870912.0,
+          "time_ms": 3.0436260986328123,
+          "bandwidth_GBs": 176.39187423223922
+        }
+      ],
+      "p2p_gs2": [
+        {
+          "msg_size_MB": 0.5,
+          "total_bytes": 524288,
+          "data_moved_bytes": 524288,
+          "time_ms": 0.06783743858337403,
+          "bandwidth_GBs": 7.728593693224959
+        },
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "data_moved_bytes": 1048576,
+          "time_ms": 0.06902783870697021,
+          "bandwidth_GBs": 15.190624820969777
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "data_moved_bytes": 2097152,
+          "time_ms": 0.06959807872772217,
+          "bandwidth_GBs": 30.132326040268502
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "data_moved_bytes": 4194304,
+          "time_ms": 0.0704908800125122,
+          "bandwidth_GBs": 59.50137094692969
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "data_moved_bytes": 8388608,
+          "time_ms": 0.07695040225982666,
+          "bandwidth_GBs": 109.01317931614535
+        },
+        {
+          "msg_size_MB": 12,
+          "total_bytes": 12582912,
+          "data_moved_bytes": 12582912,
+          "time_ms": 0.10507328033447266,
+          "bandwidth_GBs": 119.75368009779145
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "data_moved_bytes": 16777216,
+          "time_ms": 0.12379072189331054,
+          "bandwidth_GBs": 135.5288647113594
+        },
+        {
+          "msg_size_MB": 24,
+          "total_bytes": 25165824,
+          "data_moved_bytes": 25165824,
+          "time_ms": 0.17142208099365233,
+          "bandwidth_GBs": 146.80619821043868
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "data_moved_bytes": 33554432,
+          "time_ms": 0.21821760177612304,
+          "bandwidth_GBs": 153.76592780276565
+        },
+        {
+          "msg_size_MB": 48,
+          "total_bytes": 50331648,
+          "data_moved_bytes": 50331648,
+          "time_ms": 0.3128793525695801,
+          "bandwidth_GBs": 160.86599383002408
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "data_moved_bytes": 67108864,
+          "time_ms": 0.39907840728759764,
+          "bandwidth_GBs": 168.15959664697596
+        },
+        {
+          "msg_size_MB": 96,
+          "total_bytes": 100663296,
+          "data_moved_bytes": 100663296,
+          "time_ms": 0.5776537704467773,
+          "bandwidth_GBs": 174.26233697417663
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "data_moved_bytes": 134217728,
+          "time_ms": 0.7577497863769531,
+          "bandwidth_GBs": 177.1267117629137
+        },
+        {
+          "msg_size_MB": 192,
+          "total_bytes": 201326592,
+          "data_moved_bytes": 201326592,
+          "time_ms": 1.1075091552734375,
+          "bandwidth_GBs": 181.78323045130372
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "data_moved_bytes": 268435456,
+          "time_ms": 1.4658143615722656,
+          "bandwidth_GBs": 183.13059486746334
+        },
+        {
+          "msg_size_MB": 384,
+          "total_bytes": 402653184,
+          "data_moved_bytes": 402653184,
+          "time_ms": 1.8576007080078125,
+          "bandwidth_GBs": 216.75981402474062
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "data_moved_bytes": 536870912,
+          "time_ms": 2.4475308227539063,
+          "bandwidth_GBs": 219.35205350996353
+        },
+        {
+          "msg_size_MB": 768,
+          "total_bytes": 805306368,
+          "data_moved_bytes": 805306368,
+          "time_ms": 3.6861087036132814,
+          "bandwidth_GBs": 218.4705967055731
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "data_moved_bytes": 1073741824,
+          "time_ms": 4.981929626464844,
+          "bandwidth_GBs": 215.5272965511403
+        }
+      ],
+      "alltoall_gs4": [
+        {
+          "msg_size_MB": 0.5,
+          "total_bytes": 524288,
+          "data_moved_bytes": 393216.0,
+          "time_ms": 0.08223808288574219,
+          "bandwidth_GBs": 4.781434418240466
+        },
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "data_moved_bytes": 786432.0,
+          "time_ms": 0.045367040634155274,
+          "bandwidth_GBs": 17.334875473625726
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "data_moved_bytes": 1572864.0,
+          "time_ms": 0.04993535995483398,
+          "bandwidth_GBs": 31.49800064368494
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "data_moved_bytes": 3145728.0,
+          "time_ms": 0.05113215923309326,
+          "bandwidth_GBs": 61.52151693144326
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "data_moved_bytes": 6291456.0,
+          "time_ms": 0.07061503887176514,
+          "bandwidth_GBs": 89.09512903370486
+        },
+        {
+          "msg_size_MB": 12,
+          "total_bytes": 12582912,
+          "data_moved_bytes": 9437184.0,
+          "time_ms": 0.09348544120788574,
+          "bandwidth_GBs": 100.94816773677428
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "data_moved_bytes": 12582912.0,
+          "time_ms": 0.11836095809936524,
+          "bandwidth_GBs": 106.30964975322789
+        },
+        {
+          "msg_size_MB": 24,
+          "total_bytes": 25165824,
+          "data_moved_bytes": 18874368.0,
+          "time_ms": 0.15952192306518553,
+          "bandwidth_GBs": 118.31833291206848
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "data_moved_bytes": 25165824.0,
+          "time_ms": 0.18639680862426758,
+          "bandwidth_GBs": 135.01209696528883
+        },
+        {
+          "msg_size_MB": 48,
+          "total_bytes": 50331648,
+          "data_moved_bytes": 37748736.0,
+          "time_ms": 0.25841344833374025,
+          "bandwidth_GBs": 146.07883700869783
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "data_moved_bytes": 50331648.0,
+          "time_ms": 0.3299679946899414,
+          "bandwidth_GBs": 152.53493917582753
+        },
+        {
+          "msg_size_MB": 96,
+          "total_bytes": 100663296,
+          "data_moved_bytes": 75497472.0,
+          "time_ms": 0.4562374496459961,
+          "bandwidth_GBs": 165.47846315242208
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "data_moved_bytes": 100663296.0,
+          "time_ms": 0.589032974243164,
+          "bandwidth_GBs": 170.89585880882157
+        },
+        {
+          "msg_size_MB": 192,
+          "total_bytes": 201326592,
+          "data_moved_bytes": 150994944.0,
+          "time_ms": 0.8320582580566406,
+          "bandwidth_GBs": 181.4716007418333
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "data_moved_bytes": 201326592.0,
+          "time_ms": 1.0785286712646485,
+          "bandwidth_GBs": 186.66781640948943
+        },
+        {
+          "msg_size_MB": 384,
+          "total_bytes": 402653184,
+          "data_moved_bytes": 301989888.0,
+          "time_ms": 1.554530487060547,
+          "bandwidth_GBs": 194.26437147014786
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "data_moved_bytes": 402653184.0,
+          "time_ms": 2.037093048095703,
+          "bandwidth_GBs": 197.66067356442292
+        },
+        {
+          "msg_size_MB": 768,
+          "total_bytes": 805306368,
+          "data_moved_bytes": 603979776.0,
+          "time_ms": 2.9169247436523436,
+          "bandwidth_GBs": 207.06045890088478
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "data_moved_bytes": 805306368.0,
+          "time_ms": 3.841763916015625,
+          "bandwidth_GBs": 209.61891089736724
+        }
+      ],
+      "p2p_gs4": [
+        {
+          "msg_size_MB": 0.5,
+          "total_bytes": 524288,
+          "data_moved_bytes": 524288,
+          "time_ms": 0.07003967761993408,
+          "bandwidth_GBs": 7.485585568297672
+        },
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "data_moved_bytes": 1048576,
+          "time_ms": 0.07250688076019288,
+          "bandwidth_GBs": 14.461744720036013
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "data_moved_bytes": 2097152,
+          "time_ms": 0.07204415798187255,
+          "bandwidth_GBs": 29.109258248637957
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "data_moved_bytes": 4194304,
+          "time_ms": 0.07204415798187255,
+          "bandwidth_GBs": 58.218516497275914
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "data_moved_bytes": 8388608,
+          "time_ms": 0.0971129608154297,
+          "bandwidth_GBs": 86.379901606987
+        },
+        {
+          "msg_size_MB": 12,
+          "total_bytes": 12582912,
+          "data_moved_bytes": 12582912,
+          "time_ms": 0.13002304077148438,
+          "bandwidth_GBs": 96.77447877960707
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "data_moved_bytes": 16777216,
+          "time_ms": 0.17289472579956056,
+          "bandwidth_GBs": 97.03717636505625
+        },
+        {
+          "msg_size_MB": 24,
+          "total_bytes": 25165824,
+          "data_moved_bytes": 25165824,
+          "time_ms": 0.24319488525390626,
+          "bandwidth_GBs": 103.48007102914917
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "data_moved_bytes": 33554432,
+          "time_ms": 0.3098111915588379,
+          "bandwidth_GBs": 108.30606806412769
+        },
+        {
+          "msg_size_MB": 48,
+          "total_bytes": 50331648,
+          "data_moved_bytes": 50331648,
+          "time_ms": 0.4561663818359375,
+          "bandwidth_GBs": 110.33616242702871
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "data_moved_bytes": 67108864,
+          "time_ms": 0.6101235198974609,
+          "bandwidth_GBs": 109.99225863523257
+        },
+        {
+          "msg_size_MB": 96,
+          "total_bytes": 100663296,
+          "data_moved_bytes": 100663296,
+          "time_ms": 0.91723388671875,
+          "bandwidth_GBs": 109.74659512428835
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "data_moved_bytes": 134217728,
+          "time_ms": 1.2275827026367188,
+          "bandwidth_GBs": 109.33497817435388
+        },
+        {
+          "msg_size_MB": 192,
+          "total_bytes": 201326592,
+          "data_moved_bytes": 201326592,
+          "time_ms": 1.1155538940429688,
+          "bandwidth_GBs": 180.47231341764768
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "data_moved_bytes": 268435456,
+          "time_ms": 1.4662342834472657,
+          "bandwidth_GBs": 183.07814721729258
+        },
+        {
+          "msg_size_MB": 384,
+          "total_bytes": 402653184,
+          "data_moved_bytes": 402653184,
+          "time_ms": 1.88400634765625,
+          "bandwidth_GBs": 213.72177673440984
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "data_moved_bytes": 536870912,
+          "time_ms": 2.4858642578125,
+          "bandwidth_GBs": 215.96952058534094
+        },
+        {
+          "msg_size_MB": 768,
+          "total_bytes": 805306368,
+          "data_moved_bytes": 805306368,
+          "time_ms": 3.743319091796875,
+          "bandwidth_GBs": 215.1316380601247
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "data_moved_bytes": 1073741824,
+          "time_ms": 5.011121826171875,
+          "bandwidth_GBs": 214.27174617709485
+        }
+      ],
+      "alltoall_gs8": [
+        {
+          "msg_size_MB": 0.5,
+          "total_bytes": 524288,
+          "data_moved_bytes": 458752.0,
+          "time_ms": 0.05114496231079101,
+          "bandwidth_GBs": 8.96964196028371
+        },
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "data_moved_bytes": 917504.0,
+          "time_ms": 0.05216256141662598,
+          "bandwidth_GBs": 17.589320291843652
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "data_moved_bytes": 1835008.0,
+          "time_ms": 0.05578048229217529,
+          "bandwidth_GBs": 32.89695471595822
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "data_moved_bytes": 3670016.0,
+          "time_ms": 0.056316800117492676,
+          "bandwidth_GBs": 65.16733891739791
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "data_moved_bytes": 7340032.0,
+          "time_ms": 0.0765715217590332,
+          "bandwidth_GBs": 95.85851020564432
+        },
+        {
+          "msg_size_MB": 12,
+          "total_bytes": 12582912,
+          "data_moved_bytes": 11010048.0,
+          "time_ms": 0.10402688026428222,
+          "bandwidth_GBs": 105.83849070575573
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "data_moved_bytes": 14680064.0,
+          "time_ms": 0.1302361583709717,
+          "bandwidth_GBs": 112.71880392989262
+        },
+        {
+          "msg_size_MB": 24,
+          "total_bytes": 25165824,
+          "data_moved_bytes": 22020096.0,
+          "time_ms": 0.17353023529052736,
+          "bandwidth_GBs": 126.89486626427707
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "data_moved_bytes": 29360128.0,
+          "time_ms": 0.2127507209777832,
+          "bandwidth_GBs": 138.0024841517034
+        },
+        {
+          "msg_size_MB": 48,
+          "total_bytes": 50331648,
+          "data_moved_bytes": 44040192.0,
+          "time_ms": 0.29063232421875,
+          "bandwidth_GBs": 151.53232565711548
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "data_moved_bytes": 58720256.0,
+          "time_ms": 0.36595199584960936,
+          "bandwidth_GBs": 160.45890353370697
+        },
+        {
+          "msg_size_MB": 96,
+          "total_bytes": 100663296,
+          "data_moved_bytes": 88080384.0,
+          "time_ms": 0.5150924682617187,
+          "bandwidth_GBs": 170.99916893998596
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "data_moved_bytes": 117440512.0,
+          "time_ms": 0.6660966491699218,
+          "bandwidth_GBs": 176.31151897604101
+        },
+        {
+          "msg_size_MB": 192,
+          "total_bytes": 201326592,
+          "data_moved_bytes": 176160768.0,
+          "time_ms": 0.9316492462158203,
+          "bandwidth_GBs": 189.08486076227837
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "data_moved_bytes": 234881024.0,
+          "time_ms": 1.1895558166503906,
+          "bandwidth_GBs": 197.4527136199371
+        },
+        {
+          "msg_size_MB": 384,
+          "total_bytes": 402653184,
+          "data_moved_bytes": 352321536.0,
+          "time_ms": 1.7345408630371093,
+          "bandwidth_GBs": 203.1209200705134
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "data_moved_bytes": 469762048.0,
+          "time_ms": 2.281741485595703,
+          "bandwidth_GBs": 205.87873383796475
+        },
+        {
+          "msg_size_MB": 768,
+          "total_bytes": 805306368,
+          "data_moved_bytes": 704643072.0,
+          "time_ms": 3.262561950683594,
+          "bandwidth_GBs": 215.97844965131114
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "data_moved_bytes": 939524096.0,
+          "time_ms": 4.297521362304687,
+          "bandwidth_GBs": 218.61999436255257
+        }
+      ],
+      "p2p_gs8": [
+        {
+          "msg_size_MB": 0.5,
+          "total_bytes": 524288,
+          "data_moved_bytes": 524288,
+          "time_ms": 0.06791488170623779,
+          "bandwidth_GBs": 7.71978080250187
+        },
+        {
+          "msg_size_MB": 1,
+          "total_bytes": 1048576,
+          "data_moved_bytes": 1048576,
+          "time_ms": 0.06429759979248047,
+          "bandwidth_GBs": 16.308167075975827
+        },
+        {
+          "msg_size_MB": 2,
+          "total_bytes": 2097152,
+          "data_moved_bytes": 2097152,
+          "time_ms": 0.06611711978912353,
+          "bandwidth_GBs": 31.718744051294685
+        },
+        {
+          "msg_size_MB": 4,
+          "total_bytes": 4194304,
+          "data_moved_bytes": 4194304,
+          "time_ms": 0.08670207977294922,
+          "bandwidth_GBs": 48.37604831376386
+        },
+        {
+          "msg_size_MB": 8,
+          "total_bytes": 8388608,
+          "data_moved_bytes": 8388608,
+          "time_ms": 0.15859392166137695,
+          "bandwidth_GBs": 52.893628659432494
+        },
+        {
+          "msg_size_MB": 12,
+          "total_bytes": 12582912,
+          "data_moved_bytes": 12582912,
+          "time_ms": 0.22767999649047851,
+          "bandwidth_GBs": 55.26577738034273
+        },
+        {
+          "msg_size_MB": 16,
+          "total_bytes": 16777216,
+          "data_moved_bytes": 16777216,
+          "time_ms": 0.2965811157226563,
+          "bandwidth_GBs": 56.568726431284254
+        },
+        {
+          "msg_size_MB": 24,
+          "total_bytes": 25165824,
+          "data_moved_bytes": 25165824,
+          "time_ms": 0.4403071975708008,
+          "bandwidth_GBs": 57.15515017433566
+        },
+        {
+          "msg_size_MB": 32,
+          "total_bytes": 33554432,
+          "data_moved_bytes": 33554432,
+          "time_ms": 0.5774860763549805,
+          "bandwidth_GBs": 58.10431346118569
+        },
+        {
+          "msg_size_MB": 48,
+          "total_bytes": 50331648,
+          "data_moved_bytes": 50331648,
+          "time_ms": 0.865169906616211,
+          "bandwidth_GBs": 58.175449255803926
+        },
+        {
+          "msg_size_MB": 64,
+          "total_bytes": 67108864,
+          "data_moved_bytes": 67108864,
+          "time_ms": 1.1793984222412108,
+          "bandwidth_GBs": 56.90092740032077
+        },
+        {
+          "msg_size_MB": 96,
+          "total_bytes": 100663296,
+          "data_moved_bytes": 100663296,
+          "time_ms": 0.9281215667724609,
+          "bandwidth_GBs": 108.45917130237174
+        },
+        {
+          "msg_size_MB": 128,
+          "total_bytes": 134217728,
+          "data_moved_bytes": 134217728,
+          "time_ms": 1.2449107360839844,
+          "bandwidth_GBs": 107.81313399400659
+        },
+        {
+          "msg_size_MB": 192,
+          "total_bytes": 201326592,
+          "data_moved_bytes": 201326592,
+          "time_ms": 1.1226700592041015,
+          "bandwidth_GBs": 179.32837020943376
+        },
+        {
+          "msg_size_MB": 256,
+          "total_bytes": 268435456,
+          "data_moved_bytes": 268435456,
+          "time_ms": 1.4782937622070313,
+          "bandwidth_GBs": 181.58465040076808
+        },
+        {
+          "msg_size_MB": 384,
+          "total_bytes": 402653184,
+          "data_moved_bytes": 402653184,
+          "time_ms": 2.193789367675781,
+          "bandwidth_GBs": 183.542317203676
+        },
+        {
+          "msg_size_MB": 512,
+          "total_bytes": 536870912,
+          "data_moved_bytes": 536870912,
+          "time_ms": 2.9086093139648437,
+          "bandwidth_GBs": 184.57993289864336
+        },
+        {
+          "msg_size_MB": 768,
+          "total_bytes": 805306368,
+          "data_moved_bytes": 805306368,
+          "time_ms": 4.349159545898438,
+          "bandwidth_GBs": 185.16367576339212
+        },
+        {
+          "msg_size_MB": 1024,
+          "total_bytes": 1073741824,
+          "data_moved_bytes": 1073741824,
+          "time_ms": 5.8122314453125,
+          "bandwidth_GBs": 184.73831162830942
+        }
+      ]
+    },
+    "linear_fits": {
+      "alltoall_gs2": {
+        "alpha_ms_per_MB": 0.002948914869973633,
+        "beta_ms": 0.09622297685001469,
+        "r_squared": 0.9958521880480218,
+        "effective_bandwidth_GBs": 339.10778848931005,
+        "latency_ms": 0.09622297685001469,
+        "fit_range_MB": [
+          8.0,
+          1024.0
+        ],
+        "n_points": 15,
+        "alpha_full": 0.0029742633363368733,
+        "beta_full": 0.08060503884619963
+      },
+      "p2p_gs2": {
+        "alpha_ms_per_MB": 0.004746500548274185,
+        "beta_ms": 0.0915187218383102,
+        "r_squared": 0.9979718607473284,
+        "effective_bandwidth_GBs": 210.68153049378608,
+        "latency_ms": 0.0915187218383102,
+        "fit_range_MB": [
+          8.0,
+          1024.0
+        ],
+        "n_points": 15,
+        "alpha_full": 0.004761820255074578,
+        "beta_full": 0.0820748408766087
+      },
+      "alltoall_gs4": {
+        "alpha_ms_per_MB": 0.0037120085441517906,
+        "beta_ms": 0.08622218063798955,
+        "r_squared": 0.9991584603671925,
+        "effective_bandwidth_GBs": 269.39593163800333,
+        "latency_ms": 0.08622218063798955,
+        "fit_range_MB": [
+          8.0,
+          1024.0
+        ],
+        "n_points": 15,
+        "alpha_full": 0.0037296831491765016,
+        "beta_full": 0.07531791770267207
+      },
+      "p2p_gs4": {
+        "alpha_ms_per_MB": 0.004633348922883169,
+        "beta_ms": 0.22379916233734773,
+        "r_squared": 0.9880078081728585,
+        "effective_bandwidth_GBs": 215.82661194826127,
+        "latency_ms": 0.22379916233734773,
+        "fit_range_MB": [
+          8.0,
+          1024.0
+        ],
+        "n_points": 15,
+        "alpha_full": 0.004712448519927715,
+        "beta_full": 0.17507199903357162
+      },
+      "alltoall_gs8": {
+        "alpha_ms_per_MB": 0.004152178598752148,
+        "beta_ms": 0.09560634351315063,
+        "r_squared": 0.9991673210405547,
+        "effective_bandwidth_GBs": 240.83742455118127,
+        "latency_ms": 0.09560634351315063,
+        "fit_range_MB": [
+          8.0,
+          1024.0
+        ],
+        "n_points": 15,
+        "alpha_full": 0.0041765375959031915,
+        "beta_full": 0.08059791900098634
+      },
+      "p2p_gs8": {
+        "alpha_ms_per_MB": 0.005210532298363967,
+        "beta_ms": 0.347511021493846,
+        "r_squared": 0.9828679564426422,
+        "effective_bandwidth_GBs": 191.91897156342085,
+        "latency_ms": 0.347511021493846,
+        "fit_range_MB": [
+          8.0,
+          1024.0
+        ],
+        "n_points": 15,
+        "alpha_full": 0.0053512461152861,
+        "beta_full": 0.26084519021543945
+      }
+    }
+  }
+}
