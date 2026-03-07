@@ -48,7 +48,7 @@ import argparse
 import heapq
 import time as time_module
 import multiprocessing as mp
-from typing import List, Dict, Tuple, Optional, Union, Literal
+from typing import Any, List, Dict, Tuple, Optional, Union, Literal
 from dataclasses import dataclass, field
 from collections import Counter
 from copy import deepcopy
@@ -180,20 +180,49 @@ def chunk_globalbatch(seqs_gb: List[Sequence], mb_num: int, chunk_alg: str = "so
 class ParallelStrategy:
     """
     A (attn_type, parallel_size) pair representing a parallel group strategy.
-    attn_type: "ulysses" (All-to-All / SP) or "ring" (Zigzag Ring Attention / CP)
-    parallel_size: 1, 2, 4, 8, ...
+
+    attn_type:
+      - "ulysses" : All-to-All (Ulysses SP), sp_size = parallel_size, cp_size = 1
+      - "ring"    : P2P ring  (Ring Attention CP), sp_size = 1, cp_size = parallel_size
+      - "usp"     : Combined Ulysses + Ring, parallel_size = sp_size × cp_size
+
+    parallel_size: total GPUs occupied by one such group (1, 2, 4, 8, …)
+    sp_size / cp_size: explicit decomposition (auto-derived from attn_type if 0)
     """
-    attn_type: str   # "ulysses" or "ring"
+    attn_type: str   # "ulysses", "ring", or "usp"
     parallel_size: int
+    sp_size: int = 0
+    cp_size: int = 0
+
+    def __post_init__(self):
+        if self.attn_type == "ulysses":
+            self.sp_size = self.parallel_size
+            self.cp_size = 1
+        elif self.attn_type == "ring":
+            self.sp_size = 1
+            self.cp_size = self.parallel_size
+        elif self.attn_type == "usp":
+            # For USP, sp_size and cp_size MUST be provided explicitly
+            assert self.sp_size > 1 and self.cp_size > 1, \
+                f"USP requires sp_size>1 and cp_size>1, got sp={self.sp_size}, cp={self.cp_size}"
+            assert self.sp_size * self.cp_size == self.parallel_size, \
+                f"sp_size*cp_size ({self.sp_size}*{self.cp_size}) != parallel_size ({self.parallel_size})"
+        else:
+            raise ValueError(f"Unknown attn_type: {self.attn_type}")
     
     def __repr__(self):
+        if self.attn_type == "usp":
+            return f"usp(sp{self.sp_size}×cp{self.cp_size})"
         return f"{self.attn_type}×{self.parallel_size}"
 
     def __hash__(self):
-        return hash((self.attn_type, self.parallel_size))
+        return hash((self.attn_type, self.parallel_size, self.sp_size, self.cp_size))
 
     def __eq__(self, other):
-        return self.attn_type == other.attn_type and self.parallel_size == other.parallel_size
+        return (self.attn_type == other.attn_type
+                and self.parallel_size == other.parallel_size
+                and self.sp_size == other.sp_size
+                and self.cp_size == other.cp_size)
 
 
 # ──────────────────────────────────────────────────────────
@@ -225,7 +254,13 @@ class AdaCPSPCostModel:
         param_size_B: float = 7.0,
                  zero_stage: int = 3,
                  mixed_precision: bool = True,
-                 act_per_token: float = 4.71,
+                 act_per_token: float = 3.96,
+        # ── GQA (Grouped-Query Attention) ──
+        # For MHA: n_kv_heads = n_heads (or None, defaults to n_heads = h / head_dim)
+        # For GQA: n_kv_heads < n_heads, reducing KV tensor size in P2P/A2A
+        num_attention_heads: Optional[int] = None,   # n_heads; inferred from h/128 if None
+        num_kv_heads: Optional[int] = None,           # n_kv_heads; defaults to n_heads (MHA)
+        head_dim: int = 128,                          # per-head dimension
         # Piecewise compute coefficients:
         #   list of dicts: [{"range": [lo, hi], "a": ..., "b": ..., "c": ...}, ...]
         piecewise_compute_coeffs: Optional[List[Dict]] = None,
@@ -233,9 +268,45 @@ class AdaCPSPCostModel:
         cpt_alpha1: float = 3.78e-8,
         cpt_alpha2: float = -1.06e-5,
         cpt_beta1: float = 0.25,  # per-layer bias
-        # Communication bandwidths
+        # Communication bandwidths (legacy: simple BW model)
         alltoall_bandwidth_dict_gbs: Optional[Dict[int, float]] = None,
         p2p_bandwidth_dict_gbs: Optional[Dict[int, float]] = None,
+        # Communication linear fit (new: time_ms = alpha * msg_MB + beta)
+        # Dict[group_size, {"alpha": float, "beta": float}]
+        alltoall_linear_fit: Optional[Dict[int, Dict[str, float]]] = None,
+        p2p_linear_fit: Optional[Dict[int, Dict[str, float]]] = None,
+        # Ring per-step fit from actual ring profiling (preferred for P2P ring):
+        #   per_step_time_ms = alpha * kv_per_step_MB + beta
+        # This captures ring contention effects that raw P2P data misses.
+        p2p_ring_step_fit: Optional[Dict[int, Dict[str, float]]] = None,
+        # Ring per-step interpolation table (most accurate for P2P ring):
+        #   Dict[group_size, List[(kv_per_step_MB, time_ms)]] sorted by kv_per_step_MB
+        # Uses linear interpolation between profiled data points.
+        p2p_ring_interp: Optional[Dict[int, List[Tuple[float, float]]]] = None,
+        # A2A per-op interpolation table (most accurate for All-to-All):
+        #   Dict[group_size, List[(msg_MB, time_ms)]] sorted by msg_MB
+        a2a_interp: Optional[Dict[int, List[Tuple[float, float]]]] = None,
+        # ── Overlap-aware modeling parameters ──
+        # Backward/forward compute ratio for Flash Attention (profiled value)
+        bwd_fwd_ratio: float = 2.0,
+        # Backward comm ratio for Ring Attention (dual ring in bwd: KV + dKV)
+        ring_bwd_comm_ratio: float = 2.0,
+        # Enable overlap-aware total_time calculation for Ring Attention / USP
+        # When True: uses max(compute_step, comm_step) per ring step
+        # When False: uses simple additive model (compute + comm)
+        enable_overlap_model: bool = True,
+        # ── Causal correction for Ring Attention ──
+        # When True, non-diagonal ring steps use non-causal compute time
+        # (approximately 2× the quadratic term of causal attention)
+        # This accounts for the fact that only the diagonal step benefits from
+        # causal masking; all other steps compute full (non-causal) attention.
+        ring_causal_correction: bool = True,
+        # ── Overlap leakage ──
+        # Fraction of the minor term (min(compute, comm)) that "leaks" into
+        # the overlapped time: time = max(comp, comm) + leakage * min(comp, comm)
+        # leakage=0 → perfect overlap; leakage=1 → fully additive.
+        # Typical value: 0.1~0.2 (FlexSP uses ~0.15 when compute-bound).
+        overlap_leakage: float = 0.1,
                  ):
         self.N = cluster_size
         self.h = hidden_size
@@ -243,6 +314,17 @@ class AdaCPSPCostModel:
         self.p = param_size_B
         self.zero_stage = zero_stage
         self.act_per_token = act_per_token
+        self.bwd_fwd_ratio = bwd_fwd_ratio
+        self.ring_bwd_comm_ratio = ring_bwd_comm_ratio
+        self.enable_overlap_model = enable_overlap_model
+        self.ring_causal_correction = ring_causal_correction
+        self.overlap_leakage = overlap_leakage
+
+        # GQA: KV hidden dim for communication sizing
+        self.head_dim = head_dim
+        self.n_heads = num_attention_heads or (hidden_size // head_dim)
+        self.n_kv_heads = num_kv_heads if num_kv_heads is not None else self.n_heads
+        self.kv_hidden = self.n_kv_heads * self.head_dim  # KV tensor hidden dim
         
         # Model states memory
         zero_ratio = {
@@ -259,75 +341,578 @@ class AdaCPSPCostModel:
         else:
             self.piecewise = [{"range": [0, 1e9], "a": cpt_alpha1, "b": cpt_alpha2, "c": cpt_beta1}]
 
-        # Communication bandwidth dicts
+        # Communication: prefer linear fit if available, fallback to bandwidth
         self.alltoall_bw = alltoall_bandwidth_dict_gbs or {1: 1e10, 2: 131.7, 4: 164.3, 8: 170.4}
         self.p2p_bw = p2p_bandwidth_dict_gbs or {1: 1e10, 2: 178.1, 4: 147.4, 8: 119.5}
+        self.alltoall_linear = alltoall_linear_fit  # {gs: {"alpha": ms_per_MB, "beta": ms}}
+        self.p2p_linear = p2p_linear_fit
+        self.p2p_ring_step = p2p_ring_step_fit  # {gs: {"alpha": ms_per_MB_kv, "beta": ms}}
+        self.p2p_ring_interp = p2p_ring_interp  # {gs: [(kv_MB, time_ms), ...] sorted}
+        self.a2a_interp = a2a_interp  # {gs: [(msg_MB, time_ms), ...] sorted}
+        
+        # Compute calibration: seq_len → correction_factor
+        # Populated by calibrate_from_validation to correct for profiling vs real discrepancies.
+        # [(seq_len, correction_factor), ...] sorted by seq_len.
+        self.compute_correction: Optional[List[Tuple[int, float]]] = None
+
+    # ---- Interpolation helpers ----
+
+    @staticmethod
+    def _interp_lookup(msg_mb: float,
+                       pts: List[Tuple[float, float]]) -> float:
+        """Linear interpolation/extrapolation on a sorted (x, y) table.
+        
+        - Within range: linear interpolation between adjacent points.
+        - Below range: extrapolate from first two points.
+        - Above range: extrapolate from last two points.
+        """
+        if len(pts) < 2:
+            return pts[0][1] if pts else 0.0
+
+        if msg_mb <= pts[0][0]:
+            slope = (pts[1][1] - pts[0][1]) / (pts[1][0] - pts[0][0])
+            return max(0.0, pts[0][1] + slope * (msg_mb - pts[0][0]))
+
+        if msg_mb >= pts[-1][0]:
+            slope = (pts[-1][1] - pts[-2][1]) / (pts[-1][0] - pts[-2][0])
+            return pts[-1][1] + slope * (msg_mb - pts[-1][0])
+
+        for i in range(len(pts) - 1):
+            if pts[i][0] <= msg_mb <= pts[i + 1][0]:
+                t = (msg_mb - pts[i][0]) / (pts[i + 1][0] - pts[i][0])
+                return pts[i][1] + t * (pts[i + 1][1] - pts[i][1])
+
+        return pts[-1][1]
+
+    def _interp_ring_per_step(self, kv_per_step_mb: float, cp_size: int) -> Optional[float]:
+        """Interpolate ring per-step time from profiled data."""
+        if not self.p2p_ring_interp or cp_size not in self.p2p_ring_interp:
+            return None
+        return self._interp_lookup(kv_per_step_mb, self.p2p_ring_interp[cp_size])
+
+    def _interp_a2a(self, msg_mb: float, sp_size: int) -> Optional[float]:
+        """Interpolate A2A per-op time from profiled data."""
+        if not self.a2a_interp or sp_size not in self.a2a_interp:
+            return None
+        return self._interp_lookup(msg_mb, self.a2a_interp[sp_size])
 
     # ---- Compute ----
 
-    def _get_coeffs(self, seqlen: int) -> Tuple[float, float, float]:
-        """Get (a, b, c) for a given seqlen from piecewise segments."""
+    def _get_coeffs(self, seqlen: float) -> Tuple[float, float, float]:
+        """Get (a, b, c) for a given seqlen from piecewise segments.
+        
+        For seqlen below all ranges: use first segment (extrapolate down).
+        For seqlen above all ranges: use last segment (extrapolate up).
+        """
+        if not self.piecewise:
+            return self.alpha1, self.alpha2, self.beta1
+
+        # Check each segment
         for seg in self.piecewise:
             lo, hi = seg["range"]
             if lo <= seqlen <= hi:
                 return seg["a"], seg["b"], seg["c"]
-        # Fallback: use last segment
+
+        # Below all segments: use first segment (safe extrapolation down)
+        first_lo = self.piecewise[0]["range"][0]
+        if seqlen < first_lo:
+            seg = self.piecewise[0]
+            return seg["a"], seg["b"], seg["c"]
+
+        # Above all segments: use last segment (extrapolate up)
         seg = self.piecewise[-1]
         return seg["a"], seg["b"], seg["c"]
 
+    def _eval_piecewise(self, x: float) -> float:
+        """Evaluate piecewise quadratic at x, with optional calibration correction.
+        
+        The correction factor is clamped to [0.95, 1.50] to prevent runaway
+        extrapolation for seq_lens far outside the validation range.
+        Result is always clamped to >= 0 (compute time cannot be negative).
+        """
+        a, b, c = self._get_coeffs(x)
+        raw = a * x ** 2 + b * x + c
+        raw = max(raw, 0.0)  # compute time cannot be negative
+        if self.compute_correction:
+            corr = self._interp_lookup(x, self.compute_correction)
+            corr = max(0.95, min(1.50, corr))
+            raw *= corr
+        return raw
+
     def compute_time_single(self, seqlen: int, strategy: ParallelStrategy) -> float:
-        """Compute time (ms) for a single sequence under a strategy (single layer)."""
-        local_seq = seqlen / strategy.parallel_size
-        a, b, c = self._get_coeffs(local_seq)
-        return a * local_seq ** 2 + b * local_seq + c
+        """Compute time (ms) for a single sequence under a strategy (single layer).
+        
+        Strategy-aware:
+          - Ulysses: Each rank processes full seq_len but with h/sp heads.
+            Flash attention time scales linearly with #heads, so:
+            time = f(seqlen) / sp_size
+          
+          - Ring: Per-step compute on local chunk (seqlen/cp tokens, all heads).
+            Returns time for ONE ring step (total per layer = cp × this).
+            time = f(seqlen / cp_size)
+          
+          - USP: Per-step compute on seqlen/cp tokens with h/sp heads.
+            time = f(seqlen / cp_size) / sp_size
+        
+        Where f(x) = a*x² + b*x + c is the profiled piecewise quadratic,
+        optionally corrected by calibration factors from validation data.
+        """
+        if strategy.attn_type == "ulysses":
+            return self._eval_piecewise(seqlen) / strategy.sp_size
+        elif strategy.attn_type == "ring":
+            local_seq = seqlen / strategy.cp_size
+            return self._eval_piecewise(local_seq)
+        elif strategy.attn_type == "usp":
+            local_seq = seqlen / strategy.cp_size
+            return self._eval_piecewise(local_seq) / strategy.sp_size
+        else:
+            local_seq = seqlen / strategy.parallel_size
+            return self._eval_piecewise(local_seq)
 
     def compute_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
-        """Total compute time (ms) for a list of sequences (single layer * num_layers)."""
+        """Forward compute time (ms) for a list of sequences (per-step × num_layers).
+        
+        Returns the time for ONE flash_attn call (per-step for Ring/USP,
+        or the full per-layer call for Ulysses), summed across all sequences
+        in the group, then multiplied by num_layers.
+        
+        For Ring/USP: total forward compute = cp_size × compute_time
+        For Ulysses:  total forward compute = compute_time
+        """
         total = sum(self.compute_time_single(s, strategy) for s in seqlens)
         return total * self.l
 
+    def _noncausal_step_compute(self, seqlen: int, strategy: ParallelStrategy) -> float:
+        """Compute time for a NON-DIAGONAL ring step (non-causal attention).
+        
+        For causal attention profiling: f_causal(x) = a*x² + b*x + c
+        For non-causal (full) attention:  f_full(x) ≈ 2*a*x² + b*x + c
+        
+        The quadratic term (a*x²) represents the FLOPs which double without 
+        causal masking. The linear and constant terms (kernel overhead) stay.
+        
+        Returns f_causal(x) + a*x² = (2a)*x² + b*x + c, divided by sp_size
+        for Ulysses/USP strategies.
+        
+        The extra quadratic term also gets calibration correction applied.
+        """
+        if strategy.attn_type == "ring":
+            local_seq = seqlen / strategy.cp_size
+            a, b, c = self._get_coeffs(local_seq)
+            extra_quad = a * local_seq ** 2
+            corr = 1.0
+            if self.compute_correction:
+                corr = self._interp_lookup(local_seq, self.compute_correction)
+            return (a * local_seq ** 2 + b * local_seq + c + extra_quad) * corr
+        elif strategy.attn_type == "usp":
+            local_seq = seqlen / strategy.cp_size
+            a, b, c = self._get_coeffs(local_seq)
+            extra_quad = a * local_seq ** 2
+            corr = 1.0
+            if self.compute_correction:
+                corr = self._interp_lookup(local_seq, self.compute_correction)
+            return ((a * local_seq ** 2 + b * local_seq + c + extra_quad) * corr) / strategy.sp_size
+        else:
+            # Ulysses: no ring steps, correction doesn't apply
+            return self.compute_time_single(seqlen, strategy)
+
+    def _ring_step_compute_per_layer(self, seqlens: List[int], 
+                                      strategy: ParallelStrategy,
+                                      is_diagonal: bool) -> float:
+        """Compute time per layer for one ring step (all sequences in group).
+        
+        Args:
+            is_diagonal: If True, uses causal compute (profiled f_causal).
+                        If False, uses non-causal estimate (f_causal + a*x²).
+        """
+        if is_diagonal or not self.ring_causal_correction:
+            return sum(self.compute_time_single(s, strategy) for s in seqlens)
+        else:
+            return sum(self._noncausal_step_compute(s, strategy) for s in seqlens)
+
     # ---- Communication ----
 
+    def _a2a_per_op_time(self, msg_mb: float, sp_size: int) -> float:
+        """Get per-op A2A time (ms) with cascading fallback.
+        
+        Priority: interpolation → linear fit → BW model.
+        """
+        # Priority 1: Interpolation from actual A2A profiling
+        interp_val = self._interp_a2a(msg_mb, sp_size)
+        if interp_val is not None:
+            return interp_val
+
+        # Priority 2: Linear fit
+        if self.alltoall_linear and sp_size in self.alltoall_linear:
+            fit = self.alltoall_linear[sp_size]
+            return fit["alpha"] * msg_mb + fit["beta"]
+
+        # Priority 3: Bandwidth model
+        bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(max(self.alltoall_bw.keys()), 100))
+        return msg_mb / bw
+
     def alltoall_time(self, seqlens: List[int], sp_size: int) -> float:
-        """All-to-All communication time (ms) for Ulysses SP."""
+        """All-to-All communication time (ms) for Ulysses SP.
+        
+        Each Ulysses attention layer does 4 all-to-all ops in forward (Q,K,V scatter + O gather)
+        and 4 in backward = 8 per layer.
+        
+        GQA-aware: Q and O use full hidden (n_heads * head_dim), but K and V use
+        kv_hidden (n_kv_heads * head_dim). For MHA these are the same.
+        
+        Per-op message size:
+          Q/O: total_tokens * hidden / sp_size * 2 bytes
+          K/V: total_tokens * kv_hidden / sp_size * 2 bytes
+        """
         if sp_size <= 1:
             return 0.0
         total_tokens = sum(seqlens)
-        # Size of all-to-all tensor: 4 directions * 2 (fwd+bwd) * layers * hidden * total_tokens * bytes / sp_size
-        tensor_size_mb = 4 * 2 * self.l * self.h * total_tokens * 2 / 1024 / 1024 / sp_size
-        bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(max(self.alltoall_bw.keys()), 100))
-        return tensor_size_mb / bw
+        # GQA-aware: Q/O use full hidden, K/V use kv_hidden
+        qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / sp_size
+        kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / sp_size
+        # Fwd: scatter(Q), scatter(K), scatter(V), gather(O) = 2 qo + 2 kv
+        # Bwd: scatter(dO), gather(dQ), gather(dK), gather(dV) = 2 qo + 2 kv
+        num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
+        num_kv_ops = 2 * 2 * self.l  # K+V × fwd+bwd × layers
+
+        qo_time = self._a2a_per_op_time(qo_msg_mb, sp_size)
+        kv_time = self._a2a_per_op_time(kv_msg_mb, sp_size)
+        return qo_time * num_qo_ops + kv_time * num_kv_ops
 
     def p2p_ring_time(self, seqlens: List[int], cp_size: int) -> float:
-        """P2P ring communication time (ms) for Ring Attention."""
+        """P2P ring communication time (ms) for Ring Attention.
+        
+        Ring attention does (cp_size - 1) ring steps per layer.
+        Each step sends K and V tensors via batch_isend_irecv (2 sends + 2 recvs).
+        
+        Four estimation methods (in priority order):
+        1. Interpolation table: exact lookup/linear interpolation from ring profiling data.
+        2. Ring-step linear fit: alpha * kv_per_step_MB + beta (from ring profiling).
+        3. Raw P2P linear fit: 2 × (alpha * single_kv_MB + beta) (isolated P2P data).
+        4. Bandwidth model: kv_per_step_MB / bw.
+        
+        GQA-aware: uses kv_hidden = n_kv_heads * head_dim instead of full hidden_size.
+        
+        Total = per_step_time × (cp_size - 1) steps × L (layers).
+        """
         if cp_size <= 1:
             return 0.0
         total_tokens = sum(seqlens)
-        # Ring attention: (cp_size - 1) steps, each sending KV = 2 * (total_tokens/cp_size) * hidden * 2 bytes
-        kv_per_step_mb = 2 * (total_tokens / cp_size) * self.h * 2 / 1024 / 1024
+        single_kv_mb = (total_tokens / cp_size) * self.kv_hidden * 2 / 1024 / 1024
+        kv_per_step_mb = 2 * single_kv_mb  # K + V combined
+
+        per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size)
+        return per_step_time * (cp_size - 1) * self.l
+
+    def _ring_per_step_time(self, kv_per_step_mb: float, cp_size: int) -> float:
+        """Get per-step ring comm time (ms) with cascading fallback.
+        
+        Priority: interpolation → ring-step fit → raw P2P fit → BW model.
+        """
+        # Priority 1: Interpolation from actual ring profiling
+        interp_val = self._interp_ring_per_step(kv_per_step_mb, cp_size)
+        if interp_val is not None:
+            return interp_val
+
+        # Priority 2: Ring per-step linear fit
+        if self.p2p_ring_step and cp_size in self.p2p_ring_step:
+            fit = self.p2p_ring_step[cp_size]
+            return fit["alpha"] * kv_per_step_mb + fit["beta"]
+
+        # Priority 3: Raw P2P linear fit
+        if self.p2p_linear and cp_size in self.p2p_linear:
+            fit = self.p2p_linear[cp_size]
+            single_kv_mb = kv_per_step_mb / 2
+            per_kv_time = fit["alpha"] * single_kv_mb + fit["beta"]
+            return 2 * per_kv_time
+        
+        # Priority 4: Bandwidth model
         bw = self.p2p_bw.get(cp_size, self.p2p_bw.get(max(self.p2p_bw.keys()), 100))
-        # Total steps = (cp_size - 1), per-layer * num_layers
-        total_time = kv_per_step_mb * (cp_size - 1) * self.l / bw
-        return total_time
+        return kv_per_step_mb / bw
+
+    def usp_comm_time(self, seqlens: List[int], sp_size: int, cp_size: int) -> float:
+        """Communication time (ms) for USP (Ulysses + Ring combined).
+
+        In USP with sp_size=S, cp_size=C, total parallel = S*C:
+          - Each rank starts with total_tokens/(S*C) tokens
+          - All-to-All across sp_group (size S):
+            Q/O: per_op = total_tokens * H * 2 / (S*C) / 1024² (MB)
+            K/V: per_op = total_tokens * kv_hidden * 2 / (S*C) / 1024² (MB)
+          - Ring Attention across cp_group (size C): exchanges K, V
+            After Ulysses split: each KV tensor has kv_hidden/S dims
+            → single_kv_msg = (total_tokens/C) * (kv_hidden/S) * 2 / 1024² (MB)
+        """
+        if sp_size <= 1:
+            return self.p2p_ring_time(seqlens, cp_size)
+        if cp_size <= 1:
+            return self.alltoall_time(seqlens, sp_size)
+
+        total_tokens = sum(seqlens)
+        parallel_size = sp_size * cp_size
+
+        # --- AlltoAll component (GQA-aware) ---
+        qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / parallel_size
+        kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / parallel_size
+        num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
+        num_kv_ops = 2 * 2 * self.l  # K+V × fwd+bwd × layers
+
+        if self.alltoall_linear and sp_size in self.alltoall_linear:
+            fit = self.alltoall_linear[sp_size]
+            a2a_time = ((fit["alpha"] * qo_msg_mb + fit["beta"]) * num_qo_ops +
+                        (fit["alpha"] * kv_msg_mb + fit["beta"]) * num_kv_ops)
+        else:
+            bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(max(self.alltoall_bw.keys()), 100))
+            a2a_time = qo_msg_mb / bw * num_qo_ops + kv_msg_mb / bw * num_kv_ops
+
+        # --- P2P Ring component (GQA-aware) ---
+        # After All-to-All, KV tensors have kv_hidden/sp_size dims
+        single_kv_mb = (total_tokens / cp_size) * (self.kv_hidden / sp_size) * 2 / 1024 / 1024
+
+        if self.p2p_linear and cp_size in self.p2p_linear:
+            fit = self.p2p_linear[cp_size]
+            per_kv_time = fit["alpha"] * single_kv_mb + fit["beta"]
+            per_step_time = 2 * per_kv_time  # K + V
+            p2p_time = per_step_time * (cp_size - 1) * self.l
+        else:
+            bw = self.p2p_bw.get(cp_size, self.p2p_bw.get(max(self.p2p_bw.keys()), 100))
+            p2p_time = 2 * single_kv_mb / bw * (cp_size - 1) * self.l
+
+        return a2a_time + p2p_time
 
     def comm_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
         """Communication time for a strategy."""
         if strategy.attn_type == "ulysses":
-            return self.alltoall_time(seqlens, strategy.parallel_size)
+            return self.alltoall_time(seqlens, strategy.sp_size)
         elif strategy.attn_type == "ring":
-            return self.p2p_ring_time(seqlens, strategy.parallel_size)
+            return self.p2p_ring_time(seqlens, strategy.cp_size)
+        elif strategy.attn_type == "usp":
+            return self.usp_comm_time(seqlens, strategy.sp_size, strategy.cp_size)
         else:
             raise ValueError(f"Unknown attn_type: {strategy.attn_type}")
+
+    # ---- Ring P2P comm helpers (per-step, single direction) ----
+
+    def _p2p_fwd_comm_per_step(self, total_tokens: int, cp_size: int,
+                                kv_hidden: Optional[int] = None) -> float:
+        """Forward ring: one step KV transfer time (ms).
+        
+        Each step sends K + V, each of shape [tokens/cp_size, kv_hidden, ...].
+        kv_hidden defaults to self.kv_hidden (GQA-aware), for USP it's kv_hidden/sp_size.
+        
+        Uses the same cascading priority as _ring_per_step_time.
+        """
+        if kv_hidden is None:
+            kv_hidden = self.kv_hidden
+        single_kv_mb = (total_tokens / cp_size) * kv_hidden * 2 / 1024 / 1024
+        kv_per_step_mb = 2 * single_kv_mb  # K + V combined
+        return self._ring_per_step_time(kv_per_step_mb, cp_size)
+
+    def _p2p_bwd_comm_per_step(self, total_tokens: int, cp_size: int,
+                                kv_hidden: Optional[int] = None) -> float:
+        """Backward ring: one step dual-ring transfer time (ms).
+        
+        Backward runs two concurrent rings:
+          1. Forward ring for KV (same as forward)
+          2. Reverse ring for dKV (same tensor size, opposite direction)
+        
+        The dual ring roughly doubles the comm time since both directions
+        compete for bandwidth (profiled as ring_bwd_comm_ratio).
+        """
+        fwd_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden)
+        return fwd_step * self.ring_bwd_comm_ratio
+
+    # ---- Overlap-aware total time ----
+
+    def _leaky_max(self, a: float, b: float) -> float:
+        """Imperfect overlap: max(a,b) + leakage * min(a,b).
+        
+        leakage=0 → perfect overlap (pure max).
+        leakage=1 → fully additive (a + b).
+        """
+        return max(a, b) + self.overlap_leakage * min(a, b)
+
+    def _total_time_ring_overlap(self, seqlens: List[int],
+                                  strategy: ParallelStrategy) -> float:
+        """Overlap-aware total time for Ring Attention (fwd + bwd).
+        
+        Ring Attention overlaps P2P communication with flash attention compute:
+        
+        Forward (per layer):
+          - 1 diagonal step (causal attention, no comm overlap on last step)
+          - (cp_size - 1) non-diagonal steps (non-causal, overlapped with comm)
+          fwd_per_layer = (cp-1) * max(noncausal_step, fwd_comm) + causal_step
+        
+        Backward (per layer):
+          - Same structure but with bwd_fwd_ratio and bwd_comm_ratio
+        
+        With ring_causal_correction=True:
+          - diagonal step: f_causal(x) (profiled)
+          - non-diagonal steps: f_causal(x) + a*x² (non-causal, ~2× quadratic term)
+        
+        Without correction: all steps use f_causal(x).
+        
+        Total = (fwd_per_layer + bwd_per_layer) × L
+        """
+        cp_size = strategy.cp_size
+        if cp_size <= 1:
+            # No communication, just fwd+bwd compute
+            fwd_compute = self.compute_time(seqlens, strategy)
+            return fwd_compute * (1 + self.bwd_fwd_ratio)
+
+        total_tokens = sum(seqlens)
+
+        # Per-step forward compute (per layer)
+        # Diagonal step: causal (profiled) compute
+        diag_compute_per_layer = self._ring_step_compute_per_layer(
+            seqlens, strategy, is_diagonal=True)
+        # Non-diagonal step: non-causal compute (when correction enabled)
+        nondiag_compute_per_layer = self._ring_step_compute_per_layer(
+            seqlens, strategy, is_diagonal=False)
+
+        # Per-step comm
+        fwd_comm_per_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size)
+        bwd_comm_per_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size)
+
+        # Forward per layer:
+        # (cp-1) non-diagonal overlapped steps + 1 diagonal final step (no comm)
+        fwd_per_layer = ((cp_size - 1) * self._leaky_max(nondiag_compute_per_layer, fwd_comm_per_step)
+                         + diag_compute_per_layer)
+
+        # Backward per layer: same structure but with bwd ratios
+        bwd_diag = diag_compute_per_layer * self.bwd_fwd_ratio
+        bwd_nondiag = nondiag_compute_per_layer * self.bwd_fwd_ratio
+        bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_nondiag, bwd_comm_per_step)
+                         + bwd_diag)
+
+        return (fwd_per_layer + bwd_per_layer) * self.l
+
+    def _total_time_usp_overlap(self, seqlens: List[int],
+                                 strategy: ParallelStrategy) -> float:
+        """Overlap-aware total time for USP (Ulysses + Ring).
+        
+        USP has two phases per layer:
+          1. All-to-All (Ulysses): blocking, cannot overlap with compute
+          2. Ring Attention (CP): compute-comm overlap (same as pure Ring)
+        
+        Forward per layer:
+          a2a_fwd = 4 × per_op_a2a_time  (Q,K,V scatter + O gather)
+          ring_fwd = (cp-1) × max(compute_step, fwd_comm) + compute_step
+          total_fwd = a2a_fwd + ring_fwd
+        
+        Backward per layer:
+          a2a_bwd = 4 × per_op_a2a_time  (dO scatter + dQ,dK,dV gather)
+          ring_bwd = (cp-1) × max(bwd_compute, bwd_comm) + bwd_compute
+          total_bwd = a2a_bwd + ring_bwd
+        
+        Total = (total_fwd + total_bwd) × L
+        """
+        sp_size = strategy.sp_size
+        cp_size = strategy.cp_size
+
+        if cp_size <= 1:
+            # Pure Ulysses: additive (a2a is blocking)
+            fwd_compute = self.compute_time(seqlens, strategy)
+            a2a_comm = self.alltoall_time(seqlens, sp_size)
+            return fwd_compute * (1 + self.bwd_fwd_ratio) + a2a_comm
+
+        if sp_size <= 1:
+            return self._total_time_ring_overlap(seqlens, strategy)
+
+        total_tokens = sum(seqlens)
+        parallel_size = sp_size * cp_size
+
+        # ── All-to-All component (blocking, fwd + bwd, GQA-aware) ──
+        qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / parallel_size
+        kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / parallel_size
+        if self.alltoall_linear and sp_size in self.alltoall_linear:
+            fit = self.alltoall_linear[sp_size]
+            qo_a2a_time = fit["alpha"] * qo_msg_mb + fit["beta"]
+            kv_a2a_time = fit["alpha"] * kv_msg_mb + fit["beta"]
+        else:
+            bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(
+                max(self.alltoall_bw.keys()), 100))
+            qo_a2a_time = qo_msg_mb / bw
+            kv_a2a_time = kv_msg_mb / bw
+        # Per layer: 2 Q/O + 2 K/V ops per direction (fwd or bwd)
+        a2a_fwd_per_layer = 2 * qo_a2a_time + 2 * kv_a2a_time
+        a2a_bwd_per_layer = 2 * qo_a2a_time + 2 * kv_a2a_time
+
+        # ── Ring component (overlapped, with causal correction) ──
+        diag_compute = self._ring_step_compute_per_layer(
+            seqlens, strategy, is_diagonal=True)
+        nondiag_compute = self._ring_step_compute_per_layer(
+            seqlens, strategy, is_diagonal=False)
+
+        kv_hidden = self.kv_hidden // sp_size  # After Ulysses head split (GQA-aware)
+        fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden)
+        bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, kv_hidden)
+
+        ring_fwd_per_layer = ((cp_size - 1) * self._leaky_max(nondiag_compute, fwd_comm_step)
+                              + diag_compute)
+        ring_bwd_per_layer = ((cp_size - 1) * self._leaky_max(nondiag_compute * self.bwd_fwd_ratio,
+                                                                bwd_comm_step)
+                              + diag_compute * self.bwd_fwd_ratio)
+
+        # Total per layer = a2a + ring (fwd and bwd separately)
+        fwd_per_layer = a2a_fwd_per_layer + ring_fwd_per_layer
+        bwd_per_layer = a2a_bwd_per_layer + ring_bwd_per_layer
+
+        return (fwd_per_layer + bwd_per_layer) * self.l
 
     # ---- Total time ----
 
     def total_time_single(self, seqlen: int, strategy: ParallelStrategy) -> float:
-        """Total time for a single sequence (compute + comm, single forward pass)."""
-        return self.compute_time_single(seqlen, strategy) * self.l + self.comm_time([seqlen], strategy)
+        """Total time for a single sequence (fwd + bwd, all layers)."""
+        return self.total_time([seqlen], strategy)
 
     def total_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
-        """Total time for a set of sequences in one group."""
-        return self.compute_time(seqlens, strategy) + self.comm_time(seqlens, strategy)
+        """Total time for a set of sequences in one group (fwd + bwd, all layers).
+        
+        Dispatches to overlap-aware or additive model based on strategy type:
+          - Ring Attention: overlap-aware (compute-comm overlap per ring step)
+          - USP (Ulysses+Ring): overlap-aware (a2a blocking + ring overlap)
+          - Ulysses: additive (a2a is blocking, no overlap opportunity)
+        
+        When enable_overlap_model=False, uses additive model for all strategies.
+        Note: Ring additive model still correctly accounts for cp ring steps.
+        """
+        if self.enable_overlap_model and strategy.attn_type == "ring":
+            return self._total_time_ring_overlap(seqlens, strategy)
+        elif self.enable_overlap_model and strategy.attn_type == "usp":
+            return self._total_time_usp_overlap(seqlens, strategy)
+        elif strategy.attn_type == "ring":
+            # Ring additive model (no overlap):
+            # 1 diagonal (causal) + (cp-1) non-diagonal (non-causal) steps
+            # Total comm = fwd_ring + bwd_ring
+            cp = strategy.cp_size
+            diag = self._ring_step_compute_per_layer(seqlens, strategy, True)
+            nondiag = self._ring_step_compute_per_layer(seqlens, strategy, False)
+            fwd_compute_per_layer = diag + (cp - 1) * nondiag
+            total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
+            fwd_ring_comm = self.p2p_ring_time(seqlens, cp)
+            total_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
+            return total_compute + total_comm
+        elif strategy.attn_type == "usp":
+            # USP additive model:
+            # AlltoAll (blocking) + Ring (no overlap, cp steps with causal correction)
+            sp, cp = strategy.sp_size, strategy.cp_size
+            diag = self._ring_step_compute_per_layer(seqlens, strategy, True)
+            nondiag = self._ring_step_compute_per_layer(seqlens, strategy, False)
+            fwd_compute_per_layer = diag + (cp - 1) * nondiag
+            total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
+            a2a_comm = self.alltoall_time(seqlens, sp)
+            total_tokens = sum(seqlens)
+            kv_h = self.kv_hidden // sp
+            fwd_comm = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h)
+            fwd_ring_comm = fwd_comm * (cp - 1) * self.l
+            total_ring_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
+            return total_compute + a2a_comm + total_ring_comm
+        else:
+            # Ulysses or legacy additive model
+            # compute_time is fwd-only (1 call per layer); multiply by (1+bwd_fwd_ratio)
+            fwd_compute = self.compute_time(seqlens, strategy)
+            total_compute = fwd_compute * (1 + self.bwd_fwd_ratio)
+            return total_compute + self.comm_time(seqlens, strategy)
 
     # ---- Memory ----
 
@@ -349,12 +934,52 @@ class AdaCPSPCostModel:
     # ---- Check / debug ----
 
     def check(self, seqlens: List[int], strategy: ParallelStrategy):
-        print(f"\n[seqlens={seqlens}, strategy={strategy}]")
-        print(f"  Compute:  {self.compute_time(seqlens, strategy):.4f} ms")
-        print(f"  Comm:     {self.comm_time(seqlens, strategy):.4f} ms")
-        print(f"  Total:    {self.total_time(seqlens, strategy):.4f} ms")
-        print(f"  Mem (MB): {self.total_memory(seqlens, strategy.parallel_size):.1f}")
+        fwd_compute = self.compute_time(seqlens, strategy)
+        comm = self.comm_time(seqlens, strategy)
+        total = self.total_time(seqlens, strategy)
+        mem = self.total_memory(seqlens, strategy.parallel_size)
 
+        print(f"\n[seqlens={seqlens}, strategy={strategy}]")
+        cp = strategy.cp_size
+        # For Ring/USP, show per-step breakdown with causal correction
+        if strategy.attn_type in ("ring", "usp") and cp > 1:
+            diag = self._ring_step_compute_per_layer(seqlens, strategy, True)
+            nondiag = self._ring_step_compute_per_layer(seqlens, strategy, False)
+            fwd_per_layer = diag + (cp - 1) * nondiag
+            fwd_total = fwd_per_layer * self.l
+            print(f"  Fwd compute:   {fwd_total:.4f} ms "
+                  f"(1×diag={diag:.4f} + {cp-1}×nondiag={nondiag:.4f}, ×L={self.l})")
+            if self.ring_causal_correction and abs(nondiag - diag) > 0.001:
+                print(f"    Causal correction: nondiag/diag = {nondiag/diag:.3f}×")
+            print(f"  Bwd compute:   {fwd_total * self.bwd_fwd_ratio:.4f} ms "
+                  f"(ratio={self.bwd_fwd_ratio:.2f})")
+        else:
+            fwd_total = fwd_compute
+            print(f"  Fwd compute:   {fwd_compute:.4f} ms (×L={self.l})")
+            print(f"  Bwd compute:   {fwd_compute * self.bwd_fwd_ratio:.4f} ms "
+                  f"(ratio={self.bwd_fwd_ratio:.2f})")
+        print(f"  Comm (fwd raw):{comm:.4f} ms")
+        mode = 'overlap' if self.enable_overlap_model else 'additive'
+        has_causal = (self.ring_causal_correction 
+                      and strategy.attn_type in ("ring", "usp") and cp > 1)
+        causal_tag = ", causal-corrected" if has_causal else ""
+        print(f"  Total:         {total:.4f} ms ({mode}{causal_tag})")
+        if self.enable_overlap_model and strategy.attn_type in ("ring", "usp"):
+            # Show per-step breakdown for ring
+            if cp > 1:
+                total_tokens = sum(seqlens)
+                kv_h = self.h if strategy.attn_type == "ring" else self.h // strategy.sp_size
+                fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h)
+                bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp, kv_h)
+                print(f"  Per-step (fwd): diag={diag:.4f}ms, nondiag={nondiag:.4f}ms, "
+                      f"comm={fwd_comm_step:.4f}ms → "
+                      f"{'compute-bound' if nondiag > fwd_comm_step else 'comm-bound'}")
+                print(f"  Per-step (bwd): diag={diag * self.bwd_fwd_ratio:.4f}ms, "
+                      f"nondiag={nondiag * self.bwd_fwd_ratio:.4f}ms, "
+                      f"comm={bwd_comm_step:.4f}ms → "
+                      f"{'compute-bound' if nondiag * self.bwd_fwd_ratio > bwd_comm_step else 'comm-bound'}")
+        print(f"  Mem (MB):      {mem:.1f}")
+    
     @classmethod
     def from_profile_files(
         cls,
@@ -364,22 +989,28 @@ class AdaCPSPCostModel:
         cluster_size: int = 8,
         param_size_B: float = 7.0,
         zero_stage: int = 3,
-        act_per_token: float = 4.71,
+        act_per_token: float = 3.96,
+        overlap_json: Optional[str] = None,
     ) -> "AdaCPSPCostModel":
         """Construct a cost model from profiling output files."""
         # Attention coefficients
         with open(attention_json, "r") as f:
             attn_data = json.load(f)
         piecewise = []
-        for seg_name, coeff in attn_data["coefficients"].items():
-            if coeff is not None:
-                piecewise.append({
-                    "range": coeff["seq_range"],
-                    "a": coeff["a"],
-                    "b": coeff["b"],
-                    "c": coeff["c"],
-                })
-        config = attn_data["config"]
+        # Support both old format (coefficients dict) and new format (segments list)
+        if "coefficients" in attn_data:
+            for seg_name, coeff in attn_data["coefficients"].items():
+                if coeff is not None:
+                    piecewise.append({
+                        "range": coeff["seq_range"],
+                        "a": coeff["a"],
+                        "b": coeff["b"],
+                        "c": coeff["c"],
+                    })
+        elif "attention" in attn_data and "segments" in attn_data["attention"]:
+            # New unified format from profile_and_validate.py
+            piecewise = attn_data["attention"]["segments"]
+        config = attn_data.get("config", attn_data.get("attention", {}).get("config", {}))
 
         # All-to-All bandwidth
         with open(alltoall_json, "r") as f:
@@ -391,17 +1022,486 @@ class AdaCPSPCostModel:
             p2p_data = json.load(f)
         p2p_bw = {int(k): v for k, v in p2p_data["bandwidth_dict_GBs"].items()}
 
+        # Overlap profiling (optional)
+        bwd_fwd_ratio = 2.0
+        ring_bwd_comm_ratio = 2.0
+        if overlap_json is not None:
+            with open(overlap_json, "r") as f:
+                ovlp_data = json.load(f)
+            if "fwd_bwd" in ovlp_data:
+                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 2.0)
+            if "ring_bwd_comm" in ovlp_data and "summary" in ovlp_data["ring_bwd_comm"]:
+                ratios = [s["avg_bwd_fwd_comm_ratio"]
+                          for s in ovlp_data["ring_bwd_comm"]["summary"].values()]
+                if ratios:
+                    ring_bwd_comm_ratio = sum(ratios) / len(ratios)
+
         return cls(
             cluster_size=cluster_size,
-            hidden_size=config["hidden_size"],
+            hidden_size=config.get("hidden_size", 4096),
             layer_num=attn_data.get("num_layers", 32),
             param_size_B=param_size_B,
             zero_stage=zero_stage,
             act_per_token=act_per_token,
+            num_attention_heads=config.get("n_heads", None),
+            num_kv_heads=config.get("n_kv_heads", None),
+            head_dim=config.get("head_dim", 128),
             piecewise_compute_coeffs=piecewise,
             alltoall_bandwidth_dict_gbs=alltoall_bw,
             p2p_bandwidth_dict_gbs=p2p_bw,
+            bwd_fwd_ratio=bwd_fwd_ratio,
+            ring_bwd_comm_ratio=ring_bwd_comm_ratio,
         )
+
+    @classmethod
+    def from_unified_profile(
+        cls,
+        profile_json: str,
+        cluster_size: int = 8,
+        param_size_B: float = 7.0,
+        zero_stage: int = 3,
+        act_per_token: float = 3.96,
+        hidden_size: int = 4096,
+        layer_num: int = 32,
+        overlap_json: Optional[str] = None,
+    ) -> "AdaCPSPCostModel":
+        """Construct from unified profile_and_validate.py output (single JSON).
+        
+        Optionally load overlap profiling data from profile_overlap.py output.
+        """
+        with open(profile_json, "r") as f:
+            data = json.load(f)
+
+        piecewise = None
+        if "attention" in data and "segments" in data["attention"]:
+            piecewise = data["attention"]["segments"]
+            cfg = data["attention"].get("config", {})
+            hidden_size = cfg.get("hidden_size", hidden_size)
+
+        alltoall_linear = {}
+        p2p_linear = {}
+        if "communication" in data and "linear_fits" in data["communication"]:
+            for key, fit in data["communication"]["linear_fits"].items():
+                gs = int(key.split("gs")[1])
+                entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
+                if key.startswith("alltoall"):
+                    alltoall_linear[gs] = entry
+                elif key.startswith("p2p"):
+                    p2p_linear[gs] = entry
+
+        # Load overlap profiling data
+        bwd_fwd_ratio = 2.0
+        ring_bwd_comm_ratio = 2.0
+        if overlap_json is not None:
+            with open(overlap_json, "r") as f:
+                ovlp_data = json.load(f)
+            if "fwd_bwd" in ovlp_data:
+                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 2.0)
+            if "ring_bwd_comm" in ovlp_data and "summary" in ovlp_data["ring_bwd_comm"]:
+                ratios = [s["avg_bwd_fwd_comm_ratio"]
+                          for s in ovlp_data["ring_bwd_comm"]["summary"].values()]
+                if ratios:
+                    ring_bwd_comm_ratio = sum(ratios) / len(ratios)
+
+        return cls(
+            cluster_size=cluster_size,
+            hidden_size=hidden_size,
+            layer_num=layer_num,
+            param_size_B=param_size_B,
+            zero_stage=zero_stage,
+            act_per_token=act_per_token,
+            piecewise_compute_coeffs=piecewise,
+            alltoall_linear_fit=alltoall_linear if alltoall_linear else None,
+            p2p_linear_fit=p2p_linear if p2p_linear else None,
+            bwd_fwd_ratio=bwd_fwd_ratio,
+            ring_bwd_comm_ratio=ring_bwd_comm_ratio,
+        )
+
+    @staticmethod
+    def fit_linear_comm(profile_json: str, comm_type: str = "alltoall") -> Dict[int, Dict[str, float]]:
+        """Fit linear model (time_ms = alpha * msg_MB + beta) from raw profile data.
+        
+        Args:
+            profile_json: Path to alltoall_profile or p2p_ring_profile JSON.
+            comm_type: "alltoall" or "p2p".
+            
+        Returns:
+            Dict mapping group_size -> {"alpha": ms_per_MB, "beta": ms, "r_squared": float}
+        """
+        with open(profile_json, "r") as f:
+            data = json.load(f)
+        
+        result = {}
+        for gs_str, gs_data in data["results"].items():
+            gs = int(gs_str)
+            xs = []  # message sizes in MB
+            ys = []  # times in ms
+            for pt in gs_data["raw"]:
+                xs.append(pt["msg_size_MB"])
+                ys.append(pt["time_ms"])
+            
+            if len(xs) < 2:
+                continue
+            
+            xs = np.array(xs, dtype=np.float64)
+            ys = np.array(ys, dtype=np.float64)
+            
+            # Linear fit: y = alpha * x + beta
+            n = len(xs)
+            sx = np.sum(xs)
+            sy = np.sum(ys)
+            sxy = np.sum(xs * ys)
+            sx2 = np.sum(xs ** 2)
+            
+            denom = n * sx2 - sx ** 2
+            if abs(denom) < 1e-12:
+                continue
+            
+            alpha = (n * sxy - sx * sy) / denom
+            beta = (sy - alpha * sx) / n
+            
+            # R² calculation
+            y_pred = alpha * xs + beta
+            ss_res = np.sum((ys - y_pred) ** 2)
+            ss_tot = np.sum((ys - np.mean(ys)) ** 2)
+            r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+            
+            result[gs] = {
+                "alpha": float(alpha),
+                "beta": float(beta),
+                "r_squared": float(r_squared),
+            }
+        
+        return result
+
+    @staticmethod
+    def fit_ring_per_step(profile_json: str,
+                          max_kv_mb: float = 256.0,
+                          ) -> Dict[int, Dict[str, float]]:
+        """Fit ring per-step time from actual ring profiling (model data).
+        
+        Unlike fit_linear_comm which uses raw isolated P2P data, this uses the
+        actual ring communication profile which captures:
+          - Ring contention from multiple simultaneous send/recv
+          - Bidirectional traffic effects
+          - NCCL ring algorithm behavior
+        
+        Fits: per_step_time_ms = alpha * kv_per_step_MB + beta
+        where kv_per_step_MB is the total K+V transfer per ring step.
+        
+        Args:
+            profile_json: Path to p2p_ring_profile JSON.
+            max_kv_mb: Maximum kv_per_step_MB to include in fit. Data points above
+                       this are excluded because NCCL algorithm switching creates
+                       bimodal behavior at very large message sizes.
+            
+        Returns:
+            Dict mapping group_size -> {
+                "alpha": ms per MB of KV transfer,
+                "beta": ms latency per step,
+                "r_squared": fit quality,
+                "data_source": "ring_model"
+            }
+        """
+        with open(profile_json, "r") as f:
+            data = json.load(f)
+        
+        result = {}
+        for gs_str, gs_data in data["results"].items():
+            gs = int(gs_str)
+            model_pts = gs_data.get("model", [])
+            if not model_pts:
+                continue
+            
+            xs = []  # kv_bytes_per_step_MB (total K+V per step)
+            ys = []  # per_step_time_ms
+            for pt in model_pts:
+                kv_mb = pt["kv_bytes_per_step_MB"]
+                t_ms = pt["per_step_time_ms"]
+                if kv_mb <= max_kv_mb:
+                    xs.append(kv_mb)
+                    ys.append(t_ms)
+            
+            if len(xs) < 2:
+                continue
+            
+            xs = np.array(xs, dtype=np.float64)
+            ys = np.array(ys, dtype=np.float64)
+            
+            # Linear fit: per_step_time = alpha * kv_per_step_MB + beta
+            n = len(xs)
+            sx = np.sum(xs)
+            sy = np.sum(ys)
+            sxy = np.sum(xs * ys)
+            sx2 = np.sum(xs ** 2)
+            
+            denom = n * sx2 - sx ** 2
+            if abs(denom) < 1e-12:
+                continue
+            
+            alpha = (n * sxy - sx * sy) / denom
+            beta = (sy - alpha * sx) / n
+            
+            y_pred = alpha * xs + beta
+            ss_res = np.sum((ys - y_pred) ** 2)
+            ss_tot = np.sum((ys - np.mean(ys)) ** 2)
+            r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+            
+            result[gs] = {
+                "alpha": float(alpha),
+                "beta": float(beta),
+                "r_squared": float(r_squared),
+                "data_source": "ring_model",
+            }
+        
+        return result
+
+    @staticmethod
+    def load_ring_interp(profile_json: str) -> Dict[int, List[Tuple[float, float]]]:
+        """Load ring per-step interpolation table from P2P ring profile.
+        
+        Extracts (kv_per_step_MB, per_step_time_ms) pairs from the 'model' data
+        in the profile JSON, which contains actual ring profiling results.
+        
+        Args:
+            profile_json: Path to p2p_ring_profile JSON.
+            
+        Returns:
+            Dict mapping group_size -> [(kv_per_step_MB, time_ms), ...] sorted by kv.
+        """
+        with open(profile_json, "r") as f:
+            data = json.load(f)
+        
+        result = {}
+        for gs_str, gs_data in data["results"].items():
+            gs = int(gs_str)
+            model_pts = gs_data.get("model", [])
+            if not model_pts:
+                continue
+            
+            pts = []
+            for pt in model_pts:
+                kv_mb = pt["kv_bytes_per_step_MB"]
+                t_ms = pt["per_step_time_ms"]
+                pts.append((float(kv_mb), float(t_ms)))
+            
+            pts.sort(key=lambda x: x[0])
+            result[gs] = pts
+        
+        return result
+
+    @staticmethod
+    def load_a2a_interp(profile_json: str) -> Dict[int, List[Tuple[float, float]]]:
+        """Load A2A per-op interpolation table from alltoall profile.
+        
+        Extracts (total_bytes_MB, time_ms) pairs from the 'model' data
+        in the profile JSON, which measures actual A2A on attention tensors.
+        
+        Args:
+            profile_json: Path to alltoall_profile JSON.
+            
+        Returns:
+            Dict mapping group_size -> [(msg_MB, time_ms), ...] sorted by msg.
+        """
+        with open(profile_json, "r") as f:
+            data = json.load(f)
+        
+        result = {}
+        for gs_str, gs_data in data["results"].items():
+            gs = int(gs_str)
+            model_pts = gs_data.get("model", [])
+            if not model_pts:
+                continue
+            
+            pts = []
+            for pt in model_pts:
+                msg_mb = pt["total_bytes_MB"]
+                t_ms = pt["time_ms"]
+                pts.append((float(msg_mb), float(t_ms)))
+            
+            pts.sort(key=lambda x: x[0])
+            result[gs] = pts
+        
+        return result
+
+    def calibrate_from_validation(
+        self,
+        validation_json: str,
+        min_seq_for_p2p: int = 8192,
+        min_seq_for_a2a: int = 16384,
+        min_seq_for_compute: int = 512,
+        extrapolate_correction: bool = True,
+    ) -> Dict[str, Any]:
+        """Calibrate interpolation tables using real validation measurements.
+        
+        Profiling measures communication in isolation (tight loops), which can
+        overestimate ring contention. Validation data measures communication
+        in the context of actual layer-by-layer execution, giving more realistic
+        timings. This method replaces profiling-based interpolation points with
+        validation-derived values for clean (long-seq) data points.
+        
+        Also calibrates compute time: builds a seq_len → correction_factor
+        table from validation compute data, correcting for the gap between
+        isolated kernel profiling and actual execution context.
+        
+        Args:
+            validation_json: Path to profile_validate_*.json file.
+            min_seq_for_p2p: Minimum sequence length for P2P calibration points.
+                Shorter sequences may have warmup artifacts.
+            min_seq_for_a2a: Minimum sequence length for A2A calibration points.
+                A2A short-seq data is often noisy/non-monotonic.
+            min_seq_for_compute: Minimum sequence length for compute calibration.
+            extrapolate_correction: If True, apply the last known correction ratio
+                to profiling points beyond the validation range.
+                
+        Returns:
+            Dict with calibration statistics (corrections applied, ratios, etc.)
+        """
+        import json as _json
+        with open(validation_json, "r") as f:
+            val_data = _json.load(f)
+        
+        stats = {"p2p_corrections": {}, "a2a_corrections": {}, 
+                 "compute_corrections": [], "source": validation_json}
+        
+        # ── P2P Ring Calibration ──
+        p2p_entries = [e for e in val_data.get("comm_validation", [])
+                       if e["comm_type"] == "p2p" and e["seq_len"] >= min_seq_for_p2p]
+        
+        if self.p2p_ring_interp and p2p_entries:
+            for gs in sorted(set(e["group_size"] for e in p2p_entries)):
+                gs_entries = sorted(
+                    [e for e in p2p_entries if e["group_size"] == gs],
+                    key=lambda e: e["seq_len"]
+                )
+                if gs not in self.p2p_ring_interp:
+                    continue
+                
+                old_pts = dict(self.p2p_ring_interp[gs])  # kv_mb -> time
+                corrections = []
+                
+                for entry in gs_entries:
+                    seq = entry["seq_len"]
+                    measured_ms = entry["measured_ms"]
+                    num_layers = entry.get("num_layers", self.l)
+                    num_steps = gs - 1
+                    
+                    # Derive per-step time from validation
+                    val_per_step = measured_ms / (num_layers * num_steps)
+                    
+                    # Compute kv_per_step_mb for this (seq, gs)
+                    kv_per_step_mb = 2.0 * (seq / gs) * self.kv_hidden * 2 / 1024 / 1024
+                    
+                    # Find the closest profiling point
+                    prof_per_step = old_pts.get(kv_per_step_mb)
+                    if prof_per_step is None:
+                        # Find nearest
+                        closest_kv = min(old_pts.keys(), key=lambda k: abs(k - kv_per_step_mb))
+                        if abs(closest_kv - kv_per_step_mb) / max(kv_per_step_mb, 1) < 0.01:
+                            prof_per_step = old_pts[closest_kv]
+                            kv_per_step_mb = closest_kv  # snap to profiled point
+                    
+                    ratio = val_per_step / prof_per_step if prof_per_step and prof_per_step > 0 else 1.0
+                    corrections.append((kv_per_step_mb, val_per_step, prof_per_step, ratio))
+                    
+                    # Replace the profiling value with validation value
+                    old_pts[kv_per_step_mb] = val_per_step
+                
+                stats["p2p_corrections"][gs] = corrections
+                
+                # Apply extrapolation correction to points beyond validation range
+                if extrapolate_correction and corrections:
+                    last_ratio = corrections[-1][3]
+                    max_val_kv = corrections[-1][0]
+                    for kv_mb in sorted(old_pts.keys()):
+                        if kv_mb > max_val_kv:
+                            old_pts[kv_mb] *= last_ratio
+                
+                # Rebuild sorted interpolation table
+                self.p2p_ring_interp[gs] = sorted(old_pts.items(), key=lambda x: x[0])
+        
+        # ── A2A Calibration ──
+        a2a_entries = [e for e in val_data.get("comm_validation", [])
+                       if e["comm_type"] == "alltoall" and e["seq_len"] >= min_seq_for_a2a]
+        
+        if self.a2a_interp and a2a_entries:
+            for gs in sorted(set(e["group_size"] for e in a2a_entries)):
+                gs_entries = sorted(
+                    [e for e in a2a_entries if e["group_size"] == gs],
+                    key=lambda e: e["seq_len"]
+                )
+                if gs not in self.a2a_interp:
+                    continue
+                
+                old_pts = dict(self.a2a_interp[gs])
+                corrections = []
+                
+                for entry in gs_entries:
+                    seq = entry["seq_len"]
+                    measured_ms = entry["measured_ms"]
+                    num_ops = entry["num_ops"]
+                    
+                    # Derive per-op time from validation
+                    val_per_op = measured_ms / num_ops
+                    
+                    # Compute msg_mb for this (seq, gs) — using full hidden for Q/O tensor
+                    msg_mb = seq * self.h * 2 / 1024 / 1024 / gs
+                    
+                    # Find the closest profiling point
+                    prof_per_op = old_pts.get(msg_mb)
+                    if prof_per_op is None:
+                        closest_mb = min(old_pts.keys(), key=lambda k: abs(k - msg_mb))
+                        if abs(closest_mb - msg_mb) / max(msg_mb, 1) < 0.01:
+                            prof_per_op = old_pts[closest_mb]
+                            msg_mb = closest_mb
+                    
+                    ratio = val_per_op / prof_per_op if prof_per_op and prof_per_op > 0 else 1.0
+                    corrections.append((msg_mb, val_per_op, prof_per_op, ratio))
+                    
+                    old_pts[msg_mb] = val_per_op
+                
+                stats["a2a_corrections"][gs] = corrections
+                
+                if extrapolate_correction and corrections:
+                    last_ratio = corrections[-1][3]
+                    max_val_mb = corrections[-1][0]
+                    for mb in sorted(old_pts.keys()):
+                        if mb > max_val_mb:
+                            old_pts[mb] *= last_ratio
+                
+                self.a2a_interp[gs] = sorted(old_pts.items(), key=lambda x: x[0])
+        
+        # ── Compute Calibration ──
+        # Build a correction factor table from validation compute data.
+        # Profiling in tight loops can differ from real execution, especially
+        # for mid-range seq_lens where kernel caching/warmup differs.
+        compute_entries = val_data.get("compute_validation", [])
+        if compute_entries and isinstance(compute_entries, list):
+            correction_pts = []
+            for entry in sorted(compute_entries, key=lambda e: e.get("seq_len", 0)):
+                seq = entry.get("seq_len", 0)
+                if seq < min_seq_for_compute:
+                    continue
+                measured = entry.get("measured_per_layer_ms", 0)
+                predicted = entry.get("predicted_per_layer_ms", 0)
+                if predicted > 0 and measured > 0:
+                    # Also compute from raw piecewise (in case predicted was from old model)
+                    a, b, c = self._get_coeffs(seq)
+                    raw_pred = a * seq ** 2 + b * seq + c
+                    if raw_pred > 0:
+                        ratio = measured / raw_pred
+                        correction_pts.append((float(seq), ratio))
+                        stats["compute_corrections"].append({
+                            "seq_len": seq,
+                            "measured_ms": measured,
+                            "piecewise_ms": raw_pred,
+                            "ratio": ratio,
+                        })
+            
+            if correction_pts:
+                self.compute_correction = sorted(correction_pts, key=lambda x: x[0])
+        
+        return stats
 
 
 # ──────────────────────────────────────────────────────────
@@ -509,30 +1609,49 @@ class AdaCPSPOptimizer:
     # ---- Strategy pool generation ----
 
     def get_strategy_pool(self, seqs: Optional[List[Sequence]] = None) -> List[ParallelStrategy]:
-        """Generate all valid (attn_type, parallel_size) strategies.
-        
-        When min_parallel_size > 1 (constrained mode, e.g. tp_deg=2),
-        only strategies with parallel_size >= min_parallel_size are included.
-        This ensures compatibility with the fixed weight partitioning (TP degree).
+        """Generate all valid strategies: ulysses, ring, AND usp combinations.
+
+        For USP (combined Ulysses + Ring), we enumerate all (sp_size, cp_size)
+        pairs where sp_size >= 2, cp_size >= 2, both powers of 2, and
+        sp_size * cp_size <= max_parallel_size.
+
+        Example for N=8, allowed=["ulysses","ring","usp"]:
+          ulysses×1, ulysses×2, ulysses×4, ulysses×8,
+          ring×2, ring×4, ring×8,
+          usp(sp2×cp2)=4, usp(sp2×cp4)=8, usp(sp4×cp2)=8
         """
         strategies = []
-        
+
         # Start from min_parallel_size (= tp_deg in constrained mode)
         ps = self.min_parallel_size
         if ps <= 1:
             # Include no-parallelism baseline only when unconstrained
             strategies.append(ParallelStrategy("ulysses", 1))
             ps = 2
-        
+
+        # Pure Ulysses and pure Ring
         while ps <= self.max_parallel_size:
             for at in self.allowed_attn_types:
-                strategies.append(ParallelStrategy(at, ps))
+                if at in ("ulysses", "ring"):
+                    strategies.append(ParallelStrategy(at, ps))
             ps *= 2
-        
+
+        # USP combinations (if "usp" in allowed_attn_types)
+        if "usp" in self.allowed_attn_types:
+            sp = 2
+            while sp <= self.max_parallel_size // 2:
+                cp = 2
+                while sp * cp <= self.max_parallel_size:
+                    total = sp * cp
+                    if total >= self.min_parallel_size:
+                        strategies.append(ParallelStrategy("usp", total, sp_size=sp, cp_size=cp))
+                    cp *= 2
+                sp *= 2
+
         if not strategies:
             # Fallback: at least include the minimum strategy
             strategies.append(ParallelStrategy("ulysses", self.min_parallel_size))
-        
+
         return strategies
 
     def get_strategy_options(self, seqs: Optional[List[Sequence]] = None) -> List[ParallelStrategy]:
@@ -591,10 +1710,12 @@ class AdaCPSPOptimizer:
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K)) / strategy.parallel_size
             if group_tokens > self.device_token_capacity:
                 return None
-            group_time = sum(
-                self.costmodel.total_time_single(seqs[k].seq, strategy) * A[k, p]
-                for k in range(K)
-            )
+            # Use full cost model (compute + comm + overlap) for accurate M
+            group_seqlens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
+            if group_seqlens:
+                group_time = self.costmodel.total_time(group_seqlens, strategy)
+            else:
+                group_time = 0.0
             M = max(group_time, M)
 
         return {
@@ -636,10 +1757,12 @@ class AdaCPSPOptimizer:
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K)) / strategy.parallel_size
             if group_tokens > self.device_token_capacity:
                 return None
-            group_time = sum(
-                self.costmodel.total_time_single(seqs[k].seq, strategy) * A[k, p]
-                for k in range(K)
-            )
+            # Use full cost model (compute + comm + overlap) for accurate M
+            group_seqlens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
+            if group_seqlens:
+                group_time = self.costmodel.total_time(group_seqlens, strategy)
+            else:
+                group_time = 0.0
             M = max(group_time, M)
 
         return {
@@ -684,7 +1807,7 @@ class AdaCPSPOptimizer:
 
         for strat in strategies:
             if strat.parallel_size > self.N:
-                    continue
+                continue
             group_num = self.N // strat.parallel_size
             result = self.solve_homo_strategy_bfd(seqs, strat, group_num)
             if result is not None:
@@ -703,7 +1826,7 @@ class AdaCPSPOptimizer:
 
         for strat in strategies:
             if strat.parallel_size > self.N:
-                    continue
+                continue
             group_num = self.N // strat.parallel_size
             result = self.solve_homo_strategy_ffd(seqs, strat, group_num)
             if result is not None:
@@ -716,7 +1839,7 @@ class AdaCPSPOptimizer:
         """
         Unified adaptive heuristic solver: try all strategies with BFD or FFD.
         (Ported from FlexSP: homo_sp_baseline_ffd_bfd)
-
+        
         Args:
             seqs: list of sequences
             heuristic: "bfd" or "ffd"
@@ -765,6 +1888,29 @@ class AdaCPSPOptimizer:
         _partition(self.N, max_ps, [])
         return partitions
 
+    def _strategies_for_group_size(self, group_size: int) -> List[ParallelStrategy]:
+        """Generate all possible strategies for a given group size.
+
+        For group_size=8: ulysses×8, ring×8, usp(sp2×cp4), usp(sp4×cp2)
+        For group_size=4: ulysses×4, ring×4, usp(sp2×cp2)
+        For group_size=2: ulysses×2, ring×2
+        For group_size=1: ulysses×1
+        """
+        strats = []
+        for at in self.allowed_attn_types:
+            if at in ("ulysses", "ring"):
+                strats.append(ParallelStrategy(at, group_size))
+            elif at == "usp":
+                # Enumerate all (sp, cp) decompositions where sp>=2, cp>=2
+                sp = 2
+                while sp <= group_size // 2:
+                    if group_size % sp == 0:
+                        cp = group_size // sp
+                        if cp >= 2:
+                            strats.append(ParallelStrategy("usp", group_size, sp_size=sp, cp_size=cp))
+                    sp *= 2
+        return strats
+
     def solve_heterogeneous_bfd(self, seqs: List[Sequence]) -> Optional[Dict]:
         """
         Heterogeneous BFD: enumerate all valid GPU partitions and strategy
@@ -772,14 +1918,13 @@ class AdaCPSPOptimizer:
 
         Unlike solve_adaptive_bfd (which only tries homogeneous strategies),
         this can produce mixed groups like [ulysses×4, ring×4] in one microbatch.
+        Also supports USP strategies within groups (e.g. usp(sp2×cp4) on 8 GPUs).
 
         Complexity: O(partitions × strategy_combos × K log K)
         For N=8, 2 attn_types: ~50 combinations — fast.
         For N=64, pruning needed (see max_hetero_combos).
         """
         partitions = self._generate_gpu_partitions()
-        base_strategies = self.get_strategy_pool(seqs)
-        attn_types = list(set(s.attn_type for s in base_strategies))
 
         best_result = None
         max_combos = 500  # safety limit for large N
@@ -787,23 +1932,22 @@ class AdaCPSPOptimizer:
         combo_count = 0
         for partition in partitions:
             num_groups = len(partition)
+            # For each group in the partition, get all valid strategies
+            per_group_strats = [self._strategies_for_group_size(gs) for gs in partition]
 
-            # Generate all strategy assignments for this partition
-            # Each group in the partition gets assigned an attn_type
             def _gen_assignments(idx, current):
                 nonlocal combo_count, best_result
                 if combo_count > max_combos:
                     return
                 if idx == num_groups:
                     combo_count += 1
-                    strategies = [ParallelStrategy(current[i], partition[i]) for i in range(num_groups)]
-                    result = self._hetero_bfd_assign(seqs, strategies)
+                    result = self._hetero_bfd_assign(seqs, list(current))
                     if result is not None:
                         if best_result is None or result["M"] < best_result["M"]:
                             best_result = result
                     return
-                for at in attn_types:
-                    current.append(at)
+                for strat in per_group_strats[idx]:
+                    current.append(strat)
                     _gen_assignments(idx + 1, current)
                     current.pop()
 
@@ -848,7 +1992,7 @@ class AdaCPSPOptimizer:
             min_ps = self._min_parallel_size(seq.seq)
             best_group = -1
             best_remaining = float('inf')
-
+            
             for p in range(P):
                 if strategies[p].parallel_size < min_ps:
                     continue
@@ -858,7 +2002,7 @@ class AdaCPSPOptimizer:
                     if leftover < best_remaining:
                         best_remaining = leftover
                         best_group = p
-
+            
             if best_group == -1:
                 return None  # Infeasible
 
@@ -895,10 +2039,9 @@ class AdaCPSPOptimizer:
     def solve_heterogeneous_ffd(self, seqs: List[Sequence]) -> Optional[Dict]:
         """
         Heterogeneous FFD: like heterogeneous BFD but uses First-Fit Decreasing.
+        Also supports USP strategies.
         """
         partitions = self._generate_gpu_partitions()
-        base_strategies = self.get_strategy_pool(seqs)
-        attn_types = list(set(s.attn_type for s in base_strategies))
 
         best_result = None
         max_combos = 500
@@ -906,6 +2049,7 @@ class AdaCPSPOptimizer:
         combo_count = 0
         for partition in partitions:
             num_groups = len(partition)
+            per_group_strats = [self._strategies_for_group_size(gs) for gs in partition]
 
             def _gen_assignments(idx, current):
                 nonlocal combo_count, best_result
@@ -913,14 +2057,13 @@ class AdaCPSPOptimizer:
                     return
                 if idx == num_groups:
                     combo_count += 1
-                    strategies = [ParallelStrategy(current[i], partition[i]) for i in range(num_groups)]
-                    result = self._hetero_ffd_assign(seqs, strategies)
+                    result = self._hetero_ffd_assign(seqs, list(current))
                     if result is not None:
                         if best_result is None or result["M"] < best_result["M"]:
                             best_result = result
                     return
-                for at in attn_types:
-                    current.append(at)
+                for strat in per_group_strats[idx]:
+                    current.append(strat)
                     _gen_assignments(idx + 1, current)
                     current.pop()
 
@@ -1301,7 +2444,7 @@ class AdaCPSPOptimizer:
 
         if not active_groups:
             return
-
+        
         solution = model.createSol()
 
         # Set m[p]
@@ -1879,15 +3022,15 @@ def _deserialize_seqs(seqs_ser: List[Tuple[int, int]]) -> List[Sequence]:
 def _serialize_strategy_groups(groups):
     """Serialize [(ParallelStrategy, [Sequence])] for IPC."""
     return [
-        (strat.attn_type, strat.parallel_size, _serialize_seqs(seqs))
+        (strat.attn_type, strat.parallel_size, strat.sp_size, strat.cp_size, _serialize_seqs(seqs))
         for strat, seqs in groups
     ]
 
 def _deserialize_strategy_groups(groups_ser):
-    """Deserialize [(attn_type, parallel_size, [(seq, id)])] from IPC."""
+    """Deserialize [(attn_type, parallel_size, sp_size, cp_size, [(seq, id)])] from IPC."""
     return [
-        (ParallelStrategy(at, ps), _deserialize_seqs(seqs_ser))
-        for at, ps, seqs_ser in groups_ser
+        (ParallelStrategy(at, ps, sp_size=sp, cp_size=cp), _deserialize_seqs(seqs_ser))
+        for at, ps, sp, cp, seqs_ser in groups_ser
     ]
 
 def _reconstruct_optimizer(
@@ -2108,8 +3251,8 @@ def main():
     parser.add_argument("--mb_option_num", type=int, default=5,
                         help="Number of mb_num options to explore (for mp_gbmb)")
     parser.add_argument("--attn_types", type=str, nargs="+",
-                        default=["ulysses", "ring"],
-                        choices=["ulysses", "ring"])
+                        default=["ulysses", "ring", "usp"],
+                        choices=["ulysses", "ring", "usp"])
     parser.add_argument("--time_limit", type=int, default=10,
                         help="SCIP solver time limit in seconds")
     parser.add_argument("--save_dir", type=str, default="./configs")
