@@ -42,13 +42,26 @@ from galvatron.utils import distributed_dataloader, print_loss, set_seed
 
 def _parse_forced_strategy(strategy_str):
     """
-    Parse forced strategy string into list of (attn_type, parallel_size) tuples.
-    Format: "ulysses:4,ring:4" → [("ulysses", 4), ("ring", 4)]
+    Parse forced strategy string into list of tuples.
+
+    Formats:
+      "ulysses:4,ring:4"     → [("ulysses", 4), ("ring", 4)]
+      "usp:2x4"              → [("usp", 8, 2, 4)]   (sp_size=2, cp_size=4, total=8)
+      "ulysses:4,usp:2x4"   → [("ulysses", 4), ("usp", 8, 2, 4)]
     """
     groups = []
     for part in strategy_str.split(","):
-        attn_type, size = part.strip().split(":")
-        groups.append((attn_type.strip(), int(size.strip())))
+        part = part.strip()
+        attn_type, size_str = part.split(":")
+        attn_type = attn_type.strip()
+        size_str = size_str.strip()
+        if attn_type == "usp" and "x" in size_str:
+            sp_str, cp_str = size_str.split("x")
+            sp_size = int(sp_str)
+            cp_size = int(cp_str)
+            groups.append((attn_type, sp_size * cp_size, sp_size, cp_size))
+        else:
+            groups.append((attn_type, int(size_str)))
     return groups
 
 
@@ -91,6 +104,8 @@ def train(args):
         # they'll be enabled dynamically per microbatch
         args.use_ulysses = False
         args.sequence_parallel = False
+        # AdaCPSP always uses packing (varlen sequences)
+        args.use_packing = True
 
         if rank == 0:
             print(f"[AdaCPSP] Model construction: tp=1, sp=1, cp=1, dp={world_size}")
@@ -110,46 +125,111 @@ def train(args):
     if args.use_adaCPSP:
         from galvatron.models.varlen_llama_hf.adacpsp_solver import AdaCPSPOptimizer, AdaCPSPCostModel
         
-        # Create cost model
-        costmodel = AdaCPSPCostModel(
-            cluster_size=world_size,
-            hidden_size=config.hidden_size,
-            layer_num=config.num_hidden_layers,
-        )
+        # Create cost model — try to load from profiling data
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        configs_dir = os.path.join(script_dir, "configs")
+        
+        costmodel = None
+        
+        # Try unified profile JSON from configs dir (newest first)
+        if os.path.isdir(configs_dir):
+            import glob as _glob, json as _json
+            # Find best profile with attention segments
+            attn_json = None
+            comm_json = None
+            for pf in sorted(_glob.glob(os.path.join(configs_dir, "profile_validate_*.json")), reverse=True):
+                try:
+                    with open(pf) as _f:
+                        _d = _json.load(_f)
+                    if attn_json is None and "attention" in _d and "segments" in _d.get("attention", {}):
+                        attn_json = pf
+                    if comm_json is None and "communication" in _d and "linear_fits" in _d.get("communication", {}):
+                        comm_json = pf
+                except Exception:
+                    pass
+            
+            if attn_json or comm_json:
+                piecewise = None
+                alltoall_linear = {}
+                p2p_linear = {}
+                
+                for pf in [attn_json, comm_json]:
+                    if pf is None:
+                        continue
+                    with open(pf) as _f:
+                        _d = _json.load(_f)
+                    if piecewise is None and "attention" in _d and "segments" in _d.get("attention", {}):
+                        piecewise = _d["attention"]["segments"]
+                    if not alltoall_linear and "communication" in _d and "linear_fits" in _d.get("communication", {}):
+                        for key, fit in _d["communication"]["linear_fits"].items():
+                            gs = int(key.split("gs")[1])
+                            entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
+                            if key.startswith("alltoall"):
+                                alltoall_linear[gs] = entry
+                            elif key.startswith("p2p"):
+                                p2p_linear[gs] = entry
+                
+                costmodel = AdaCPSPCostModel(
+                    cluster_size=world_size,
+                    hidden_size=config.hidden_size,
+                    layer_num=config.num_hidden_layers,
+                    piecewise_compute_coeffs=piecewise,
+                    alltoall_linear_fit=alltoall_linear if alltoall_linear else None,
+                    p2p_linear_fit=p2p_linear if p2p_linear else None,
+                )
+                if rank == 0:
+                    print(f"[AdaCPSP] Loaded profiling data: attn={attn_json}, comm={comm_json}")
+        
+        # Fallback: try legacy profiling files
+        if costmodel is None:
+            profile_dir = os.path.join(script_dir, "profiling_results")
+            alltoall_file = os.path.join(profile_dir, "alltoall_bandwidth.json")
+            p2p_file = os.path.join(profile_dir, "p2p_ring_bandwidth.json")
+            attn_file = os.path.join(profile_dir, "attention_piecewise_fit.json")
 
-        # Try to load profiling data
-        profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiling_results")
-        alltoall_file = os.path.join(profile_dir, "alltoall_bandwidth.json")
-        p2p_file = os.path.join(profile_dir, "p2p_ring_bandwidth.json")
-        attn_file = os.path.join(profile_dir, "attention_piecewise_fit.json")
-
-        if os.path.exists(alltoall_file) and os.path.exists(p2p_file) and os.path.exists(attn_file):
-            costmodel = AdaCPSPCostModel.from_profile_files(
-                attention_json=attn_file,
-                alltoall_json=alltoall_file,
-                p2p_json=p2p_file,
+            if os.path.exists(alltoall_file) and os.path.exists(p2p_file) and os.path.exists(attn_file):
+                costmodel = AdaCPSPCostModel.from_profile_files(
+                    attention_json=attn_file,
+                    alltoall_json=alltoall_file,
+                    p2p_json=p2p_file,
+                    cluster_size=world_size,
+                )
+                if rank == 0:
+                    print("[AdaCPSP] Loaded legacy profiling data for cost model")
+        
+        # Final fallback: default cost model
+        if costmodel is None:
+            costmodel = AdaCPSPCostModel(
                 cluster_size=world_size,
-        )
-            if rank == 0:
-                print("[AdaCPSP] Loaded profiling data for cost model")
-        else:
+                hidden_size=config.hidden_size,
+                layer_num=config.num_hidden_layers,
+            )
             if rank == 0:
                 print("[AdaCPSP] Using default cost model (no profiling data found)")
 
-        # Determine memory limit (use 90% of GPU memory)
-        gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        memory_limit_gb = gpu_mem_gb * 0.9
+        # Determine memory limit
+        override_mem = getattr(args, 'memory_limit_gb', 0)
+        if override_mem and override_mem > 0:
+            memory_limit_gb = override_mem
+        else:
+            gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            memory_limit_gb = gpu_mem_gb * 0.9
+
+        # Determine allowed attention types
+        allowed_attn_types = getattr(args, 'adaCPSP_attn_types', ["ulysses", "ring", "usp"])
 
         adacpsp_optimizer = AdaCPSPOptimizer(
             costmodel=costmodel,
             cluster_size=world_size,
             memory_limit_gb=memory_limit_gb,
             hide_output=(rank != 0),
+            allowed_attn_types=allowed_attn_types,
             # No min_parallel_size constraint now: tp=1, so any sp/cp size works
         )
         
         if rank == 0:
             solver_strategies = adacpsp_optimizer.get_strategy_pool()
+            print(f"[AdaCPSP] Allowed attn types: {allowed_attn_types}")
             print(f"[AdaCPSP] Solver strategies: {solver_strategies}")
             print(f"[AdaCPSP] Memory limit: {memory_limit_gb:.1f} GB")
     
