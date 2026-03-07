@@ -1671,7 +1671,7 @@ class ZigzagRingFlashAttentionVarlen(torch.nn.Module):
             causal=self.causal,
             group=self.cp_process_group,
         )
-        return context.unsqueeze(0)#adapt to ulysses
+        return context.unsqueeze(0)
 
 
 def get_half_index(cu_seqlens, *, front: bool):
@@ -2116,4 +2116,4 @@ class ZigzagRingFlashAttentionVarlen(torch.nn.Module):
             causal=self.causal,
             group=self.cp_process_group,
         )
-        return context.unsqueeze(0)#adapt to ulysses
+        return context.unsqueeze(0)

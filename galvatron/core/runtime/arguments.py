@@ -261,4 +261,16 @@ def galvatron_training_args(parser, use_megatron=True):
         "--adaCPSP-forced-strategy", type=str, default=None,
         help="Force heterogeneous groups for testing, e.g. 'ulysses:4,ring:4'",
     )
+    group.add_argument(
+        "--adaCPSP-attn-types", type=str, nargs="+",
+        default=["ulysses", "ring", "usp"],
+        choices=["ulysses", "ring", "usp"],
+        help="Allowed attention types for AdaCPSP solver. "
+             "Use 'ulysses' only to simulate FlexSP behavior.",
+    )
+    group.add_argument(
+        "--memory-limit-gb", type=float, default=0,
+        help="Override GPU memory limit (GB) for AdaCPSP solver. "
+             "0 = auto-detect (90%% of GPU memory).",
+    )
     return parser
