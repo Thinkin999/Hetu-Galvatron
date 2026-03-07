@@ -1,0 +1,1526 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+AdaCPSP Comprehensive Profiling & Validation Suite
+===================================================
+1. Attention profiling with AUTOMATIC breakpoint detection (time/x² derivative)
+2. Communication profiling with linear fitting y = a*x + b
+3. CostModel validation: predicted vs measured (Ulysses / Ring / USP)
+4. Memory model validation
+5. End-to-end test with real varlen dataset (wikipedia/common_crawl/github)
+
+Usage:
+  Single GPU (attention only):
+    python profile_and_validate.py --mode attention --n_heads 32 --head_dim 128
+
+  8 GPUs (comm profiling + cost model validation):
+    torchrun --nproc_per_node=8 profile_and_validate.py --mode comm
+    torchrun --nproc_per_node=8 profile_and_validate.py --mode validate_cost_model
+    torchrun --nproc_per_node=8 profile_and_validate.py --mode validate_memory
+    torchrun --nproc_per_node=8 profile_and_validate.py --mode all
+"""
+
+import os
+import sys
+import json
+import argparse
+import math
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime
+
+import torch
+
+# ─── Flash Attention imports ──────────────────────────────────────────
+HAS_FLASH_ATTN = False
+flash_attn_func = None
+flash_attn_varlen_func = None
+
+try:
+    from flash_attn import flash_attn_func as _fa_func
+    from flash_attn import flash_attn_varlen_func as _fa_varlen_func
+    flash_attn_func = _fa_func
+    flash_attn_varlen_func = _fa_varlen_func
+    HAS_FLASH_ATTN = True
+except ImportError:
+    pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PART 1: Attention Profiling with Automatic Breakpoint Detection
+# ═══════════════════════════════════════════════════════════════════════
+
+def profile_attention_dense(
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+    seq_range: Tuple[int, int] = (64, 32768),
+    step: int = 64,
+    warmup: int = 5,
+    iters: int = 20,
+    use_varlen: bool = True,
+    device: str = "cuda",
+    dtype=torch.bfloat16,
+) -> List[Tuple[int, float]]:
+    """
+    Densely profile Flash Attention across the full seq_len range.
+    Returns list of (seq_len, time_ms).
+    """
+    results = []
+    lo, hi = seq_range
+    seq_lengths = list(range(lo, hi + 1, step))
+    print(f"\n[Attention Profiling] Dense sampling: {lo} -> {hi}, step={step}, "
+          f"total={len(seq_lengths)} points, {'varlen' if use_varlen else 'padded'}")
+
+    for i, seq_len in enumerate(seq_lengths):
+        try:
+            if use_varlen and flash_attn_varlen_func is not None:
+                q = torch.randn(seq_len, n_heads, head_dim, dtype=dtype, device=device)
+                k = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                v = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                cu = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
+                for _ in range(warmup):
+                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
+                torch.cuda.synchronize()
+                s = torch.cuda.Event(enable_timing=True)
+                e = torch.cuda.Event(enable_timing=True)
+                s.record()
+                for _ in range(iters):
+                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
+                e.record()
+                torch.cuda.synchronize()
+                t = s.elapsed_time(e) / iters
+                del q, k, v, cu
+            elif flash_attn_func is not None:
+                q = torch.randn(1, seq_len, n_heads, head_dim, dtype=dtype, device=device)
+                k = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                v = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                for _ in range(warmup):
+                    flash_attn_func(q, k, v, causal=True)
+                torch.cuda.synchronize()
+                s = torch.cuda.Event(enable_timing=True)
+                e = torch.cuda.Event(enable_timing=True)
+                s.record()
+                for _ in range(iters):
+                    flash_attn_func(q, k, v, causal=True)
+                e.record()
+                torch.cuda.synchronize()
+                t = s.elapsed_time(e) / iters
+                del q, k, v
+            else:
+                print("  No flash_attn available, aborting")
+                return results
+
+            torch.cuda.empty_cache()
+            results.append((seq_len, t))
+            if (i + 1) % 50 == 0 or i == 0:
+                print(f"  [{i+1}/{len(seq_lengths)}] seq={seq_len}: {t:.4f} ms")
+
+        except RuntimeError as ex:
+            if "out of memory" in str(ex).lower():
+                print(f"  OOM at seq_len={seq_len}, stopping")
+                torch.cuda.empty_cache()
+                break
+            raise
+
+    print(f"  Collected {len(results)} data points")
+    return results
+
+
+def detect_breakpoints(
+    data: List[Tuple[int, float]],
+    window: int = 5,
+    threshold_factor: float = 3.0,
+    min_segment_points: int = 8,
+) -> List[int]:
+    """
+    Automatically detect kernel switch breakpoints by analyzing time/x².
+    
+    Method:
+    1. Compute normalized metric: r(x) = time(x) / x²
+       If flash attention uses a single O(n²) kernel, r(x) should be roughly constant.
+       Kernel switches cause discontinuities in r(x).
+    
+    2. Compute sliding-window derivative |Δr / Δx| 
+    
+    3. Find peaks in the derivative that exceed threshold_factor × median
+       These peaks indicate breakpoints where the kernel changes.
+    
+    4. Merge nearby breakpoints and ensure minimum segment size.
+    
+    Returns: sorted list of breakpoint seq_lens (excluding start/end).
+    """
+    if len(data) < 2 * window + min_segment_points:
+        return []
+
+    xs = np.array([d[0] for d in data], dtype=np.float64)
+    ts = np.array([d[1] for d in data], dtype=np.float64)
+
+    # 1. Compute r(x) = time / x²
+    r = ts / (xs ** 2)
+
+    # 2. Compute smoothed derivative of r
+    # Use Savitzky-Golay-like smoothing: average over a window
+    dr = np.zeros(len(r))
+    for i in range(window, len(r) - window):
+        r_left = np.mean(r[max(0, i - window):i])
+        r_right = np.mean(r[i:min(len(r), i + window)])
+        dx = xs[min(len(xs)-1, i + window//2)] - xs[max(0, i - window//2)]
+        if dx > 0:
+            dr[i] = abs(r_right - r_left) / dx
+        else:
+            dr[i] = 0
+
+    # 3. Find peaks: dr > threshold_factor * median(dr[nonzero])
+    dr_valid = dr[window:-window]
+    if len(dr_valid) == 0:
+        return []
+    
+    median_dr = np.median(dr_valid[dr_valid > 0]) if np.any(dr_valid > 0) else 0
+    threshold = threshold_factor * median_dr if median_dr > 0 else np.inf
+
+    peaks = []
+    for i in range(window, len(dr) - window):
+        if dr[i] > threshold:
+            # Check it's a local maximum
+            if dr[i] >= max(dr[max(0, i-2):i]) and dr[i] >= max(dr[i+1:min(len(dr), i+3)]):
+                peaks.append(int(xs[i]))
+
+    # 4. Merge nearby peaks (within 2*step of each other)
+    if not peaks:
+        return []
+    
+    step = int(xs[1] - xs[0]) if len(xs) > 1 else 64
+    merged = [peaks[0]]
+    for p in peaks[1:]:
+        if p - merged[-1] > 4 * step:
+            merged.append(p)
+        else:
+            # Keep the one with higher derivative
+            idx_old = int(np.argmin(np.abs(xs - merged[-1])))
+            idx_new = int(np.argmin(np.abs(xs - p)))
+            if dr[idx_new] > dr[idx_old]:
+                merged[-1] = p
+
+    # 5. Filter: ensure minimum segment size
+    filtered = []
+    prev = int(xs[0])
+    for bp in merged:
+        if bp - prev >= min_segment_points * step:
+            filtered.append(bp)
+            prev = bp
+    # Also ensure last segment has enough points
+    if filtered and int(xs[-1]) - filtered[-1] < min_segment_points * step:
+        filtered.pop()
+
+    print(f"\n[Breakpoint Detection] Detected {len(filtered)} breakpoints: {filtered}")
+    print(f"  Segments: ", end="")
+    bounds = [int(xs[0])] + filtered + [int(xs[-1])]
+    for i in range(len(bounds) - 1):
+        pts = sum(1 for x in xs if bounds[i] <= x <= bounds[i+1])
+        print(f"[{bounds[i]}, {bounds[i+1]}]({pts}pts) ", end="")
+    print()
+
+    return filtered
+
+
+def consolidate_breakpoints(
+    data: List[Tuple[int, float]],
+    raw_breakpoints: List[int],
+    max_segments: int = 5,
+    min_r2: float = 0.995,
+) -> List[int]:
+    """
+    Consolidate many fine-grained breakpoints into a small practical set.
+    
+    Strategy: iteratively merge the pair of adjacent segments whose removal
+    causes the least drop in overall R². Stop when we have ≤ max_segments
+    or removing any breakpoint drops R² below min_r2.
+    """
+    from scipy.optimize import curve_fit
+
+    xs = np.array([d[0] for d in data], dtype=np.float64)
+    ts = np.array([d[1] for d in data], dtype=np.float64)
+
+    def segment_r2(lo, hi):
+        """Compute R² for a single segment [lo, hi]."""
+        mask = (xs >= lo) & (xs <= hi)
+        sx, st = xs[mask], ts[mask]
+        if len(sx) < 3:
+            return 0.0
+        try:
+            def quad(x, a, b, c):
+                return a * x**2 + b * x + c
+            popt, _ = curve_fit(quad, sx, st, p0=[1e-9, 1e-6, 0.01], maxfev=10000)
+            y_pred = quad(sx, *popt)
+            ss_res = np.sum((st - y_pred) ** 2)
+            ss_tot = np.sum((st - np.mean(st)) ** 2)
+            return 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        except Exception:
+            return 0.0
+
+    current_bps = list(raw_breakpoints)
+    start_x, end_x = float(xs[0]), float(xs[-1])
+
+    while len(current_bps) + 1 > max_segments:
+        # Try removing each breakpoint and compute the resulting min-R² 
+        best_remove_idx = -1
+        best_min_r2_after = -1.0
+
+        for i in range(len(current_bps)):
+            trial_bps = current_bps[:i] + current_bps[i+1:]
+            bounds = [start_x] + trial_bps + [end_x]
+            seg_r2s = []
+            for j in range(len(bounds) - 1):
+                r2 = segment_r2(bounds[j], bounds[j+1])
+                seg_r2s.append(r2)
+            min_r2_val = min(seg_r2s) if seg_r2s else 0
+            if min_r2_val > best_min_r2_after:
+                best_min_r2_after = min_r2_val
+                best_remove_idx = i
+
+        if best_min_r2_after < min_r2 and len(current_bps) + 1 <= max_segments + 2:
+            # Dropping further would hurt quality too much
+            break
+
+        if best_remove_idx >= 0:
+            removed = current_bps.pop(best_remove_idx)
+            bounds = [start_x] + current_bps + [end_x]
+            seg_r2s = [segment_r2(bounds[j], bounds[j+1]) for j in range(len(bounds)-1)]
+            print(f"  Merged: removed bp={int(removed)}, now {len(current_bps)+1} segments, "
+                  f"min_R²={min(seg_r2s):.5f}")
+        else:
+            break
+
+    print(f"\n[Consolidation] {len(raw_breakpoints)} → {len(current_bps)} breakpoints: {[int(b) for b in current_bps]}")
+    bounds = [start_x] + current_bps + [end_x]
+    for j in range(len(bounds) - 1):
+        pts = sum(1 for x in xs if bounds[j] <= x <= bounds[j+1])
+        r2 = segment_r2(bounds[j], bounds[j+1])
+        print(f"  Segment [{int(bounds[j]):>6}, {int(bounds[j+1]):>6}]: {pts} pts, R²={r2:.6f}")
+
+    return [int(b) for b in current_bps]
+
+
+def fit_segments_quadratic(
+    data: List[Tuple[int, float]],
+    breakpoints: List[int],
+) -> List[Dict]:
+    """
+    Fit quadratic time = a*x² + b*x + c for each segment defined by breakpoints.
+    """
+    from scipy.optimize import curve_fit
+
+    xs = np.array([d[0] for d in data], dtype=np.float64)
+    ts = np.array([d[1] for d in data], dtype=np.float64)
+
+    bounds_list = [xs[0]] + breakpoints + [xs[-1]]
+    segments = []
+
+    for i in range(len(bounds_list) - 1):
+        lo, hi = bounds_list[i], bounds_list[i + 1]
+        mask = (xs >= lo) & (xs <= hi)
+        seg_x = xs[mask]
+        seg_t = ts[mask]
+
+        if len(seg_x) < 3:
+            print(f"  Segment [{int(lo)}, {int(hi)}]: only {len(seg_x)} points, skipping")
+            continue
+
+        def quadratic(x, a, b, c):
+            return a * x**2 + b * x + c
+
+        try:
+            popt, _ = curve_fit(quadratic, seg_x, seg_t, p0=[1e-9, 1e-6, 0.01], maxfev=20000)
+            a, b, c = popt
+            y_pred = quadratic(seg_x, a, b, c)
+            ss_res = np.sum((seg_t - y_pred) ** 2)
+            ss_tot = np.sum((seg_t - np.mean(seg_t)) ** 2)
+            r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            max_err = float(np.max(np.abs(seg_t - y_pred)))
+            mean_err = float(np.mean(np.abs(seg_t - y_pred)))
+
+            seg_info = {
+                "range": [int(lo), int(hi)],
+                "a": float(a),
+                "b": float(b),
+                "c": float(c),
+                "r_squared": float(r2),
+                "max_error_ms": max_err,
+                "mean_error_ms": mean_err,
+                "n_points": len(seg_x),
+            }
+            segments.append(seg_info)
+            print(f"  Segment [{int(lo):>6}, {int(hi):>6}]: a={a:.6e}, b={b:.6e}, c={c:.4f}, "
+                  f"R²={r2:.6f}, maxErr={max_err:.4f}ms ({len(seg_x)} pts)")
+        except Exception as e:
+            print(f"  Segment [{int(lo)}, {int(hi)}]: fit failed: {e}")
+
+    return segments
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PART 2: Communication Profiling with Linear Fitting
+# ═══════════════════════════════════════════════════════════════════════
+
+def profile_comm_linear(
+    comm_type: str,  # "alltoall" or "p2p"
+    group,
+    group_size: int,
+    msg_sizes_mb: List[float] = None,
+    warmup: int = 5,
+    iters: int = 50,
+    dtype=torch.bfloat16,
+) -> List[Dict]:
+    """
+    Profile communication and collect (msg_bytes, time_ms) pairs.
+    More data points for precise linear fitting.
+    """
+    import torch.distributed as dist
+
+    rank = dist.get_rank()
+    local_rank = rank % torch.cuda.device_count()
+    device = torch.device(f"cuda:{local_rank}")
+    bpe = 2 if dtype == torch.bfloat16 else 4
+
+    if msg_sizes_mb is None:
+        # Dense sampling for better linear fit
+        msg_sizes_mb = [0.5, 1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96,
+                        128, 192, 256, 384, 512, 768, 1024]
+
+    results = []
+
+    if comm_type == "p2p":
+        grp_rank = dist.get_rank(group)
+        next_r = dist.get_global_rank(group, (grp_rank + 1) % group_size)
+        prev_r = dist.get_global_rank(group, (grp_rank - 1) % group_size)
+
+    for msg_mb in msg_sizes_mb:
+        n_elem = int(msg_mb * 1024 * 1024 / bpe)
+        if comm_type == "alltoall":
+            n_elem = (n_elem // group_size) * group_size
+
+        send_t = torch.randn(n_elem, dtype=dtype, device=device)
+        recv_t = torch.empty_like(send_t)
+        total_bytes = n_elem * bpe
+
+        if comm_type == "alltoall":
+            in_chunks = list(send_t.chunk(group_size))
+            out_chunks = list(recv_t.chunk(group_size))
+
+            for _ in range(warmup):
+                dist.all_to_all(out_chunks, in_chunks, group=group)
+            torch.cuda.synchronize()
+
+            se = torch.cuda.Event(enable_timing=True)
+            ee = torch.cuda.Event(enable_timing=True)
+            se.record()
+            for _ in range(iters):
+                dist.all_to_all(out_chunks, in_chunks, group=group)
+            ee.record()
+            torch.cuda.synchronize()
+            t_ms = se.elapsed_time(ee) / iters
+            data_moved = total_bytes * (group_size - 1) / group_size
+
+        elif comm_type == "p2p":
+            def do_step():
+                ops = [
+                    dist.P2POp(dist.isend, send_t, next_r, group=group),
+                    dist.P2POp(dist.irecv, recv_t, prev_r, group=group),
+                ]
+                reqs = dist.batch_isend_irecv(ops)
+                for r in reqs:
+                    r.wait()
+
+            for _ in range(warmup):
+                do_step()
+            torch.cuda.synchronize()
+            dist.barrier(group=group)
+
+            se = torch.cuda.Event(enable_timing=True)
+            ee = torch.cuda.Event(enable_timing=True)
+            se.record()
+            for _ in range(iters):
+                do_step()
+            ee.record()
+            torch.cuda.synchronize()
+            t_ms = se.elapsed_time(ee) / iters
+            data_moved = total_bytes  # bidirectional
+        else:
+            raise ValueError(f"Unknown comm_type: {comm_type}")
+
+        bw = data_moved / (t_ms / 1000) / 1e9 if t_ms > 0 else 0
+        results.append({
+            "msg_size_MB": msg_mb,
+            "total_bytes": total_bytes,
+            "data_moved_bytes": data_moved,
+            "time_ms": t_ms,
+            "bandwidth_GBs": bw,
+        })
+
+        if rank == 0:
+            print(f"  {comm_type} gs={group_size}, msg={msg_mb:>7.1f}MB: "
+                  f"{t_ms:.4f}ms, BW={bw:.2f} GB/s")
+
+        del send_t, recv_t
+        torch.cuda.empty_cache()
+
+    return results
+
+
+def fit_comm_linear(results: List[Dict]) -> Dict:
+    """
+    Fit communication time as:  time_ms = alpha * msg_size_MB + beta
+    
+    Where alpha = 1/bandwidth and beta = latency.
+    
+    We filter out very small messages (< 8MB) where latency dominates,
+    and fit on the linear (bandwidth-limited) regime.
+    """
+    # Filter to bandwidth-limited regime (msg >= 8 MB)
+    large = [(r["msg_size_MB"], r["time_ms"]) for r in results if r["msg_size_MB"] >= 8]
+    all_pts = [(r["msg_size_MB"], r["time_ms"]) for r in results]
+    
+    if len(large) < 3:
+        large = all_pts
+
+    xs = np.array([p[0] for p in large])
+    ys = np.array([p[1] for p in large])
+
+    # Linear fit: time = alpha * msg_MB + beta
+    from numpy.polynomial.polynomial import polyfit
+    coeffs = polyfit(xs, ys, 1)  # [beta, alpha] in numpy convention
+    beta, alpha = coeffs[0], coeffs[1]
+
+    # R²
+    y_pred = alpha * xs + beta
+    ss_res = np.sum((ys - y_pred) ** 2)
+    ss_tot = np.sum((ys - np.mean(ys)) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+
+    # Effective bandwidth (MB/s → GB/s)
+    # alpha is ms per MB, so BW = 1/alpha (MB/ms) = 1000/alpha (MB/s) = 1/alpha (GB/s) 
+    eff_bw_gbs = 1.0 / alpha if alpha > 0 else float('inf')
+
+    # Also fit all points for comparison
+    xs_all = np.array([p[0] for p in all_pts])
+    ys_all = np.array([p[1] for p in all_pts])
+    c_all = polyfit(xs_all, ys_all, 1)
+    beta_all, alpha_all = c_all[0], c_all[1]
+
+    return {
+        "alpha_ms_per_MB": float(alpha),
+        "beta_ms": float(beta),
+        "r_squared": float(r2),
+        "effective_bandwidth_GBs": float(eff_bw_gbs),
+        "latency_ms": float(beta),
+        "fit_range_MB": [float(xs.min()), float(xs.max())],
+        "n_points": len(xs),
+        # Full range fit
+        "alpha_full": float(alpha_all),
+        "beta_full": float(beta_all),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PART 3: CostModel Validation
+# ═══════════════════════════════════════════════════════════════════════
+
+def validate_cost_model_comm(
+    group,
+    group_size: int,
+    comm_type: str,  # "alltoall" or "p2p"
+    hidden_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    num_layers: int,
+    seq_lengths: List[int],
+    costmodel,
+    warmup: int = 5,
+    iters: int = 20,
+    dtype=torch.bfloat16,
+) -> List[Dict]:
+    """
+    Measure actual communication time matching the CostModel's definitions.
+    
+    CostModel.alltoall_time: total comm for ALL layers, ALL directions (4*2*L ops).
+      We measure a single all-to-all and multiply by 4*2*L to get total.
+    
+    CostModel.p2p_ring_time: total ring comm for ALL layers.
+      We measure one full ring (cp_size-1 steps) and multiply by L.
+    """
+    import torch.distributed as dist
+    from galvatron.models.varlen_llama_hf.adacpsp_solver import ParallelStrategy
+
+    rank = dist.get_rank()
+    local_rank = rank % torch.cuda.device_count()
+    device = torch.device(f"cuda:{local_rank}")
+    bpe = 2 if dtype == torch.bfloat16 else 4
+    head_dim = hidden_size // num_heads
+
+    results = []
+
+    for seq_len in seq_lengths:
+        if comm_type == "alltoall":
+            # Measure single all-to-all (matching actual Ulysses tensor shape)
+            heads_local = num_heads // group_size
+            t_shape = (seq_len, 1, heads_local, head_dim)
+            send = torch.randn(t_shape, dtype=dtype, device=device)
+            recv = torch.empty_like(send)
+            in_c = list(send.chunk(group_size, dim=0))
+            out_c = list(recv.chunk(group_size, dim=0))
+
+            for _ in range(warmup):
+                dist.all_to_all(out_c, in_c, group=group)
+            torch.cuda.synchronize()
+            se = torch.cuda.Event(enable_timing=True)
+            ee = torch.cuda.Event(enable_timing=True)
+            se.record()
+            for _ in range(iters):
+                dist.all_to_all(out_c, in_c, group=group)
+            ee.record()
+            torch.cuda.synchronize()
+            single_op_ms = se.elapsed_time(ee) / iters
+            del send, recv
+
+            # Scale to total: 4 (Q,K,V,O) × 2 (fwd+bwd) × L (layers) ops
+            num_ops = 4 * 2 * num_layers
+            measured_total_ms = single_op_ms * num_ops
+            predicted_ms = costmodel.alltoall_time([seq_len], group_size)
+
+            extra = {"single_op_ms": single_op_ms, "num_ops": num_ops}
+
+        elif comm_type == "p2p":
+            grp_rank = dist.get_rank(group)
+            next_r = dist.get_global_rank(group, (grp_rank + 1) % group_size)
+            prev_r = dist.get_global_rank(group, (grp_rank - 1) % group_size)
+
+            local_seq = seq_len // group_size
+            kv_shape = (local_seq, 1, num_kv_heads, head_dim)
+            send_k = torch.randn(kv_shape, dtype=dtype, device=device)
+            send_v = torch.randn(kv_shape, dtype=dtype, device=device)
+            recv_k = torch.empty_like(send_k)
+            recv_v = torch.empty_like(send_v)
+            num_steps = group_size - 1
+
+            def ring_step():
+                ops = [
+                    dist.P2POp(dist.isend, send_k, next_r, group=group),
+                    dist.P2POp(dist.isend, send_v, next_r, group=group),
+                    dist.P2POp(dist.irecv, recv_k, prev_r, group=group),
+                    dist.P2POp(dist.irecv, recv_v, prev_r, group=group),
+                ]
+                reqs = dist.batch_isend_irecv(ops)
+                for r in reqs:
+                    r.wait()
+
+            for _ in range(warmup):
+                ring_step()
+            torch.cuda.synchronize()
+            dist.barrier(group=group)
+
+            se = torch.cuda.Event(enable_timing=True)
+            ee = torch.cuda.Event(enable_timing=True)
+            se.record()
+            for _ in range(iters):
+                for _ in range(num_steps):
+                    ring_step()
+            ee.record()
+            torch.cuda.synchronize()
+            ring_time_ms = se.elapsed_time(ee) / iters  # one full ring pass
+            del send_k, send_v, recv_k, recv_v
+
+            # Scale to total: L (layers) full ring passes
+            measured_total_ms = ring_time_ms * num_layers
+            predicted_ms = costmodel.p2p_ring_time([seq_len], group_size)
+
+            extra = {"ring_time_ms": ring_time_ms, "num_layers": num_layers}
+        else:
+            raise ValueError(f"Unknown comm_type: {comm_type}")
+
+        torch.cuda.empty_cache()
+
+        error_pct = abs(predicted_ms - measured_total_ms) / measured_total_ms * 100 \
+            if measured_total_ms > 0 else 0
+        result = {
+            "seq_len": seq_len,
+            "comm_type": comm_type,
+            "group_size": group_size,
+            "measured_ms": measured_total_ms,
+            "predicted_ms": predicted_ms,
+            "error_pct": error_pct,
+        }
+        result.update(extra)
+        results.append(result)
+
+        if rank == 0:
+            print(f"  {comm_type} gs={group_size} seq={seq_len:>6}: "
+                  f"measured_total={measured_total_ms:.4f}ms, predicted={predicted_ms:.4f}ms, "
+                  f"error={error_pct:.1f}%")
+
+    return results
+
+
+def validate_cost_model_compute(
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+    num_layers: int,
+    costmodel,
+    seq_lengths: List[int],
+    warmup: int = 5,
+    iters: int = 20,
+    use_varlen: bool = True,
+    device: str = "cuda",
+    dtype=torch.bfloat16,
+) -> List[Dict]:
+    """
+    Measure actual attention compute time per layer and compare with CostModel.
+    """
+    from galvatron.models.varlen_llama_hf.adacpsp_solver import ParallelStrategy
+
+    results = []
+    strategy = ParallelStrategy("ulysses", 1)  # sp=1 for pure compute
+
+    for seq_len in seq_lengths:
+        try:
+            if use_varlen and flash_attn_varlen_func is not None:
+                q = torch.randn(seq_len, n_heads, head_dim, dtype=dtype, device=device)
+                k = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                v = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                cu = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
+                for _ in range(warmup):
+                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
+                torch.cuda.synchronize()
+                se = torch.cuda.Event(enable_timing=True)
+                ee = torch.cuda.Event(enable_timing=True)
+                se.record()
+                for _ in range(iters):
+                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
+                ee.record()
+                torch.cuda.synchronize()
+                measured_per_layer = se.elapsed_time(ee) / iters
+                del q, k, v, cu
+            else:
+                q = torch.randn(1, seq_len, n_heads, head_dim, dtype=dtype, device=device)
+                k = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                v = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+                for _ in range(warmup):
+                    flash_attn_func(q, k, v, causal=True)
+                torch.cuda.synchronize()
+                se = torch.cuda.Event(enable_timing=True)
+                ee = torch.cuda.Event(enable_timing=True)
+                se.record()
+                for _ in range(iters):
+                    flash_attn_func(q, k, v, causal=True)
+                ee.record()
+                torch.cuda.synchronize()
+                measured_per_layer = se.elapsed_time(ee) / iters
+                del q, k, v
+
+            torch.cuda.empty_cache()
+
+            predicted_per_layer = costmodel.compute_time_single(seq_len, strategy)
+            error_pct = abs(predicted_per_layer - measured_per_layer) / measured_per_layer * 100 \
+                if measured_per_layer > 0 else 0
+
+            results.append({
+                "seq_len": seq_len,
+                "measured_per_layer_ms": measured_per_layer,
+                "predicted_per_layer_ms": predicted_per_layer,
+                "error_pct": error_pct,
+            })
+            print(f"  seq={seq_len:>6}: measured={measured_per_layer:.4f}ms/layer, "
+                  f"predicted={predicted_per_layer:.4f}ms/layer, error={error_pct:.1f}%")
+
+        except RuntimeError as ex:
+            if "out of memory" in str(ex).lower():
+                torch.cuda.empty_cache()
+                print(f"  seq={seq_len}: OOM")
+                break
+            raise
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PART 4: Memory Model Validation
+# ═══════════════════════════════════════════════════════════════════════
+
+def validate_memory_model(
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+    hidden_size: int,
+    num_layers: int,
+    costmodel,
+    seq_lengths: List[int],
+    device: str = "cuda",
+    dtype=torch.bfloat16,
+) -> List[Dict]:
+    """
+    Validate memory model by measuring per-layer activation and scaling to total.
+    
+    The CostModel's activation_size returns TOTAL activation across all layers.
+    We measure per-layer activation (attention + FFN) and multiply by num_layers.
+    """
+    bpe = 2 if dtype == torch.bfloat16 else 4
+    intermediate_size = int(hidden_size * 2.6875)  # LLaMA: 11008 for h=4096
+    
+    results = []
+    
+    print(f"  Model config: hidden={hidden_size}, heads={n_heads}, kv_heads={n_kv_heads}, "
+          f"head_dim={head_dim}, layers={num_layers}")
+    print(f"  CostModel: act_per_token = {costmodel.act_per_token:.4f} MB/token (all layers)")
+    print(f"  CostModel: act_per_token_per_layer = {costmodel.act_per_token / num_layers:.4f} MB/token")
+    
+    # Theoretical per-layer per-token activation (bytes)
+    per_layer_per_token_bytes = (
+        hidden_size * bpe +           # input hidden state
+        3 * hidden_size * bpe +       # Q, K, V projections
+        hidden_size * bpe +           # attention output 
+        hidden_size * bpe +           # O projection output
+        2 * intermediate_size * bpe + # gate + up projection
+        intermediate_size * bpe +     # activated (gate * up)
+        2 * hidden_size * bpe         # two layernorm inputs
+    )
+    per_layer_per_token_mb = per_layer_per_token_bytes / 1024 / 1024
+    theoretical_total_per_token = per_layer_per_token_mb * num_layers
+    print(f"  Theoretical: {per_layer_per_token_mb:.4f} MB/token/layer, "
+          f"{theoretical_total_per_token:.4f} MB/token total")
+    
+    for seq_len in seq_lengths:
+        try:
+            # ─── Measure attention peak activation ───
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            before_attn = torch.cuda.memory_allocated() / 1024 / 1024
+            
+            q = torch.randn(seq_len, n_heads, head_dim, dtype=dtype, device=device)
+            k = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+            v = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+            
+            if flash_attn_varlen_func is not None:
+                cu = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
+                out = flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
+            elif flash_attn_func is not None:
+                q2 = q.unsqueeze(0)
+                k2 = k.unsqueeze(0)
+                v2 = v.unsqueeze(0)
+                out = flash_attn_func(q2, k2, v2, causal=True)
+            
+            torch.cuda.synchronize()
+            peak_attn = torch.cuda.max_memory_allocated() / 1024 / 1024
+            attn_peak_mb = peak_attn - before_attn
+            del q, k, v, out
+            torch.cuda.empty_cache()
+            
+            # ─── Measure FFN peak activation ───
+            torch.cuda.reset_peak_memory_stats()
+            before_ffn = torch.cuda.memory_allocated() / 1024 / 1024
+            
+            x = torch.randn(seq_len, hidden_size, dtype=dtype, device=device)
+            gate_w = torch.randn(intermediate_size, hidden_size, dtype=dtype, device=device)
+            up_w = torch.randn(intermediate_size, hidden_size, dtype=dtype, device=device)
+            down_w = torch.randn(hidden_size, intermediate_size, dtype=dtype, device=device)
+            
+            gate_out = torch.nn.functional.linear(x, gate_w)
+            up_out = torch.nn.functional.linear(x, up_w)
+            activated = torch.nn.functional.silu(gate_out) * up_out
+            ffn_out = torch.nn.functional.linear(activated, down_w)
+            
+            torch.cuda.synchronize()
+            peak_ffn = torch.cuda.max_memory_allocated() / 1024 / 1024
+            ffn_peak_mb = peak_ffn - before_ffn
+            del x, gate_w, up_w, down_w, gate_out, up_out, activated, ffn_out
+            torch.cuda.empty_cache()
+            
+            # ─── Estimate total ───
+            # attn_peak includes QKV + output + flash internal buffers
+            # ffn_peak includes weight tensors — subtract them
+            weight_size_mb = (intermediate_size * hidden_size * 3) * bpe / 1024 / 1024
+            ffn_activation_mb = max(0, ffn_peak_mb - weight_size_mb)
+            
+            per_layer_measured_mb = attn_peak_mb + ffn_activation_mb
+            total_measured_mb = per_layer_measured_mb * num_layers
+            
+            predicted_total_mb = costmodel.activation_size(seq_len, parallel_size=1)
+            
+            error_pct = abs(predicted_total_mb - total_measured_mb) / total_measured_mb * 100 \
+                if total_measured_mb > 0 else 0
+            
+            per_token_measured = per_layer_measured_mb / seq_len * num_layers
+            per_token_predicted = costmodel.act_per_token
+            
+            results.append({
+                "seq_len": seq_len,
+                "attn_peak_MB": attn_peak_mb,
+                "ffn_activation_MB": ffn_activation_mb,
+                "per_layer_MB": per_layer_measured_mb,
+                "total_measured_MB": total_measured_mb,
+                "total_predicted_MB": predicted_total_mb,
+                "per_token_measured": per_token_measured,
+                "per_token_predicted": per_token_predicted,
+                "error_pct": error_pct,
+            })
+            print(f"  seq={seq_len:>6}: per_layer={per_layer_measured_mb:.1f}MB "
+                  f"(attn={attn_peak_mb:.1f} + ffn={ffn_activation_mb:.1f}), "
+                  f"total_est={total_measured_mb:.1f}MB vs predicted={predicted_total_mb:.1f}MB, "
+                  f"error={error_pct:.1f}%")
+
+        except RuntimeError as ex:
+            if "out of memory" in str(ex).lower():
+                torch.cuda.empty_cache()
+                print(f"  seq={seq_len}: OOM")
+                break
+            raise
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PART 5: Plotting utilities
+# ═══════════════════════════════════════════════════════════════════════
+
+def plot_all(
+    attn_data=None, attn_segments=None, breakpoints=None,
+    comm_results=None, comm_fits=None,
+    compute_val=None, comm_val=None, memory_val=None,
+    save_dir="./configs",
+):
+    """Generate comprehensive plots."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[Plot] matplotlib not available")
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ─── Plot 1: Attention profiling with auto breakpoints ───
+    if attn_data and attn_segments:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+        # 1a: raw data + fitted curves
+        ax = axes[0, 0]
+        xs = np.array([d[0] for d in attn_data])
+        ts = np.array([d[1] for d in attn_data])
+        ax.scatter(xs, ts, s=3, alpha=0.5, label="measured", color="gray")
+        colors = ["blue", "green", "orange", "red", "purple", "cyan"]
+        for i, seg in enumerate(attn_segments):
+            lo, hi = seg["range"]
+            x_fit = np.linspace(lo, hi, 200)
+            y_fit = seg["a"] * x_fit**2 + seg["b"] * x_fit + seg["c"]
+            ax.plot(x_fit, y_fit, color=colors[i % len(colors)], linewidth=2,
+                    label=f'[{lo},{hi}] R²={seg["r_squared"]:.5f}')
+        if breakpoints:
+            for bp in breakpoints:
+                ax.axvline(x=bp, color="red", linestyle="--", alpha=0.5)
+        ax.set_xlabel("Sequence Length")
+        ax.set_ylabel("Time (ms)")
+        ax.set_title("Attention: Auto-Segmented Piecewise Quadratic Fit")
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        # 1b: time/x² to show kernel switches
+        ax = axes[0, 1]
+        r = ts / (xs ** 2)
+        ax.plot(xs, r * 1e9, color="blue", linewidth=0.5, alpha=0.7)
+        ax.scatter(xs, r * 1e9, s=2, color="blue")
+        if breakpoints:
+            for bp in breakpoints:
+                ax.axvline(x=bp, color="red", linestyle="--", alpha=0.7, label=f"bp={bp}")
+        ax.set_xlabel("Sequence Length")
+        ax.set_ylabel("time / x² (×10⁹)")
+        ax.set_title("Normalized Metric: time/x² (kernel switch indicator)")
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        # 1c: R² per segment
+        ax = axes[1, 0]
+        names = [f'[{s["range"][0]},{s["range"][1]}]' for s in attn_segments]
+        r2s = [s["r_squared"] for s in attn_segments]
+        bars = ax.bar(range(len(names)), r2s, color=[colors[i % len(colors)] for i in range(len(names))])
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels(names, fontsize=7, rotation=15)
+        ax.axhline(y=0.999, color="r", linestyle="--", label="R²=0.999")
+        ax.set_ylim(min(0.99, min(r2s) - 0.005) if r2s else 0.9, 1.002)
+        ax.set_title("Fitting Quality per Segment")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        for bar, r2 in zip(bars, r2s):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.0005,
+                    f"{r2:.5f}", ha="center", fontsize=7)
+
+        # 1d: residuals
+        ax = axes[1, 1]
+        for i, seg in enumerate(attn_segments):
+            lo, hi = seg["range"]
+            mask = (xs >= lo) & (xs <= hi)
+            seg_x = xs[mask]
+            seg_t = ts[mask]
+            y_pred = seg["a"] * seg_x**2 + seg["b"] * seg_x + seg["c"]
+            residuals = seg_t - y_pred
+            ax.scatter(seg_x, residuals, s=3, color=colors[i % len(colors)],
+                       label=f'[{lo},{hi}]', alpha=0.6)
+        ax.axhline(y=0, color="black", linewidth=0.5)
+        ax.set_xlabel("Sequence Length")
+        ax.set_ylabel("Residual (ms)")
+        ax.set_title("Fitting Residuals")
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        path = os.path.join(save_dir, f"attention_autofit_{timestamp}.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"[Plot] Attention plot saved: {path}")
+        plt.close()
+
+    # ─── Plot 2: Communication linear fit ───
+    if comm_results and comm_fits:
+        n_plots = len(comm_results)
+        fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 5))
+        if n_plots == 1:
+            axes = [axes]
+        
+        for idx, (key, data) in enumerate(comm_results.items()):
+            ax = axes[idx]
+            xs = np.array([d["msg_size_MB"] for d in data])
+            ys = np.array([d["time_ms"] for d in data])
+            ax.scatter(xs, ys, s=15, alpha=0.7, label="measured")
+            
+            if key in comm_fits:
+                fit = comm_fits[key]
+                x_fit = np.linspace(0, xs.max(), 200)
+                y_fit = fit["alpha_ms_per_MB"] * x_fit + fit["beta_ms"]
+                ax.plot(x_fit, y_fit, "r--", linewidth=2,
+                        label=f'fit: t={fit["alpha_ms_per_MB"]:.4e}*x + {fit["beta_ms"]:.4f}\n'
+                              f'R²={fit["r_squared"]:.5f}, BW={fit["effective_bandwidth_GBs"]:.1f}GB/s')
+            
+            ax.set_xlabel("Message Size (MB)")
+            ax.set_ylabel("Time (ms)")
+            ax.set_title(f"{key}")
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        path = os.path.join(save_dir, f"comm_linear_fit_{timestamp}.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        print(f"[Plot] Comm plot saved: {path}")
+        plt.close()
+
+    # ─── Plot 3: CostModel validation ───
+    if compute_val or comm_val:
+        vals = []
+        if compute_val:
+            vals.append(("Compute (attention)", compute_val, "seq_len",
+                         "measured_per_layer_ms", "predicted_per_layer_ms"))
+        if comm_val:
+            for item in comm_val:
+                label = f'{item["comm_type"]} gs={item.get("group_size", "?")}'
+                vals.append((label, [item], "seq_len", "measured_ms", "predicted_ms"))
+        
+        # Flatten comm_val if it's a list of lists
+        if comm_val and isinstance(comm_val[0], dict):
+            # Group by (comm_type, group_size)
+            from collections import defaultdict
+            groups = defaultdict(list)
+            for item in comm_val:
+                key = f'{item["comm_type"]} gs={item["group_size"]}'
+                groups[key].append(item)
+            vals = []
+            if compute_val:
+                vals.append(("Compute (attention)", compute_val, "seq_len",
+                             "measured_per_layer_ms", "predicted_per_layer_ms"))
+            for key, items in groups.items():
+                vals.append((key, items, "seq_len", "measured_ms", "predicted_ms"))
+
+        n = len(vals)
+        if n > 0:
+            cols = min(n, 3)
+            rows = (n + cols - 1) // cols
+            fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
+            if n == 1:
+                axes = np.array([axes])
+            axes = np.array(axes).flatten()
+
+            for i, (title, data, x_key, meas_key, pred_key) in enumerate(vals):
+                ax = axes[i]
+                xs = [d[x_key] for d in data]
+                ms = [d[meas_key] for d in data]
+                ps = [d[pred_key] for d in data]
+                ax.plot(xs, ms, "o-", label="measured", markersize=4)
+                ax.plot(xs, ps, "s--", label="predicted", markersize=4)
+                ax.set_xlabel("Sequence Length")
+                ax.set_ylabel("Time (ms)")
+                ax.set_title(title)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+
+            for i in range(n, len(axes)):
+                axes[i].set_visible(False)
+
+            plt.tight_layout()
+            path = os.path.join(save_dir, f"costmodel_validation_{timestamp}.png")
+            plt.savefig(path, dpi=150, bbox_inches="tight")
+            print(f"[Plot] Validation plot saved: {path}")
+            plt.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(description="AdaCPSP Profiling & Validation Suite")
+    parser.add_argument("--mode", type=str, default="all",
+                        choices=["attention", "comm", "validate_cost_model",
+                                 "validate_memory", "all"],
+                        help="Which profiling/validation to run")
+    # Model config
+    parser.add_argument("--n_heads", type=int, default=32)
+    parser.add_argument("--n_kv_heads", type=int, default=32)
+    parser.add_argument("--head_dim", type=int, default=128)
+    parser.add_argument("--hidden_size", type=int, default=4096)
+    parser.add_argument("--num_layers", type=int, default=32)
+    parser.add_argument("--param_size_B", type=float, default=7.0)
+    # Profiling
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iters", type=int, default=30)
+    parser.add_argument("--attn_step", type=int, default=64,
+                        help="Dense attention profiling step size")
+    parser.add_argument("--attn_max", type=int, default=32768,
+                        help="Max seq_len for attention profiling")
+    parser.add_argument("--use_varlen", action="store_true", default=True)
+    # Breakpoint detection
+    parser.add_argument("--bp_window", type=int, default=5,
+                        help="Sliding window for breakpoint detection")
+    parser.add_argument("--bp_threshold", type=float, default=3.0,
+                        help="Threshold factor for breakpoint detection")
+    parser.add_argument("--bp_min_segment", type=int, default=8,
+                        help="Min data points per segment")
+    parser.add_argument("--max_segments", type=int, default=5,
+                        help="Max number of segments after consolidation")
+    parser.add_argument("--min_r2", type=float, default=0.995,
+                        help="Min R² threshold for consolidation")
+    # Output
+    parser.add_argument("--save_dir", type=str, default="./configs")
+    parser.add_argument("--model_name", type=str, default="llama-7b")
+    # Existing profile files (for validation modes)
+    parser.add_argument("--attn_json", type=str, default=None,
+                        help="Existing attention profile JSON (skip re-profiling)")
+    parser.add_argument("--alltoall_json", type=str, default=None)
+    parser.add_argument("--p2p_json", type=str, default=None)
+    parser.add_argument("--profile_json", type=str, default=None,
+                        help="Unified profile JSON from previous run (loads attn segments + comm linear fits)")
+    # Dataset
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="Dataset name for varlen test (wikipedia/common_crawl/github)")
+    parser.add_argument("--dataset_path", type=str,
+                        default="/home/pkuhetu/lqs/flexsp/Hetu-Galvatron/galvatron/datasets",
+                        help="Path to dataset directory")
+    # Distributed
+    parser.add_argument("--local-rank", "--local_rank", type=int, default=-1)
+    args, _ = parser.parse_known_args()
+
+    os.makedirs(args.save_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    is_distributed = args.mode in ["comm", "validate_cost_model", "validate_memory", "all"]
+    rank = 0
+    world_size = 1
+
+    if is_distributed:
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = rank % torch.cuda.device_count()
+        torch.cuda.set_device(local_rank)
+    else:
+        torch.cuda.set_device(0)
+
+    if rank == 0:
+        print("=" * 80)
+        print(" AdaCPSP Comprehensive Profiling & Validation Suite")
+        print("=" * 80)
+        print(f" Mode: {args.mode}")
+        print(f" Model: {args.model_name} (h={args.hidden_size}, heads={args.n_heads}, "
+              f"kv_heads={args.n_kv_heads}, layers={args.num_layers})")
+        if is_distributed:
+            print(f" World size: {world_size}")
+        print("=" * 80)
+
+    all_output = {"timestamp": timestamp, "model_name": args.model_name}
+    attn_data = None
+    attn_segments = None
+    breakpoints = None
+    comm_results_all = {}
+    comm_fits_all = {}
+    compute_val = None
+    comm_val_all = []
+    memory_val = None
+
+    # ── Auto-detect best profile JSONs from configs dir if not specified ──
+    if args.mode in ["validate_cost_model", "all"] and not args.profile_json:
+        import glob as _glob
+        profile_files = sorted(_glob.glob(os.path.join(args.save_dir, "profile_validate_*.json")))
+        best_attn_json = None
+        best_comm_json = None
+        for pf in reversed(profile_files):  # newest first
+            try:
+                with open(pf) as _f:
+                    _d = json.load(_f)
+                if best_attn_json is None and "attention" in _d and "segments" in _d.get("attention", {}):
+                    best_attn_json = pf
+                if best_comm_json is None and "communication" in _d and "linear_fits" in _d.get("communication", {}):
+                    best_comm_json = pf
+            except Exception:
+                pass
+        if rank == 0:
+            if best_attn_json:
+                print(f"  Auto-detected attention profile: {best_attn_json}")
+            if best_comm_json:
+                print(f"  Auto-detected comm profile: {best_comm_json}")
+        # Store for later use (will be loaded in Part 3)
+        args._auto_attn_json = best_attn_json
+        args._auto_comm_json = best_comm_json
+
+    # ═══ PART 1: Attention Profiling ═══
+    if args.mode in ["attention", "all"]:
+        if rank == 0:
+            print(f"\n{'='*80}")
+            print(" PART 1: Attention Profiling with Auto Breakpoint Detection")
+            print(f"{'='*80}")
+
+            attn_data = profile_attention_dense(
+                args.n_heads, args.n_kv_heads, args.head_dim,
+                seq_range=(64, args.attn_max), step=args.attn_step,
+                warmup=args.warmup, iters=args.iters,
+                use_varlen=args.use_varlen,
+            )
+
+            if attn_data:
+                print(f"\n--- Auto Breakpoint Detection ---")
+                raw_breakpoints = detect_breakpoints(
+                    attn_data,
+                    window=args.bp_window,
+                    threshold_factor=args.bp_threshold,
+                    min_segment_points=args.bp_min_segment,
+                )
+
+                print(f"\n--- Breakpoint Consolidation (target ≤{args.max_segments} segments) ---")
+                breakpoints = consolidate_breakpoints(
+                    attn_data, raw_breakpoints,
+                    max_segments=args.max_segments,
+                    min_r2=args.min_r2,
+                )
+
+                print(f"\n--- Piecewise Quadratic Fitting (consolidated) ---")
+                attn_segments = fit_segments_quadratic(attn_data, breakpoints)
+
+                all_output["attention"] = {
+                    "raw_breakpoints": raw_breakpoints,
+                    "consolidated_breakpoints": breakpoints,
+                    "segments": attn_segments,
+                    "raw_data": [(int(x), float(t)) for x, t in attn_data],
+                    "config": {
+                        "n_heads": args.n_heads,
+                        "n_kv_heads": args.n_kv_heads,
+                        "head_dim": args.head_dim,
+                        "hidden_size": args.hidden_size,
+                        "step": args.attn_step,
+                        "use_varlen": args.use_varlen,
+                    },
+                }
+
+        if is_distributed:
+            import torch.distributed as dist
+            dist.barrier()
+
+    # ═══ PART 2: Communication Profiling ═══
+    if args.mode in ["comm", "all"] and is_distributed:
+        import torch.distributed as dist
+
+        if rank == 0:
+            print(f"\n{'='*80}")
+            print(" PART 2: Communication Profiling with Linear Fitting")
+            print(f"{'='*80}")
+
+        for gs in [2, 4, 8]:
+            if gs > world_size:
+                continue
+
+            num_groups = world_size // gs
+            my_group = None
+            for g in range(num_groups):
+                ranks = list(range(g * gs, (g + 1) * gs))
+                group = dist.new_group(ranks=ranks)
+                if rank in ranks:
+                    my_group = group
+
+            for comm_type in ["alltoall", "p2p"]:
+                key = f"{comm_type}_gs{gs}"
+                if rank == 0:
+                    print(f"\n--- {comm_type} group_size={gs} ---")
+
+                results = profile_comm_linear(
+                    comm_type, my_group, gs,
+                    warmup=args.warmup, iters=max(args.iters, 50),
+                )
+                comm_results_all[key] = results
+
+                if rank == 0:
+                    fit = fit_comm_linear(results)
+                    comm_fits_all[key] = fit
+                    print(f"  → Linear fit: time = {fit['alpha_ms_per_MB']:.6e} * msg_MB + {fit['beta_ms']:.4f}")
+                    print(f"    R² = {fit['r_squared']:.6f}, Effective BW = {fit['effective_bandwidth_GBs']:.2f} GB/s")
+                    print(f"    Latency = {fit['beta_ms']:.4f} ms")
+
+            dist.barrier()
+
+        if rank == 0:
+            all_output["communication"] = {
+                "results": {k: v for k, v in comm_results_all.items()},
+                "linear_fits": comm_fits_all,
+            }
+
+    # ═══ PART 3: CostModel Validation ═══
+    if args.mode in ["validate_cost_model", "all"]:
+        if rank == 0:
+            print(f"\n{'='*80}")
+            print(" PART 3: CostModel Validation (Predicted vs Measured)")
+            print(f"{'='*80}")
+
+        # Build cost model from existing or fresh profile data
+        sys.path.insert(0, os.path.dirname(__file__))
+        from adacpsp_solver import AdaCPSPCostModel, ParallelStrategy
+
+        # ── Load profiling data (from this run, saved JSON, or defaults) ──
+        piecewise = None
+        alltoall_linear = {}
+        p2p_linear = {}
+        a2a_bw = None
+        p2p_bw = None
+
+        # Helper to load from a profile JSON
+        def _load_from_json(path, label=""):
+            nonlocal piecewise, alltoall_linear, p2p_linear
+            with open(path) as f:
+                prev_data = json.load(f)
+            if rank == 0:
+                print(f"  Loading {label} from: {path}")
+            if piecewise is None and "attention" in prev_data and "segments" in prev_data["attention"]:
+                piecewise = prev_data["attention"]["segments"]
+            if not alltoall_linear and "communication" in prev_data and "linear_fits" in prev_data["communication"]:
+                for key, fit in prev_data["communication"]["linear_fits"].items():
+                    gs = int(key.split("gs")[1])
+                    entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
+                    if key.startswith("alltoall"):
+                        alltoall_linear[gs] = entry
+                    elif key.startswith("p2p"):
+                        p2p_linear[gs] = entry
+
+        # Source 1: explicitly specified unified profile JSON
+        if args.profile_json and os.path.exists(args.profile_json):
+            _load_from_json(args.profile_json, "unified profile")
+
+        # Source 1b: auto-detected profile JSONs (separate attn + comm)
+        if piecewise is None and hasattr(args, '_auto_attn_json') and args._auto_attn_json:
+            _load_from_json(args._auto_attn_json, "auto-detected attention")
+        if not alltoall_linear and hasattr(args, '_auto_comm_json') and args._auto_comm_json:
+            _load_from_json(args._auto_comm_json, "auto-detected comm")
+
+        # Source 2: separate JSON files
+        if piecewise is None and args.attn_json and os.path.exists(args.attn_json):
+            with open(args.attn_json) as f:
+                attn_prof = json.load(f)
+            piecewise = []
+            if "attention" in attn_prof and "segments" in attn_prof["attention"]:
+                piecewise = attn_prof["attention"]["segments"]
+            else:
+                for seg_name, coeff in attn_prof.get("coefficients", {}).items():
+                    if coeff:
+                        piecewise.append({"range": coeff["seq_range"], "a": coeff["a"],
+                                          "b": coeff["b"], "c": coeff["c"]})
+
+        if not alltoall_linear and args.alltoall_json and os.path.exists(args.alltoall_json):
+            with open(args.alltoall_json) as f:
+                a2a_bw = {int(k): v for k, v in json.load(f)["bandwidth_dict_GBs"].items()}
+
+        if not p2p_linear and args.p2p_json and os.path.exists(args.p2p_json):
+            with open(args.p2p_json) as f:
+                p2p_bw = {int(k): v for k, v in json.load(f)["bandwidth_dict_GBs"].items()}
+
+        # Source 3: from this run's Part 1/2
+        if piecewise is None and attn_segments:
+            piecewise = attn_segments
+
+        if not alltoall_linear and comm_fits_all:
+            for key, fit in comm_fits_all.items():
+                gs = int(key.split("gs")[1])
+                entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
+                if key.startswith("alltoall"):
+                    alltoall_linear[gs] = entry
+                elif key.startswith("p2p"):
+                    p2p_linear[gs] = entry
+
+        if rank == 0:
+            if alltoall_linear:
+                print(f"  Using linear fit for alltoall: {sorted(alltoall_linear.keys())}")
+            else:
+                print(f"  Using bandwidth model for alltoall (no linear fit)")
+            if p2p_linear:
+                print(f"  Using linear fit for p2p: {sorted(p2p_linear.keys())}")
+            else:
+                print(f"  Using bandwidth model for p2p (no linear fit)")
+
+        costmodel = AdaCPSPCostModel(
+            cluster_size=world_size,
+            hidden_size=args.hidden_size,
+            layer_num=args.num_layers,
+            param_size_B=args.param_size_B,
+            piecewise_compute_coeffs=piecewise,
+            alltoall_bandwidth_dict_gbs=a2a_bw,
+            p2p_bandwidth_dict_gbs=p2p_bw,
+            alltoall_linear_fit=alltoall_linear if alltoall_linear else None,
+            p2p_linear_fit=p2p_linear if p2p_linear else None,
+        )
+
+        # 3a: Compute validation
+        if rank == 0:
+            print(f"\n--- 3a: Compute Time Validation ---")
+            test_seqs = [512, 1024, 2048, 4096, 8192, 16384, 32768]
+            test_seqs = [s for s in test_seqs if s <= args.attn_max]
+            compute_val = validate_cost_model_compute(
+                args.n_heads, args.n_kv_heads, args.head_dim,
+                args.num_layers, costmodel, test_seqs,
+                warmup=args.warmup, iters=args.iters,
+                use_varlen=args.use_varlen,
+            )
+            all_output["compute_validation"] = compute_val
+
+        # 3b: Communication validation
+        if is_distributed:
+            import torch.distributed as dist
+
+            for gs in [2, 4, 8]:
+                if gs > world_size:
+                    continue
+                num_groups = world_size // gs
+                my_group = None
+                for g in range(num_groups):
+                    ranks_list = list(range(g * gs, (g + 1) * gs))
+                    group = dist.new_group(ranks=ranks_list)
+                    if rank in ranks_list:
+                        my_group = group
+
+                for comm_type in ["alltoall", "p2p"]:
+                    if rank == 0:
+                        print(f"\n--- 3b: {comm_type} gs={gs} Comm Validation ---")
+
+                    test_seqs = [2048, 4096, 8192, 16384, 32768]
+                    test_seqs = [s for s in test_seqs if s >= gs * 2]
+
+                    val_results = validate_cost_model_comm(
+                        my_group, gs, comm_type,
+                        args.hidden_size, args.n_heads, args.n_kv_heads,
+                        args.num_layers, test_seqs, costmodel,
+                        warmup=args.warmup, iters=args.iters,
+                    )
+                    comm_val_all.extend(val_results)
+
+                dist.barrier()
+
+            if rank == 0:
+                all_output["comm_validation"] = comm_val_all
+
+    # ═══ PART 4: Memory Validation ═══
+    if args.mode in ["validate_memory", "all"]:
+        if rank == 0:
+            print(f"\n{'='*80}")
+            print(" PART 4: Memory Model Validation")
+            print(f"{'='*80}")
+
+            # Need costmodel for memory validation
+            if 'costmodel' not in dir():
+                sys.path.insert(0, os.path.dirname(__file__))
+                from adacpsp_solver import AdaCPSPCostModel
+                costmodel = AdaCPSPCostModel(
+                    cluster_size=world_size,
+                    hidden_size=args.hidden_size,
+                    layer_num=args.num_layers,
+                    param_size_B=args.param_size_B,
+                )
+
+            test_seqs = [1024, 2048, 4096, 8192, 16384]
+            memory_val = validate_memory_model(
+                args.n_heads, args.n_kv_heads, args.head_dim,
+                args.hidden_size, args.num_layers,
+                costmodel, test_seqs,
+            )
+            all_output["memory_validation"] = memory_val
+
+    # ═══ Save all results ═══
+    if rank == 0:
+        save_path = os.path.join(args.save_dir, f"profile_validate_{args.model_name}_{timestamp}.json")
+        with open(save_path, "w") as f:
+            json.dump(all_output, f, indent=2, default=str)
+        print(f"\n[Save] Full results: {save_path}")
+
+        # Generate plots
+        plot_all(
+            attn_data=attn_data,
+            attn_segments=attn_segments,
+            breakpoints=breakpoints,
+            comm_results=comm_results_all if comm_results_all else None,
+            comm_fits=comm_fits_all if comm_fits_all else None,
+            compute_val=compute_val,
+            comm_val=comm_val_all if comm_val_all else None,
+            memory_val=memory_val,
+            save_dir=args.save_dir,
+        )
+
+        # ─── Summary ───
+        print(f"\n{'='*80}")
+        print(" SUMMARY")
+        print(f"{'='*80}")
+
+        if attn_segments:
+            print(f"\n Attention (auto {len(breakpoints)} breakpoints → {len(attn_segments)} segments):")
+            for seg in attn_segments:
+                print(f"   [{seg['range'][0]:>6}, {seg['range'][1]:>6}]: "
+                      f"a={seg['a']:.6e}, b={seg['b']:.6e}, c={seg['c']:.4f}, "
+                      f"R²={seg['r_squared']:.6f}")
+
+        if comm_fits_all:
+            print(f"\n Communication (linear fit: time = α*msg_MB + β):")
+            for key, fit in comm_fits_all.items():
+                print(f"   {key:>15}: α={fit['alpha_ms_per_MB']:.6e}, β={fit['beta_ms']:.4f}ms, "
+                      f"R²={fit['r_squared']:.5f}, BW={fit['effective_bandwidth_GBs']:.1f}GB/s")
+
+        if compute_val:
+            errs = [v["error_pct"] for v in compute_val]
+            print(f"\n Compute model error: mean={np.mean(errs):.1f}%, max={np.max(errs):.1f}%")
+
+        if comm_val_all:
+            errs = [v["error_pct"] for v in comm_val_all]
+            print(f" Comm model error: mean={np.mean(errs):.1f}%, max={np.max(errs):.1f}%")
+
+        if memory_val:
+            errs = [v["error_pct"] for v in memory_val]
+            print(f" Memory model error: mean={np.mean(errs):.1f}%, max={np.max(errs):.1f}%")
+
+        print(f"\n{'='*80}")
+
+    if is_distributed:
+        import torch.distributed as dist
+        dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
+
