@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.distributed
 from torch.utils.data import Dataset
@@ -24,7 +25,24 @@ class DataLoaderForVarlenLlama(Dataset):
         else:
             text_length = []
             tmp = 0
-            with open(f"/home/pkuhetu/lqs/flexsp/Hetu-Galvatron/galvatron/datasets/{args.dataset}.txt", "r") as f:#datasets来源还需要修改
+            # Search for dataset in multiple locations
+            _script_dir = os.path.dirname(os.path.abspath(__file__))
+            _dataset_search_paths = [
+                getattr(args, 'dataset_dir', ''),
+                os.path.join(_script_dir, '..', '..', '..', 'varlen_datasets'),
+                os.path.join(_script_dir, '..', '..', '..', '..', 'varlen_datasets'),
+                "/home/pkuhetu/lqs/flexsp/Hetu-Galvatron/galvatron/datasets",
+            ]
+            _dataset_file = None
+            for _dp in _dataset_search_paths:
+                _candidate = os.path.join(_dp, f"{args.dataset}.txt")
+                if os.path.exists(_candidate):
+                    _dataset_file = _candidate
+                    break
+            if _dataset_file is None:
+                raise FileNotFoundError(
+                    f"Dataset '{args.dataset}.txt' not found in: {_dataset_search_paths}")
+            with open(_dataset_file, "r") as f:
                 for i, line in enumerate(tqdm(f, total=self.dataset_size, desc="Loading text lengths")):
                     if i >= self.dataset_size + tmp:
                         break

@@ -12,10 +12,12 @@ path_dict = {
     "llama-13b": "llama-13b.json",
     "llama-30b": "llama-30b.json",
     "llama2-70b": "llama2-70b.json",
-    "qwen2.5-7b": "qwen2.5-7b.json",
-    "qwen2.5-72b": "qwen2.5-72b.json",
     "qwen2.5-1.5b": "qwen2.5-1.5b.json",
     "qwen2.5-3b": "qwen2.5-3b.json",
+    "qwen2.5-7b": "qwen2.5-7b.json",
+    "qwen2.5-14b": "qwen2.5-14b.json",
+    "qwen2.5-32b": "qwen2.5-32b.json",
+    "qwen2.5-72b": "qwen2.5-72b.json",
 }
 
 

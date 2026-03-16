@@ -1,0 +1,602 @@
+{
+  "total": 72,
+  "models": [
+    "qwen2.5-7b",
+    "qwen2.5-14b",
+    "qwen2.5-32b"
+  ],
+  "seq_lengths": [
+    "128k",
+    "256k",
+    "384k",
+    "512k"
+  ],
+  "strategies": [
+    "flexsp",
+    "adacpsp_ur",
+    "adacpsp_full"
+  ],
+  "datasets": [
+    "common_crawl",
+    "github"
+  ],
+  "gbs": 512,
+  "experiments": [
+    {
+      "name": "qwen2.5-7b_common_crawl_128k_flexsp",
+      "log": "logs/qwen2.5-7b_common_crawl_128k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_github_128k_flexsp",
+      "log": "logs/qwen2.5-7b_github_128k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_128k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_common_crawl_128k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_github_128k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_github_128k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_128k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_common_crawl_128k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_github_128k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_github_128k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_256k_flexsp",
+      "log": "logs/qwen2.5-7b_common_crawl_256k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_github_256k_flexsp",
+      "log": "logs/qwen2.5-7b_github_256k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_256k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_common_crawl_256k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_github_256k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_github_256k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_256k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_common_crawl_256k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_github_256k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_github_256k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_384k_flexsp",
+      "log": "logs/qwen2.5-7b_common_crawl_384k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_github_384k_flexsp",
+      "log": "logs/qwen2.5-7b_github_384k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_384k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_common_crawl_384k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_github_384k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_github_384k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_384k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_common_crawl_384k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_github_384k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_github_384k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_512k_flexsp",
+      "log": "logs/qwen2.5-7b_common_crawl_512k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_github_512k_flexsp",
+      "log": "logs/qwen2.5-7b_github_512k_flexsp.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_512k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_common_crawl_512k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_github_512k_adacpsp_ur",
+      "log": "logs/qwen2.5-7b_github_512k_adacpsp_ur.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-7b_common_crawl_512k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_common_crawl_512k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-7b_github_512k_adacpsp_full",
+      "log": "logs/qwen2.5-7b_github_512k_adacpsp_full.log",
+      "model": "qwen2.5-7b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_128k_flexsp",
+      "log": "logs/qwen2.5-14b_common_crawl_128k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_github_128k_flexsp",
+      "log": "logs/qwen2.5-14b_github_128k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_128k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_common_crawl_128k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_github_128k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_github_128k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_128k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_common_crawl_128k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_github_128k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_github_128k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_256k_flexsp",
+      "log": "logs/qwen2.5-14b_common_crawl_256k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_github_256k_flexsp",
+      "log": "logs/qwen2.5-14b_github_256k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_256k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_common_crawl_256k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_github_256k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_github_256k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_256k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_common_crawl_256k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_github_256k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_github_256k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_384k_flexsp",
+      "log": "logs/qwen2.5-14b_common_crawl_384k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_github_384k_flexsp",
+      "log": "logs/qwen2.5-14b_github_384k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_384k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_common_crawl_384k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_github_384k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_github_384k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_384k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_common_crawl_384k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_github_384k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_github_384k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_512k_flexsp",
+      "log": "logs/qwen2.5-14b_common_crawl_512k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_github_512k_flexsp",
+      "log": "logs/qwen2.5-14b_github_512k_flexsp.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_512k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_common_crawl_512k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_github_512k_adacpsp_ur",
+      "log": "logs/qwen2.5-14b_github_512k_adacpsp_ur.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-14b_common_crawl_512k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_common_crawl_512k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-14b_github_512k_adacpsp_full",
+      "log": "logs/qwen2.5-14b_github_512k_adacpsp_full.log",
+      "model": "qwen2.5-14b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_128k_flexsp",
+      "log": "logs/qwen2.5-32b_common_crawl_128k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_github_128k_flexsp",
+      "log": "logs/qwen2.5-32b_github_128k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_128k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_common_crawl_128k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_github_128k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_github_128k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_128k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_common_crawl_128k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "128k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_github_128k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_github_128k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "128k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_256k_flexsp",
+      "log": "logs/qwen2.5-32b_common_crawl_256k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_github_256k_flexsp",
+      "log": "logs/qwen2.5-32b_github_256k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_256k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_common_crawl_256k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_github_256k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_github_256k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_256k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_common_crawl_256k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "256k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_github_256k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_github_256k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "256k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_384k_flexsp",
+      "log": "logs/qwen2.5-32b_common_crawl_384k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_github_384k_flexsp",
+      "log": "logs/qwen2.5-32b_github_384k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_384k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_common_crawl_384k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_github_384k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_github_384k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_384k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_common_crawl_384k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "384k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_github_384k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_github_384k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "384k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_512k_flexsp",
+      "log": "logs/qwen2.5-32b_common_crawl_512k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_github_512k_flexsp",
+      "log": "logs/qwen2.5-32b_github_512k_flexsp.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "flexsp"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_512k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_common_crawl_512k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_github_512k_adacpsp_ur",
+      "log": "logs/qwen2.5-32b_github_512k_adacpsp_ur.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "adacpsp_ur"
+    },
+    {
+      "name": "qwen2.5-32b_common_crawl_512k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_common_crawl_512k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "common_crawl",
+      "seq_len": "512k",
+      "strategy": "adacpsp_full"
+    },
+    {
+      "name": "qwen2.5-32b_github_512k_adacpsp_full",
+      "log": "logs/qwen2.5-32b_github_512k_adacpsp_full.log",
+      "model": "qwen2.5-32b",
+      "dataset": "github",
+      "seq_len": "512k",
+      "strategy": "adacpsp_full"
+    }
+  ]
+}
