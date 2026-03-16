@@ -368,7 +368,7 @@ class FlashSelfAttentionVarlen(torch.nn.Module):
                 squeezed, squeeze_dim = True, 0
             elif q.size(1) == 1:
                 # [s, 1, h, d] format (direct call with packed sequences)
-                q, k, v = [x.squeeze(1) for x in [q, k, v]]
+            q, k, v = [x.squeeze(1) for x in [q, k, v]]
                 squeezed, squeeze_dim = True, 1
 
         output = flash_attn_unpadded_func(

@@ -200,7 +200,7 @@ def train(args):
         # Final fallback: default cost model
         if costmodel is None:
             costmodel = AdaCPSPCostModel(
-                cluster_size=world_size,
+            cluster_size=world_size,
                 hidden_size=config.hidden_size,
                 layer_num=config.num_hidden_layers,
             )
@@ -244,7 +244,7 @@ def train(args):
     
     # For AdaCPSP: dataloader gives ALL ranks the same data
     # For non-AdaCPSP: use the dp group for distributed loading
-    dataloader_group = model.dp_groups_whole[0].group
+        dataloader_group = model.dp_groups_whole[0].group
     
     # Parse forced strategy (for heterogeneous group testing)
     forced_strategy = None
@@ -252,7 +252,7 @@ def train(args):
         forced_strategy = _parse_forced_strategy(args.adaCPSP_forced_strategy)
         if rank == 0:
             print(f"[AdaCPSP] Forced strategy: {forced_strategy}")
-
+    
     trainloader = distributed_dataloader(
         dataset=DataLoaderForVarlenLlama(args, device),
         global_bsz=args.global_train_batch_size,

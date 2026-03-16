@@ -295,12 +295,12 @@ class AdaCPSPCostModel:
         # When True: uses max(compute_step, comm_step) per ring step
         # When False: uses simple additive model (compute + comm)
         enable_overlap_model: bool = True,
-        # ── Causal correction for Ring Attention ──
-        # When True, non-diagonal ring steps use non-causal compute time
-        # (approximately 2× the quadratic term of causal attention)
-        # This accounts for the fact that only the diagonal step benefits from
-        # causal masking; all other steps compute full (non-causal) attention.
-        ring_causal_correction: bool = True,
+        # ── Deprecated: ring_causal_correction ──
+        # Previously this added 2× FLOPs for non-diagonal ring steps. This was
+        # INCORRECT: zigzag ring attention uses half-Q or half-K for non-diagonal
+        # steps, making all steps have equal FLOPs ≈ S_local²/2.
+        # Kept for backward compatibility but no longer used.
+        ring_causal_correction: bool = False,
         # ── Overlap leakage ──
         # Fraction of the minor term (min(compute, comm)) that "leaks" into
         # the overlapped time: time = max(comp, comm) + leakage * min(comp, comm)
@@ -482,53 +482,22 @@ class AdaCPSPCostModel:
         total = sum(self.compute_time_single(s, strategy) for s in seqlens)
         return total * self.l
 
-    def _noncausal_step_compute(self, seqlen: int, strategy: ParallelStrategy) -> float:
-        """Compute time for a NON-DIAGONAL ring step (non-causal attention).
-        
-        For causal attention profiling: f_causal(x) = a*x² + b*x + c
-        For non-causal (full) attention:  f_full(x) ≈ 2*a*x² + b*x + c
-        
-        The quadratic term (a*x²) represents the FLOPs which double without 
-        causal masking. The linear and constant terms (kernel overhead) stay.
-        
-        Returns f_causal(x) + a*x² = (2a)*x² + b*x + c, divided by sp_size
-        for Ulysses/USP strategies.
-        
-        The extra quadratic term also gets calibration correction applied.
-        """
-        if strategy.attn_type == "ring":
-            local_seq = seqlen / strategy.cp_size
-            a, b, c = self._get_coeffs(local_seq)
-            extra_quad = a * local_seq ** 2
-            corr = 1.0
-            if self.compute_correction:
-                corr = self._interp_lookup(local_seq, self.compute_correction)
-            return (a * local_seq ** 2 + b * local_seq + c + extra_quad) * corr
-        elif strategy.attn_type == "usp":
-            local_seq = seqlen / strategy.cp_size
-            a, b, c = self._get_coeffs(local_seq)
-            extra_quad = a * local_seq ** 2
-            corr = 1.0
-            if self.compute_correction:
-                corr = self._interp_lookup(local_seq, self.compute_correction)
-            return ((a * local_seq ** 2 + b * local_seq + c + extra_quad) * corr) / strategy.sp_size
-        else:
-            # Ulysses: no ring steps, correction doesn't apply
-            return self.compute_time_single(seqlen, strategy)
-
-    def _ring_step_compute_per_layer(self, seqlens: List[int], 
-                                      strategy: ParallelStrategy,
-                                      is_diagonal: bool) -> float:
+    def _ring_step_compute_per_layer(self, seqlens: List[int],
+                                      strategy: ParallelStrategy) -> float:
         """Compute time per layer for one ring step (all sequences in group).
         
-        Args:
-            is_diagonal: If True, uses causal compute (profiled f_causal).
-                        If False, uses non-causal estimate (f_causal + a*x²).
+        In zigzag ring attention, EVERY step has the same FLOPs ≈ S_local²/2:
+          - Diagonal step: flash_attn(Q[S_local], K[S_local], causal=True)
+            → lower-triangle only = S_local²/2 pairs
+          - Non-diagonal (step ≤ rank): flash_attn(Q[S_local], K[S_local/2], causal=False)
+            → rectangular S_local × S_local/2 = S_local²/2 pairs
+          - Non-diagonal (step > rank): flash_attn(Q[S_local/2], K[S_local], causal=False)
+            → rectangular S_local/2 × S_local = S_local²/2 pairs
+        
+        Therefore all steps use the same compute estimate: f_causal(S/cp_size).
+        The total Ring FLOPs = P × f_causal(S/P) = f(S)/P = Ulysses FLOPs. ✓
         """
-        if is_diagonal or not self.ring_causal_correction:
-            return sum(self.compute_time_single(s, strategy) for s in seqlens)
-        else:
-            return sum(self._noncausal_step_compute(s, strategy) for s in seqlens)
+        return sum(self.compute_time_single(s, strategy) for s in seqlens)
 
     # ---- Communication ----
 
@@ -650,32 +619,23 @@ class AdaCPSPCostModel:
         total_tokens = sum(seqlens)
         parallel_size = sp_size * cp_size
 
-        # --- AlltoAll component (GQA-aware) ---
+        # --- AlltoAll component (GQA-aware, cascading fallback) ---
         qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / parallel_size
         kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / parallel_size
         num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
         num_kv_ops = 2 * 2 * self.l  # K+V × fwd+bwd × layers
 
-        if self.alltoall_linear and sp_size in self.alltoall_linear:
-            fit = self.alltoall_linear[sp_size]
-            a2a_time = ((fit["alpha"] * qo_msg_mb + fit["beta"]) * num_qo_ops +
-                        (fit["alpha"] * kv_msg_mb + fit["beta"]) * num_kv_ops)
-        else:
-            bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(max(self.alltoall_bw.keys()), 100))
-            a2a_time = qo_msg_mb / bw * num_qo_ops + kv_msg_mb / bw * num_kv_ops
+        qo_per_op = self._a2a_per_op_time(qo_msg_mb, sp_size)
+        kv_per_op = self._a2a_per_op_time(kv_msg_mb, sp_size)
+        a2a_time = qo_per_op * num_qo_ops + kv_per_op * num_kv_ops
 
-        # --- P2P Ring component (GQA-aware) ---
+        # --- P2P Ring component (GQA-aware, cascading fallback) ---
         # After All-to-All, KV tensors have kv_hidden/sp_size dims
-        single_kv_mb = (total_tokens / cp_size) * (self.kv_hidden / sp_size) * 2 / 1024 / 1024
-
-        if self.p2p_linear and cp_size in self.p2p_linear:
-            fit = self.p2p_linear[cp_size]
-            per_kv_time = fit["alpha"] * single_kv_mb + fit["beta"]
-            per_step_time = 2 * per_kv_time  # K + V
-            p2p_time = per_step_time * (cp_size - 1) * self.l
-        else:
-            bw = self.p2p_bw.get(cp_size, self.p2p_bw.get(max(self.p2p_bw.keys()), 100))
-            p2p_time = 2 * single_kv_mb / bw * (cp_size - 1) * self.l
+        kv_hidden_after_uly = self.kv_hidden // sp_size
+        single_kv_mb = (total_tokens / cp_size) * kv_hidden_after_uly * 2 / 1024 / 1024
+        kv_per_step_mb = 2 * single_kv_mb  # K + V combined
+        per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size)
+        p2p_time = per_step_time * (cp_size - 1) * self.l
 
         return a2a_time + p2p_time
 
@@ -735,21 +695,22 @@ class AdaCPSPCostModel:
                                   strategy: ParallelStrategy) -> float:
         """Overlap-aware total time for Ring Attention (fwd + bwd).
         
-        Ring Attention overlaps P2P communication with flash attention compute:
+        Zigzag Ring Attention overlaps P2P communication with flash attention compute.
+        
+        Key insight: every step has EQUAL compute ≈ f_causal(S/P) because zigzag
+        uses half-Q or half-K for non-diagonal steps, making all steps the same
+        FLOPs as the causal diagonal step.
         
         Forward (per layer):
-          - 1 diagonal step (causal attention, no comm overlap on last step)
-          - (cp_size - 1) non-diagonal steps (non-causal, overlapped with comm)
-          fwd_per_layer = (cp-1) * max(noncausal_step, fwd_comm) + causal_step
+          step_compute = f_causal(S/P)                  (same for all steps)
+          fwd_per_layer = (cp-1) × max(step_compute, fwd_comm) + step_compute
+          
+          The last step has no communication to overlap → additive step_compute.
+          The first (cp-1) steps overlap compute with P2P send/recv.
         
         Backward (per layer):
-          - Same structure but with bwd_fwd_ratio and bwd_comm_ratio
-        
-        With ring_causal_correction=True:
-          - diagonal step: f_causal(x) (profiled)
-          - non-diagonal steps: f_causal(x) + a*x² (non-causal, ~2× quadratic term)
-        
-        Without correction: all steps use f_causal(x).
+          bwd_step_compute = step_compute × bwd_fwd_ratio
+          bwd_per_layer = (cp-1) × max(bwd_step_compute, bwd_comm) + bwd_step_compute
         
         Total = (fwd_per_layer + bwd_per_layer) × L
         """
@@ -761,28 +722,23 @@ class AdaCPSPCostModel:
 
         total_tokens = sum(seqlens)
 
-        # Per-step forward compute (per layer)
-        # Diagonal step: causal (profiled) compute
-        diag_compute_per_layer = self._ring_step_compute_per_layer(
-            seqlens, strategy, is_diagonal=True)
-        # Non-diagonal step: non-causal compute (when correction enabled)
-        nondiag_compute_per_layer = self._ring_step_compute_per_layer(
-            seqlens, strategy, is_diagonal=False)
+        # Per-step compute (same for all steps in zigzag ring)
+        step_compute_per_layer = self._ring_step_compute_per_layer(
+            seqlens, strategy)
 
         # Per-step comm
         fwd_comm_per_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size)
         bwd_comm_per_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size)
 
         # Forward per layer:
-        # (cp-1) non-diagonal overlapped steps + 1 diagonal final step (no comm)
-        fwd_per_layer = ((cp_size - 1) * self._leaky_max(nondiag_compute_per_layer, fwd_comm_per_step)
-                         + diag_compute_per_layer)
+        # (cp-1) overlapped steps + 1 non-overlapped final step
+        fwd_per_layer = ((cp_size - 1) * self._leaky_max(step_compute_per_layer, fwd_comm_per_step)
+                         + step_compute_per_layer)
 
         # Backward per layer: same structure but with bwd ratios
-        bwd_diag = diag_compute_per_layer * self.bwd_fwd_ratio
-        bwd_nondiag = nondiag_compute_per_layer * self.bwd_fwd_ratio
-        bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_nondiag, bwd_comm_per_step)
-                         + bwd_diag)
+        bwd_step = step_compute_per_layer * self.bwd_fwd_ratio
+        bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_step, bwd_comm_per_step)
+                         + bwd_step)
 
         return (fwd_per_layer + bwd_per_layer) * self.l
 
@@ -822,36 +778,28 @@ class AdaCPSPCostModel:
         parallel_size = sp_size * cp_size
 
         # ── All-to-All component (blocking, fwd + bwd, GQA-aware) ──
+        # Use _a2a_per_op_time for consistent cascading fallback
+        # (interpolation → linear fit → BW), same as alltoall_time().
         qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / parallel_size
         kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / parallel_size
-        if self.alltoall_linear and sp_size in self.alltoall_linear:
-            fit = self.alltoall_linear[sp_size]
-            qo_a2a_time = fit["alpha"] * qo_msg_mb + fit["beta"]
-            kv_a2a_time = fit["alpha"] * kv_msg_mb + fit["beta"]
-        else:
-            bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(
-                max(self.alltoall_bw.keys()), 100))
-            qo_a2a_time = qo_msg_mb / bw
-            kv_a2a_time = kv_msg_mb / bw
+        qo_a2a_time = self._a2a_per_op_time(qo_msg_mb, sp_size)
+        kv_a2a_time = self._a2a_per_op_time(kv_msg_mb, sp_size)
         # Per layer: 2 Q/O + 2 K/V ops per direction (fwd or bwd)
         a2a_fwd_per_layer = 2 * qo_a2a_time + 2 * kv_a2a_time
         a2a_bwd_per_layer = 2 * qo_a2a_time + 2 * kv_a2a_time
 
-        # ── Ring component (overlapped, with causal correction) ──
-        diag_compute = self._ring_step_compute_per_layer(
-            seqlens, strategy, is_diagonal=True)
-        nondiag_compute = self._ring_step_compute_per_layer(
-            seqlens, strategy, is_diagonal=False)
+        # ── Ring component (overlapped, uniform step compute) ──
+        step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
 
         kv_hidden = self.kv_hidden // sp_size  # After Ulysses head split (GQA-aware)
         fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden)
         bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, kv_hidden)
 
-        ring_fwd_per_layer = ((cp_size - 1) * self._leaky_max(nondiag_compute, fwd_comm_step)
-                              + diag_compute)
-        ring_bwd_per_layer = ((cp_size - 1) * self._leaky_max(nondiag_compute * self.bwd_fwd_ratio,
-                                                                bwd_comm_step)
-                              + diag_compute * self.bwd_fwd_ratio)
+        ring_fwd_per_layer = ((cp_size - 1) * self._leaky_max(step_compute, fwd_comm_step)
+                              + step_compute)
+        bwd_step = step_compute * self.bwd_fwd_ratio
+        ring_bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_step, bwd_comm_step)
+                              + bwd_step)
 
         # Total per layer = a2a + ring (fwd and bwd separately)
         fwd_per_layer = a2a_fwd_per_layer + ring_fwd_per_layer
@@ -885,20 +833,18 @@ class AdaCPSPCostModel:
             # 1 diagonal (causal) + (cp-1) non-diagonal (non-causal) steps
             # Total comm = fwd_ring + bwd_ring
             cp = strategy.cp_size
-            diag = self._ring_step_compute_per_layer(seqlens, strategy, True)
-            nondiag = self._ring_step_compute_per_layer(seqlens, strategy, False)
-            fwd_compute_per_layer = diag + (cp - 1) * nondiag
+            step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
+            fwd_compute_per_layer = cp * step_compute  # P steps, each equal FLOPs
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
             fwd_ring_comm = self.p2p_ring_time(seqlens, cp)
             total_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
             return total_compute + total_comm
         elif strategy.attn_type == "usp":
             # USP additive model:
-            # AlltoAll (blocking) + Ring (no overlap, cp steps with causal correction)
+            # AlltoAll (blocking) + Ring (no overlap, cp steps with uniform compute)
             sp, cp = strategy.sp_size, strategy.cp_size
-            diag = self._ring_step_compute_per_layer(seqlens, strategy, True)
-            nondiag = self._ring_step_compute_per_layer(seqlens, strategy, False)
-            fwd_compute_per_layer = diag + (cp - 1) * nondiag
+            step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
+            fwd_compute_per_layer = cp * step_compute
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
             a2a_comm = self.alltoall_time(seqlens, sp)
             total_tokens = sum(seqlens)
@@ -941,16 +887,13 @@ class AdaCPSPCostModel:
 
         print(f"\n[seqlens={seqlens}, strategy={strategy}]")
         cp = strategy.cp_size
-        # For Ring/USP, show per-step breakdown with causal correction
+        # For Ring/USP, show per-step breakdown
         if strategy.attn_type in ("ring", "usp") and cp > 1:
-            diag = self._ring_step_compute_per_layer(seqlens, strategy, True)
-            nondiag = self._ring_step_compute_per_layer(seqlens, strategy, False)
-            fwd_per_layer = diag + (cp - 1) * nondiag
+            step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
+            fwd_per_layer = cp * step_compute  # P equal steps
             fwd_total = fwd_per_layer * self.l
             print(f"  Fwd compute:   {fwd_total:.4f} ms "
-                  f"(1×diag={diag:.4f} + {cp-1}×nondiag={nondiag:.4f}, ×L={self.l})")
-            if self.ring_causal_correction and abs(nondiag - diag) > 0.001:
-                print(f"    Causal correction: nondiag/diag = {nondiag/diag:.3f}×")
+                  f"({cp}×step={step_compute:.4f}, ×L={self.l})")
             print(f"  Bwd compute:   {fwd_total * self.bwd_fwd_ratio:.4f} ms "
                   f"(ratio={self.bwd_fwd_ratio:.2f})")
         else:
@@ -960,24 +903,20 @@ class AdaCPSPCostModel:
                   f"(ratio={self.bwd_fwd_ratio:.2f})")
         print(f"  Comm (fwd raw):{comm:.4f} ms")
         mode = 'overlap' if self.enable_overlap_model else 'additive'
-        has_causal = (self.ring_causal_correction 
-                      and strategy.attn_type in ("ring", "usp") and cp > 1)
-        causal_tag = ", causal-corrected" if has_causal else ""
-        print(f"  Total:         {total:.4f} ms ({mode}{causal_tag})")
+        print(f"  Total:         {total:.4f} ms ({mode})")
         if self.enable_overlap_model and strategy.attn_type in ("ring", "usp"):
             # Show per-step breakdown for ring
             if cp > 1:
                 total_tokens = sum(seqlens)
-                kv_h = self.h if strategy.attn_type == "ring" else self.h // strategy.sp_size
+                kv_h = self.kv_hidden if strategy.attn_type == "ring" else self.kv_hidden // strategy.sp_size
                 fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h)
                 bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp, kv_h)
-                print(f"  Per-step (fwd): diag={diag:.4f}ms, nondiag={nondiag:.4f}ms, "
+                print(f"  Per-step (fwd): compute={step_compute:.4f}ms, "
                       f"comm={fwd_comm_step:.4f}ms → "
-                      f"{'compute-bound' if nondiag > fwd_comm_step else 'comm-bound'}")
-                print(f"  Per-step (bwd): diag={diag * self.bwd_fwd_ratio:.4f}ms, "
-                      f"nondiag={nondiag * self.bwd_fwd_ratio:.4f}ms, "
+                      f"{'compute-bound' if step_compute > fwd_comm_step else 'comm-bound'}")
+                print(f"  Per-step (bwd): compute={step_compute * self.bwd_fwd_ratio:.4f}ms, "
                       f"comm={bwd_comm_step:.4f}ms → "
-                      f"{'compute-bound' if nondiag * self.bwd_fwd_ratio > bwd_comm_step else 'comm-bound'}")
+                      f"{'compute-bound' if step_compute * self.bwd_fwd_ratio > bwd_comm_step else 'comm-bound'}")
         print(f"  Mem (MB):      {mem:.1f}")
     
     @classmethod
