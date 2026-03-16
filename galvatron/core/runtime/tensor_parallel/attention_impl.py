@@ -368,7 +368,7 @@ class FlashSelfAttentionVarlen(torch.nn.Module):
                 squeezed, squeeze_dim = True, 0
             elif q.size(1) == 1:
                 # [s, 1, h, d] format (direct call with packed sequences)
-            q, k, v = [x.squeeze(1) for x in [q, k, v]]
+                q, k, v = [x.squeeze(1) for x in [q, k, v]]
                 squeezed, squeeze_dim = True, 1
 
         output = flash_attn_unpadded_func(
@@ -554,8 +554,74 @@ class _SeqAllToAll(torch.autograd.Function):
         )
 
 
+# --------------- GQA-aware Head Padding for Ulysses SP ---------------
+# When n_kv_heads % sp_size != 0 (or n_heads % sp_size != 0), the All-to-All
+# cannot evenly split heads across ranks.  We solve this by replicating entire
+# GQA groups so that the padded head counts are divisible by sp_size.
+#
+# Key idea:
+#   padded_n_kv = ceil(n_kv / sp) * sp      (always divisible by sp)
+#   padded_n_q  = padded_n_kv * g            (preserves GQA ratio g = n_q / n_kv)
+#
+# After attention, we slice the output back to original n_q heads.  Padded heads
+# have zero output gradient, so they contribute zero to dK/dV/dQ, ensuring
+# gradient correctness without any extra all-reduce.
+# -----------------------------------------------------------------------
+
+def _compute_head_padding(n_q_heads: int, n_kv_heads: int, sp_size: int):
+    """Compute padded head counts for GQA-aware Ulysses SP.
+
+    Returns:
+        (padded_n_q, padded_n_kv, q_extra, kv_extra)
+        where q_extra and kv_extra are the number of heads to replicate.
+        If no padding is needed, q_extra == kv_extra == 0.
+    """
+    if n_kv_heads % sp_size == 0 and n_q_heads % sp_size == 0:
+        return n_q_heads, n_kv_heads, 0, 0  # No padding needed
+
+    g = n_q_heads // n_kv_heads  # GQA group ratio (must be integer)
+    padded_n_kv = math.ceil(n_kv_heads / sp_size) * sp_size
+    padded_n_q = padded_n_kv * g
+
+    q_extra = padded_n_q - n_q_heads
+    kv_extra = padded_n_kv - n_kv_heads
+    return padded_n_q, padded_n_kv, q_extra, kv_extra
+
+
+def _pad_heads(tensor: Tensor, extra: int, head_dim_idx: int = 2) -> Tensor:
+    """Replicate the first `extra` heads along `head_dim_idx` via concatenation.
+
+    Autograd-safe: backward of torch.cat correctly accumulates gradients from
+    the replicated heads back to the originals.  When padded heads receive zero
+    output gradient (due to output slicing), their contribution is exactly zero.
+    """
+    if extra <= 0:
+        return tensor
+    # Replicate the first `extra` heads (from the first `extra` GQA groups)
+    slices = [slice(None)] * tensor.ndim
+    slices[head_dim_idx] = slice(0, extra)
+    padding = tensor[tuple(slices)]
+    return torch.cat([tensor, padding], dim=head_dim_idx)
+
+
+def _unpad_heads(tensor: Tensor, original_heads: int, head_dim_idx: int = 2) -> Tensor:
+    """Slice tensor back to original number of heads along `head_dim_idx`.
+
+    In backward, this produces zero gradient for the padded (sliced-off) heads.
+    """
+    if tensor.shape[head_dim_idx] == original_heads:
+        return tensor
+    slices = [slice(None)] * tensor.ndim
+    slices[head_dim_idx] = slice(0, original_heads)
+    return tensor[tuple(slices)]
+
+
 class DistributedAttention(torch.nn.Module):
-    """Initialization.
+    """Ulysses Sequence Parallel Attention with GQA-aware head padding.
+
+    Handles the general case where n_heads or n_kv_heads may not be divisible
+    by sp_size, by transparently replicating entire GQA groups before the
+    All-to-All and slicing the output afterwards.
 
     Arguments:
         local_attention (Module): local attention with q,k,v
@@ -594,33 +660,38 @@ class DistributedAttention(torch.nn.Module):
         """forward
 
         Arguments:
-            query (Tensor): query input to the layer
-            key (Tensor): key input to the layer
-            value (Tensor): value input to the layer
-            batch_dim_idx (int): indicating which dim is batch
+            query (Tensor): query input to the layer  [b, s/p, n_q, d] or [s/p, b, n_q, d]
+            key (Tensor): key input to the layer      [b, s/p, n_kv, d] or [s/p, b, n_kv, d]
+            value (Tensor): value input to the layer   [b, s/p, n_kv, d] or [s/p, b, n_kv, d]
+            batch_dim_idx (int): indicating which dim is batch (0 or 1)
             args: other args
 
         Returns:
-            * output (Tensor): context output
+            * output (Tensor): context output [b, s/p, n_q, d] or [s/p, b, n_q, d]
         """
 
-        # TODO Merge three alltoall calls into one
-        # TODO (Reza): change the api on the megatron-deepspeed side so that we only receive all data (q,k, and v) together!
-        # in shape : e.g.,  [s/p:h:]
-        num_query_groups = key.shape[2]
+        # ---- Head dimension index (depends on batch_dim_idx) ----
+        # batch_dim_idx=0 → shape (b, s, h, d) → head_dim_idx=2
+        # batch_dim_idx=1 → shape (s, b, h, d) → head_dim_idx=2
+        head_dim_idx = 2
+
         sp_world_size = torch.distributed.get_world_size(self.spg)
-        if num_query_groups >= sp_world_size:
-            assert num_query_groups % sp_world_size == 0, "num_query_groups % sp_world_size != 0"
-        else:
-            assert sp_world_size % num_query_groups == 0, "sp_world_size % num_query_groups != 0"
-        if num_query_groups < sp_world_size:
-            key = key.repeat_interleave(
-                sp_world_size // num_query_groups, dim=2
-            )
-            value = value.repeat_interleave(
-                sp_world_size // num_query_groups, dim=2
-            )
-            
+        n_q_heads_orig = query.shape[head_dim_idx]
+        n_kv_heads_orig = key.shape[head_dim_idx]
+
+        # ---- GQA-aware head padding ----
+        # Compute how many extra heads we need to make All-to-All divisible
+        padded_n_q, padded_n_kv, q_extra, kv_extra = _compute_head_padding(
+            n_q_heads_orig, n_kv_heads_orig, sp_world_size
+        )
+
+        if kv_extra > 0:
+            key = _pad_heads(key, kv_extra, head_dim_idx)
+            value = _pad_heads(value, kv_extra, head_dim_idx)
+        if q_extra > 0:
+            query = _pad_heads(query, q_extra, head_dim_idx)
+
+        # ---- All-to-All: scatter heads, gather sequence ----
         def bwd_hook(layer_type):
 
             def pre_hook_fun(grad):
@@ -634,7 +705,7 @@ class DistributedAttention(torch.nn.Module):
 
             return pre_hook_fun
 
-        if torch.distributed.get_world_size(self.spg) > 1:
+        if sp_world_size > 1:
             self.layer_sync(query)
             query_layer = _SeqAllToAll.apply(
                 self.spg, query, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "q"
@@ -661,11 +732,13 @@ class DistributedAttention(torch.nn.Module):
         else:
             query_layer, key_layer, value_layer = query, key, value
 
-        # out shape : e.g., [s:h/p:]
+        # ---- Local attention ----
         head_dim = query_layer.shape[-1]
         context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
         context_layer = context_layer.view(context_layer.shape[0], context_layer.shape[1], -1, head_dim)
-        if torch.distributed.get_world_size(self.spg) > 1:
+
+        # ---- Reverse All-to-All: scatter sequence, gather heads ----
+        if sp_world_size > 1:
             output = _SeqAllToAll.apply(
                 self.spg,
                 context_layer,
@@ -678,6 +751,13 @@ class DistributedAttention(torch.nn.Module):
             )
         else:
             output = context_layer
+
+        # ---- Remove padded Q heads ----
+        # Slicing produces zero gradient for padded positions in backward,
+        # ensuring gradient correctness without extra communication.
+        if q_extra > 0:
+            output = _unpad_heads(output, n_q_heads_orig, head_dim_idx)
+
         # out e.g., [s/p::h]
         return output
 

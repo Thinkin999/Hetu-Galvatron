@@ -830,8 +830,39 @@ class _SeqAllToAll(torch.autograd.Function):
         )
 
 
+# --------------- GQA-aware Head Padding Utilities ---------------
+# (Mirrored from attention_impl.py for consistency)
+
+def _compute_head_padding_t(n_q_heads: int, n_kv_heads: int, sp_size: int):
+    """Compute padded head counts for GQA-aware Ulysses SP."""
+    if n_kv_heads % sp_size == 0 and n_q_heads % sp_size == 0:
+        return n_q_heads, n_kv_heads, 0, 0
+    g = n_q_heads // n_kv_heads
+    padded_n_kv = math.ceil(n_kv_heads / sp_size) * sp_size
+    padded_n_q = padded_n_kv * g
+    return padded_n_q, padded_n_kv, padded_n_q - n_q_heads, padded_n_kv - n_kv_heads
+
+
+def _pad_heads_t(tensor: Tensor, extra: int, head_dim_idx: int = 2) -> Tensor:
+    """Replicate the first `extra` heads along `head_dim_idx` via concatenation."""
+    if extra <= 0:
+        return tensor
+    slices = [slice(None)] * tensor.ndim
+    slices[head_dim_idx] = slice(0, extra)
+    return torch.cat([tensor, tensor[tuple(slices)]], dim=head_dim_idx)
+
+
+def _unpad_heads_t(tensor: Tensor, original_heads: int, head_dim_idx: int = 2) -> Tensor:
+    """Slice tensor back to original number of heads."""
+    if tensor.shape[head_dim_idx] == original_heads:
+        return tensor
+    slices = [slice(None)] * tensor.ndim
+    slices[head_dim_idx] = slice(0, original_heads)
+    return tensor[tuple(slices)]
+
+
 class DistributedAttention(torch.nn.Module):
-    """Initialization.
+    """Ulysses Sequence Parallel Attention with GQA-aware head padding.
 
     Arguments:
         local_attention (Module): local attention with q,k,v
@@ -870,9 +901,9 @@ class DistributedAttention(torch.nn.Module):
         """forward
 
         Arguments:
-            query (Tensor): query input to the layer
-            key (Tensor): key input to the layer
-            value (Tensor): value input to the layer
+            query (Tensor): query input to the layer  [b, s/p, n_q, d] or [s/p, b, n_q, d]
+            key (Tensor): key input to the layer      [b, s/p, n_kv, d]
+            value (Tensor): value input to the layer   [b, s/p, n_kv, d]
             batch_dim_idx (int): indicating which dim is batch
             args: other args
 
@@ -880,9 +911,20 @@ class DistributedAttention(torch.nn.Module):
             * output (Tensor): context output
         """
 
-        # TODO Merge three alltoall calls into one
-        # TODO (Reza): change the api on the megatron-deepspeed side so that we only receive all data (q,k, and v) together!
-        # in shape : e.g.,  [s/p:h:]
+        head_dim_idx = 2
+        sp_world_size = torch.distributed.get_world_size(self.spg)
+        n_q_heads_orig = query.shape[head_dim_idx]
+        n_kv_heads_orig = key.shape[head_dim_idx]
+
+        # ---- GQA-aware head padding ----
+        padded_n_q, padded_n_kv, q_extra, kv_extra = _compute_head_padding_t(
+            n_q_heads_orig, n_kv_heads_orig, sp_world_size
+        )
+        if kv_extra > 0:
+            key = _pad_heads_t(key, kv_extra, head_dim_idx)
+            value = _pad_heads_t(value, kv_extra, head_dim_idx)
+        if q_extra > 0:
+            query = _pad_heads_t(query, q_extra, head_dim_idx)
 
         def bwd_hook(layer_type):
 
@@ -897,7 +939,7 @@ class DistributedAttention(torch.nn.Module):
 
             return pre_hook_fun
 
-        if torch.distributed.get_world_size(self.spg) > 1:
+        if sp_world_size > 1:
             self.layer_sync(query)
             query_layer = _SeqAllToAll.apply(
                 self.spg, query, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "q"
@@ -912,11 +954,6 @@ class DistributedAttention(torch.nn.Module):
                 self.spg, value, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "v"
             )
             if self.sp_overlap_comm:
-                # Register a hook to synchronize dq and dk after the all-to-all
-                # operation when the gradient data is used.
-                # Place this logic after the q, k, v all-to-all operation to
-                # improve interpreter speed to
-                # call and launch of the forward all-to-all communication.
                 grad_fn_q = query.grad_fn.next_functions[0][0]
                 grad_fn_q.register_prehook(bwd_hook(layer_type="q"))
                 grad_fn_k = key.grad_fn.next_functions[0][0]
@@ -928,7 +965,7 @@ class DistributedAttention(torch.nn.Module):
         head_dim = query_layer.shape[-1]
         context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
         context_layer = context_layer.view(context_layer.shape[0], context_layer.shape[1], -1, head_dim)
-        if torch.distributed.get_world_size(self.spg) > 1:
+        if sp_world_size > 1:
             output = _SeqAllToAll.apply(
                 self.spg,
                 context_layer,
@@ -941,6 +978,11 @@ class DistributedAttention(torch.nn.Module):
             )
         else:
             output = context_layer
+
+        # ---- Remove padded Q heads ----
+        if q_extra > 0:
+            output = _unpad_heads_t(output, n_q_heads_orig, head_dim_idx)
+
         # out e.g., [s/p::h]
         return output
 

@@ -46,6 +46,7 @@ import json
 import random
 import argparse
 import heapq
+import math
 import time as time_module
 import multiprocessing as mp
 from typing import Any, List, Dict, Tuple, Optional, Union, Literal
@@ -355,6 +356,68 @@ class AdaCPSPCostModel:
         # [(seq_len, correction_factor), ...] sorted by seq_len.
         self.compute_correction: Optional[List[Tuple[int, float]]] = None
 
+    # ---- GQA Head Padding Overhead ----
+
+    def head_padding_overhead(self, sp_size: int) -> Tuple[float, float]:
+        """Compute the overhead factor due to head padding for a given sp_size.
+        
+        When n_heads or n_kv_heads is not divisible by sp_size, Ulysses SP
+        must replicate entire GQA groups to make the All-to-All work.
+        
+        Returns:
+            (q_factor, kv_factor): multiplicative overhead factors (>= 1.0).
+            q_factor applies to Q/O communication and compute.
+            kv_factor applies to K/V communication.
+            If no padding is needed, both are 1.0.
+        """
+        if sp_size <= 1:
+            return 1.0, 1.0
+        if self.n_kv_heads % sp_size == 0 and self.n_heads % sp_size == 0:
+            return 1.0, 1.0
+        
+        g = self.n_heads // self.n_kv_heads  # GQA ratio
+        padded_n_kv = math.ceil(self.n_kv_heads / sp_size) * sp_size
+        padded_n_q = padded_n_kv * g
+        
+        q_factor = padded_n_q / self.n_heads
+        kv_factor = padded_n_kv / self.n_kv_heads
+        return q_factor, kv_factor
+
+    def head_padding_extra_activation_mb(self, seqlens: List[int], sp_size: int,
+                                         parallel_size: Optional[int] = None) -> float:
+        """Extra activation memory (MB) due to head padding.
+        
+        Head padding only affects the attention layer (between QKV projection and
+        output projection). The extra memory is for the padded Q, K, V tensors
+        that exist during the All-to-All and attention computation.
+        
+        Extra per-token memory (fp16):
+          Q: (padded_n_q - n_q) * head_dim * 2 bytes
+          K: (padded_n_kv - n_kv) * head_dim * 2 bytes
+          V: (padded_n_kv - n_kv) * head_dim * 2 bytes
+        
+        Args:
+            seqlens: sequence lengths in the group.
+            sp_size: Ulysses SP size (determines padding factors).
+            parallel_size: total parallel size (sp * cp for USP).
+                For pure Ulysses: parallel_size = sp_size.
+                For USP: parallel_size = sp_size * cp_size.
+                If None, defaults to sp_size (backward compatible).
+        """
+        if sp_size <= 1:
+            return 0.0
+        q_factor, kv_factor = self.head_padding_overhead(sp_size)
+        if q_factor == 1.0 and kv_factor == 1.0:
+            return 0.0
+        
+        if parallel_size is None:
+            parallel_size = sp_size
+        total_tokens = sum(seqlens) / parallel_size  # tokens per device
+        q_extra = (q_factor - 1.0) * self.n_heads * self.head_dim * 2  # bytes per token
+        kv_extra = (kv_factor - 1.0) * self.n_kv_heads * self.head_dim * 2 * 2  # K+V
+        extra_bytes_per_token = q_extra + kv_extra
+        return total_tokens * extra_bytes_per_token / 1024 / 1024
+
     # ---- Interpolation helpers ----
 
     @staticmethod
@@ -446,25 +509,31 @@ class AdaCPSPCostModel:
           - Ulysses: Each rank processes full seq_len but with h/sp heads.
             Flash attention time scales linearly with #heads, so:
             time = f(seqlen) / sp_size
+            With head padding: time = f(seqlen) * q_factor / sp_size
+            (q_factor reflects the padded/original head ratio, >= 1.0)
           
           - Ring: Per-step compute on local chunk (seqlen/cp tokens, all heads).
             Returns time for ONE ring step (total per layer = cp × this).
             time = f(seqlen / cp_size)
+            Ring does not require head divisibility → no padding overhead.
           
           - USP: Per-step compute on seqlen/cp tokens with h/sp heads.
-            time = f(seqlen / cp_size) / sp_size
+            time = f(seqlen / cp_size) * q_factor / sp_size
+            (q_factor applies to the Ulysses SP component)
         
         Where f(x) = a*x² + b*x + c is the profiled piecewise quadratic,
         optionally corrected by calibration factors from validation data.
         """
         if strategy.attn_type == "ulysses":
-            return self._eval_piecewise(seqlen) / strategy.sp_size
+            q_factor, _ = self.head_padding_overhead(strategy.sp_size)
+            return self._eval_piecewise(seqlen) * q_factor / strategy.sp_size
         elif strategy.attn_type == "ring":
             local_seq = seqlen / strategy.cp_size
             return self._eval_piecewise(local_seq)
         elif strategy.attn_type == "usp":
             local_seq = seqlen / strategy.cp_size
-            return self._eval_piecewise(local_seq) / strategy.sp_size
+            q_factor, _ = self.head_padding_overhead(strategy.sp_size)
+            return self._eval_piecewise(local_seq) * q_factor / strategy.sp_size
         else:
             local_seq = seqlen / strategy.parallel_size
             return self._eval_piecewise(local_seq)
@@ -529,16 +598,21 @@ class AdaCPSPCostModel:
         GQA-aware: Q and O use full hidden (n_heads * head_dim), but K and V use
         kv_hidden (n_kv_heads * head_dim). For MHA these are the same.
         
+        Head-padding-aware: when heads are not divisible by sp_size, the actual
+        communication volume increases by the padding factor.
+        
         Per-op message size:
-          Q/O: total_tokens * hidden / sp_size * 2 bytes
-          K/V: total_tokens * kv_hidden / sp_size * 2 bytes
+          Q/O: total_tokens * hidden * q_factor / sp_size * 2 bytes
+          K/V: total_tokens * kv_hidden * kv_factor / sp_size * 2 bytes
         """
         if sp_size <= 1:
             return 0.0
         total_tokens = sum(seqlens)
-        # GQA-aware: Q/O use full hidden, K/V use kv_hidden
-        qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / sp_size
-        kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / sp_size
+        # Head padding overhead: q_factor >= 1.0, kv_factor >= 1.0
+        q_factor, kv_factor = self.head_padding_overhead(sp_size)
+        # GQA-aware with head padding: effective hidden dims
+        qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / sp_size
+        kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / sp_size
         # Fwd: scatter(Q), scatter(K), scatter(V), gather(O) = 2 qo + 2 kv
         # Bwd: scatter(dO), gather(dQ), gather(dK), gather(dV) = 2 qo + 2 kv
         num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
@@ -605,11 +679,13 @@ class AdaCPSPCostModel:
         In USP with sp_size=S, cp_size=C, total parallel = S*C:
           - Each rank starts with total_tokens/(S*C) tokens
           - All-to-All across sp_group (size S):
-            Q/O: per_op = total_tokens * H * 2 / (S*C) / 1024² (MB)
-            K/V: per_op = total_tokens * kv_hidden * 2 / (S*C) / 1024² (MB)
+            Q/O: per_op = total_tokens * H * q_factor * 2 / (S*C) / 1024² (MB)
+            K/V: per_op = total_tokens * kv_hidden * kv_factor * 2 / (S*C) / 1024² (MB)
           - Ring Attention across cp_group (size C): exchanges K, V
-            After Ulysses split: each KV tensor has kv_hidden/S dims
-            → single_kv_msg = (total_tokens/C) * (kv_hidden/S) * 2 / 1024² (MB)
+            After Ulysses split: each KV tensor has kv_hidden * kv_factor / S dims
+            → single_kv_msg = (total_tokens/C) * (kv_hidden * kv_factor / S) * 2 / 1024² (MB)
+        
+        Head-padding-aware: q_factor/kv_factor reflect GQA group replication overhead.
         """
         if sp_size <= 1:
             return self.p2p_ring_time(seqlens, cp_size)
@@ -618,10 +694,12 @@ class AdaCPSPCostModel:
 
         total_tokens = sum(seqlens)
         parallel_size = sp_size * cp_size
+        # Head padding overhead for the Ulysses SP component
+        q_factor, kv_factor = self.head_padding_overhead(sp_size)
 
-        # --- AlltoAll component (GQA-aware, cascading fallback) ---
-        qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / parallel_size
-        kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / parallel_size
+        # --- AlltoAll component (GQA-aware with head padding, cascading fallback) ---
+        qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
+        kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
         num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
         num_kv_ops = 2 * 2 * self.l  # K+V × fwd+bwd × layers
 
@@ -629,9 +707,11 @@ class AdaCPSPCostModel:
         kv_per_op = self._a2a_per_op_time(kv_msg_mb, sp_size)
         a2a_time = qo_per_op * num_qo_ops + kv_per_op * num_kv_ops
 
-        # --- P2P Ring component (GQA-aware, cascading fallback) ---
-        # After All-to-All, KV tensors have kv_hidden/sp_size dims
-        kv_hidden_after_uly = self.kv_hidden // sp_size
+        # --- P2P Ring component (GQA-aware with head padding, cascading fallback) ---
+        # After All-to-All, KV tensors have kv_hidden * kv_factor / sp_size dims
+        # (padded KV heads are distributed, then ring-exchanged)
+        padded_kv_hidden = self.kv_hidden * kv_factor
+        kv_hidden_after_uly = padded_kv_hidden / sp_size
         single_kv_mb = (total_tokens / cp_size) * kv_hidden_after_uly * 2 / 1024 / 1024
         kv_per_step_mb = 2 * single_kv_mb  # K + V combined
         per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size)
@@ -776,12 +856,14 @@ class AdaCPSPCostModel:
 
         total_tokens = sum(seqlens)
         parallel_size = sp_size * cp_size
+        # Head padding overhead for the Ulysses SP component
+        q_factor, kv_factor = self.head_padding_overhead(sp_size)
 
-        # ── All-to-All component (blocking, fwd + bwd, GQA-aware) ──
+        # ── All-to-All component (blocking, fwd + bwd, GQA + head-padding aware) ──
         # Use _a2a_per_op_time for consistent cascading fallback
         # (interpolation → linear fit → BW), same as alltoall_time().
-        qo_msg_mb = self.h * total_tokens * 2 / 1024 / 1024 / parallel_size
-        kv_msg_mb = self.kv_hidden * total_tokens * 2 / 1024 / 1024 / parallel_size
+        qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
+        kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
         qo_a2a_time = self._a2a_per_op_time(qo_msg_mb, sp_size)
         kv_a2a_time = self._a2a_per_op_time(kv_msg_mb, sp_size)
         # Per layer: 2 Q/O + 2 K/V ops per direction (fwd or bwd)
@@ -791,9 +873,10 @@ class AdaCPSPCostModel:
         # ── Ring component (overlapped, uniform step compute) ──
         step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
 
-        kv_hidden = self.kv_hidden // sp_size  # After Ulysses head split (GQA-aware)
-        fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden)
-        bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, kv_hidden)
+        # After Ulysses split: kv_hidden * kv_factor / sp_size (padded then split)
+        kv_hidden_after_uly = self.kv_hidden * kv_factor / sp_size
+        fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden_after_uly)
+        bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, kv_hidden_after_uly)
 
         ring_fwd_per_layer = ((cp_size - 1) * self._leaky_max(step_compute, fwd_comm_step)
                               + step_compute)
@@ -841,14 +924,30 @@ class AdaCPSPCostModel:
             return total_compute + total_comm
         elif strategy.attn_type == "usp":
             # USP additive model:
-            # AlltoAll (blocking) + Ring (no overlap, cp steps with uniform compute)
+            # AlltoAll (blocking) + Ring (no overlap, cp steps with uniform compute).
+            #
+            # IMPORTANT: In USP each rank holds T/(S*C) tokens before A2A,
+            # so per-op A2A message size must divide by parallel_size = S*C,
+            # NOT just sp_size = S.  (alltoall_time divides by sp only,
+            # which is correct for pure Ulysses but wrong for USP.)
             sp, cp = strategy.sp_size, strategy.cp_size
             step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
             fwd_compute_per_layer = cp * step_compute
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
-            a2a_comm = self.alltoall_time(seqlens, sp)
+
+            # ── A2A comm (inline, same formula as usp_comm_time / _total_time_usp_overlap) ──
             total_tokens = sum(seqlens)
-            kv_h = self.kv_hidden // sp
+            parallel_size = sp * cp
+            q_factor, kv_factor = self.head_padding_overhead(sp)
+            qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
+            kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
+            qo_a2a = self._a2a_per_op_time(qo_msg_mb, sp)
+            kv_a2a = self._a2a_per_op_time(kv_msg_mb, sp)
+            # 4 ops per direction (Q,K,V scatter + O gather), fwd+bwd, all layers
+            a2a_comm = (2 * qo_a2a + 2 * kv_a2a) * 2 * self.l
+
+            # ── Ring comm (head-padding-aware) ──
+            kv_h = self.kv_hidden * kv_factor / sp
             fwd_comm = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h)
             fwd_ring_comm = fwd_comm * (cp - 1) * self.l
             total_ring_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
@@ -862,16 +961,32 @@ class AdaCPSPCostModel:
 
     # ---- Memory ----
 
-    def activation_size(self, seqlens: Union[int, List[int]], parallel_size: int = 1) -> float:
-        """Activation memory in MB."""
+    def activation_size(self, seqlens: Union[int, List[int]], parallel_size: int = 1,
+                         sp_size: int = 1) -> float:
+        """Activation memory in MB.
+        
+        Args:
+            seqlens: sequence lengths in the group.
+            parallel_size: total parallel size (sp * cp or just sp or cp).
+            sp_size: Ulysses SP size (for head padding overhead calculation).
+                     Only relevant when sp_size is specified.
+        """
         if isinstance(seqlens, list):
             total = sum(seqlens)
         else:
             total = seqlens
-        return self.act_per_token * total / parallel_size
+        base = self.act_per_token * total / parallel_size
+        # Add extra activation memory for head padding (if applicable)
+        if sp_size > 1:
+            base += self.head_padding_extra_activation_mb(
+                seqlens if isinstance(seqlens, list) else [seqlens],
+                sp_size, parallel_size
+            )
+        return base
 
-    def total_memory(self, seqlens: Union[int, List[int]] = 0, parallel_size: int = 1) -> float:
-        return self.model_states_mb + self.activation_size(seqlens, parallel_size)
+    def total_memory(self, seqlens: Union[int, List[int]] = 0, parallel_size: int = 1,
+                     sp_size: int = 1) -> float:
+        return self.model_states_mb + self.activation_size(seqlens, parallel_size, sp_size)
 
     def token_capacity(self, memory_limit_gb: int) -> int:
         """Max tokens per device given memory budget."""
@@ -883,9 +998,16 @@ class AdaCPSPCostModel:
         fwd_compute = self.compute_time(seqlens, strategy)
         comm = self.comm_time(seqlens, strategy)
         total = self.total_time(seqlens, strategy)
-        mem = self.total_memory(seqlens, strategy.parallel_size)
+        sp_for_mem = strategy.sp_size if strategy.attn_type in ("ulysses", "usp") else 1
+        mem = self.total_memory(seqlens, strategy.parallel_size, sp_size=sp_for_mem)
 
         print(f"\n[seqlens={seqlens}, strategy={strategy}]")
+        # Show head padding info
+        if strategy.attn_type in ("ulysses", "usp") and strategy.sp_size > 1:
+            q_fac, kv_fac = self.head_padding_overhead(strategy.sp_size)
+            if q_fac > 1.0 or kv_fac > 1.0:
+                print(f"  ⚠ Head padding: Q×{q_fac:.2f}, KV×{kv_fac:.2f} "
+                      f"(n_heads={self.n_heads}, n_kv={self.n_kv_heads}, sp={strategy.sp_size})")
         cp = strategy.cp_size
         # For Ring/USP, show per-step breakdown
         if strategy.attn_type in ("ring", "usp") and cp > 1:
@@ -1547,19 +1669,49 @@ class AdaCPSPOptimizer:
 
     # ---- Strategy pool generation ----
 
-    def get_strategy_pool(self, seqs: Optional[List[Sequence]] = None) -> List[ParallelStrategy]:
+    def get_strategy_pool(self, seqs: Optional[List[Sequence]] = None,
+                           max_head_padding_factor: float = 2.0) -> List[ParallelStrategy]:
         """Generate all valid strategies: ulysses, ring, AND usp combinations.
+
+        GQA Head-Padding Aware:
+          - Ring Attention has NO head divisibility constraint (no padding needed).
+          - Ulysses SP requires n_heads % sp_size == 0 AND n_kv_heads % sp_size == 0.
+            When not satisfied, head padding (GQA group replication) is used.
+            The padding overhead factor = padded_n_q / n_q.
+          - Strategies with padding overhead > max_head_padding_factor are excluded
+            (they waste too much compute/communication on replicated heads).
+          - USP can bypass this by using a smaller sp_size with a larger cp_size.
 
         For USP (combined Ulysses + Ring), we enumerate all (sp_size, cp_size)
         pairs where sp_size >= 2, cp_size >= 2, both powers of 2, and
         sp_size * cp_size <= max_parallel_size.
 
-        Example for N=8, allowed=["ulysses","ring","usp"]:
-          ulysses×1, ulysses×2, ulysses×4, ulysses×8,
-          ring×2, ring×4, ring×8,
-          usp(sp2×cp2)=4, usp(sp2×cp4)=8, usp(sp4×cp2)=8
+        Args:
+            seqs: optional sequence list (unused, for API compatibility).
+            max_head_padding_factor: maximum allowed padding overhead for Q heads.
+                Default 2.0 means at most 2× compute overhead from head replication.
+                Set to float('inf') to allow all strategies regardless of overhead.
+
+        Example for Qwen2.5-7B (n_heads=28, n_kv=4), N=8:
+          ulysses×1 (no pad), ulysses×2 (no pad), ulysses×4 (no pad),
+          ulysses×8 → pad to kv=8, q=56 → factor=2.0 (included if max_factor>=2)
+          ring×2, ring×4, ring×8 (always included, no head constraint)
+          usp(sp2×cp2)=4, usp(sp2×cp4)=8, usp(sp4×cp2)=8 (sp≤4, no pad)
         """
         strategies = []
+        n_kv = self.costmodel.n_kv_heads
+        n_q = self.costmodel.n_heads
+
+        def _q_pad_factor(sp_size: int) -> float:
+            """Compute Q head padding factor for a given sp_size."""
+            if sp_size <= 1:
+                return 1.0
+            if n_kv % sp_size == 0 and n_q % sp_size == 0:
+                return 1.0
+            g = n_q // n_kv
+            padded_n_kv = math.ceil(n_kv / sp_size) * sp_size
+            padded_n_q = padded_n_kv * g
+            return padded_n_q / n_q
 
         # Start from min_parallel_size (= tp_deg in constrained mode)
         ps = self.min_parallel_size
@@ -1571,14 +1723,31 @@ class AdaCPSPOptimizer:
         # Pure Ulysses and pure Ring
         while ps <= self.max_parallel_size:
             for at in self.allowed_attn_types:
-                if at in ("ulysses", "ring"):
+                if at == "ring":
+                    # Ring Attention has no head divisibility constraint
                     strategies.append(ParallelStrategy(at, ps))
+                elif at == "ulysses":
+                    # Check head padding overhead
+                    factor = _q_pad_factor(ps)
+                    if factor <= max_head_padding_factor:
+                        strategies.append(ParallelStrategy(at, ps))
+                    else:
+                        self._log(f"  [strategy_pool] Skipping ulysses×{ps}: "
+                                  f"head padding factor {factor:.2f} > {max_head_padding_factor:.2f} "
+                                  f"(n_heads={n_q}, n_kv={n_kv})")
             ps *= 2
 
         # USP combinations (if "usp" in allowed_attn_types)
         if "usp" in self.allowed_attn_types:
             sp = 2
             while sp <= self.max_parallel_size // 2:
+                # Check head padding overhead for the SP component
+                factor = _q_pad_factor(sp)
+                if factor > max_head_padding_factor:
+                    self._log(f"  [strategy_pool] Skipping usp(sp={sp},cp=*): "
+                              f"head padding factor {factor:.2f} > {max_head_padding_factor:.2f}")
+                    sp *= 2
+                    continue
                 cp = 2
                 while sp * cp <= self.max_parallel_size:
                     total = sp * cp
@@ -2940,7 +3109,8 @@ class AdaCPSPOptimizer:
             for strat, group_seqs in groups:
                 seqlens = get_lens(group_seqs)
                 t = self.costmodel.total_time(seqlens, strat)
-                mem = self.costmodel.total_memory(seqlens, strat.parallel_size)
+                sp_for_mem = strat.sp_size if strat.attn_type in ("ulysses", "usp") else 1
+                mem = self.costmodel.total_memory(seqlens, strat.parallel_size, sp_size=sp_for_mem)
                 print(f"  [{strat}] {len(group_seqs)} seqs, "
                       f"tokens={sum(seqlens)}, local_tokens={sum(seqlens)//strat.parallel_size}, "
                       f"time={t:.2f} ms, mem={mem:.1f} MB, seqlens={seqlens}")
