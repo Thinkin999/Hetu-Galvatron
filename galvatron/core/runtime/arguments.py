@@ -34,6 +34,18 @@ def galvatron_training_args(parser, use_megatron=True):
     group.add_argument("--profile", type=int, default=0, help="Whether to profile model GPU memory.")
     group.add_argument("--save_profiled_memory", type=int, default=0, help="Whether to save profiled memory.")
     group.add_argument(
+        "--profile_start_iter",
+        type=int,
+        default=0,
+        help="Start iteration (inclusive) for runtime profiling.",
+    )
+    group.add_argument(
+        "--profile_end_iter",
+        type=int,
+        default=20,
+        help="End iteration (exclusive) for runtime profiling.",
+    )
+    group.add_argument(
         "--profile_type",
         type=str,
         default="allocated",

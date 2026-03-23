@@ -235,7 +235,13 @@ def train(args):
     
     optimizer, opt_param_scheduler = get_optimizer_and_param_scheduler(model, args)
     path = os.path.dirname(os.path.abspath(__file__))
-    profiler = get_runtime_profiler(args, path, config, start_iter=0)
+    profiler = get_runtime_profiler(
+        args,
+        path,
+        config,
+        start_iter=getattr(args, "profile_start_iter", 0),
+        end_iter=getattr(args, "profile_end_iter", 20),
+    )
     profiler.profile_memory(0, "After creating model")
 
     # Create dataset and dataloader

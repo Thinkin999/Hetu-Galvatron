@@ -8,7 +8,8 @@ def model_args(parser):
         type=str,
         default="llama-7b",
         help="Model size.",
-        choices=["llama-0.3b", "llama-7b", "llama-13b", "llama-30b", "llama2-70b", "qwen2.5-7b", "qwen2.5-72b", "qwen2.5-1.5b", "qwen2.5-3b"],
+        choices=["llama-0.3b", "llama-7b", "llama-13b", "llama-30b", "llama2-70b",
+                 "qwen2.5-1.5b", "qwen2.5-3b", "qwen2.5-7b", "qwen2.5-14b", "qwen2.5-32b", "qwen2.5-72b"],
     )
     group.add_argument(
         "--hidden_size",
