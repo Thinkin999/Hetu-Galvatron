@@ -6,7 +6,18 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 export MASTER_ADDR=localhost
-export MASTER_PORT=29500
+if [ -n "${QUICK_TEST_MASTER_PORT:-}" ]; then
+    export MASTER_PORT="${QUICK_TEST_MASTER_PORT}"
+else
+    export MASTER_PORT="$(python - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("", 0))
+    print(sock.getsockname()[1])
+PY
+)"
+fi
 export NPROC_PER_NODE=8
 
 # 只跑一个小模型 + 短序列 + 两种策略
@@ -20,6 +31,8 @@ export WARMUP_ITERS="3"
 export TIMEOUT_SECONDS="300"
 export MEMORY_LIMIT_GB="40"
 export EPOCHS="1"
+export DEFAULT_DP_TYPE="${DEFAULT_DP_TYPE:-zero3}"
+export NUM_WORKERS="${NUM_WORKERS:-0}"
 
 bash "${SCRIPT_DIR}/run_all_experiments.sh"
 

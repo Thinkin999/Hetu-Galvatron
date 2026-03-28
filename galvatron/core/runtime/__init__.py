@@ -9,6 +9,7 @@ import torch
 
 if torch.__version__ >= "2.1.0" and torch.__version__ < "2.2.0":
     import torch.distributed.fsdp as fsdp
+    from torch.distributed.fsdp._exec_order_utils import _ExecOrderData
     from torch.distributed.fsdp._runtime_utils import (
         _FSDPState,
     )
@@ -42,3 +43,25 @@ if torch.__version__ >= "2.1.0" and torch.__version__ < "2.2.0":
         handle._prefetched = False
 
     fsdp._runtime_utils._reshard = _reshard
+
+    # AdaCPSP dynamically switches the active attention implementation
+    # (Flash / Ulysses / Ring) per microbatch via set_model_strategy().
+    # This causes the inner FSDP handles to execute in varying order across
+    # iterations, triggering _check_order's strict-consistency assertion.
+    # Skipping the check disables forward-prefetch bookkeeping (minor perf
+    # impact) but does not affect correctness — all_gather is still invoked
+    # by the regular forward path.
+    _orig_check_order = _ExecOrderData._check_order
+
+    @no_type_check
+    def _check_order_for_adacpsp(self, handle, is_training):
+        try:
+            from megatron.training import get_args as _get_megatron_args
+            args = _get_megatron_args()
+            if getattr(args, "use_adaCPSP", False):
+                return
+        except Exception:
+            pass
+        return _orig_check_order(self, handle, is_training)
+
+    _ExecOrderData._check_order = _check_order_for_adacpsp

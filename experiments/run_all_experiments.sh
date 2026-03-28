@@ -49,8 +49,11 @@ STRATEGIES="${STRATEGIES:-adacpsp flexsp}"
 NUM_ITERS="${NUM_ITERS:-20}"                    # 真正计时的 iteration 数
 WARMUP_ITERS="${WARMUP_ITERS:-5}"               # 前几个 iter 做 warmup
 EPOCHS="${EPOCHS:-1}"
+LR="${LR:-1e-4}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"       # 每个实验最大超时时间 (秒)
 MEMORY_LIMIT_GB="${MEMORY_LIMIT_GB:-90}"        # 显存限制 (H20 = 96GB, 留 6GB 余量)
+DEFAULT_DP_TYPE="${DEFAULT_DP_TYPE:-zero3}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
 
 # 数据集
 DATASET="${DATASET:-wikipedia}"
@@ -77,6 +80,30 @@ calc_profile_end_iter() {
     local warmup=$1
     local measured=$2
     echo $((warmup + measured))
+}
+
+setup_cuda_runtime_env() {
+    local extra_lib_dirs
+    extra_lib_dirs=$(python - <<'PY'
+import glob
+import os
+import site
+
+dirs = []
+seen = set()
+for base in site.getsitepackages():
+    for lib_dir in sorted(glob.glob(os.path.join(base, "nvidia", "*", "lib"))):
+        if os.path.isdir(lib_dir) and lib_dir not in seen:
+            seen.add(lib_dir)
+            dirs.append(lib_dir)
+print(":".join(dirs))
+PY
+)
+
+    if [ -n "${extra_lib_dirs}" ]; then
+        export LD_LIBRARY_PATH="${extra_lib_dirs}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        log "已追加 CUDA 运行库路径: ${extra_lib_dirs}"
+    fi
 }
 
 # 根据模型和卡数自动决定 GBS
@@ -140,17 +167,36 @@ strategy_to_args() {
     esac
 }
 
-# 检查 model_size 是否在 arguments.py 的 choices 里
-# 如果不在，需要添加（qwen2.5-14b/32b 可能没有）
+# 检查模型对应的 meta config 是否存在。
+# 这里不能直接 import galvatron 包做校验，因为那会触发额外的
+# CUDA / Transformer Engine 依赖加载，可能把环境问题误报成“模型不存在”。
 validate_model_size() {
     local model=$1
-    # config_utils.py 的 path_dict 有这些模型就能用
-    python -c "
-import sys; sys.path.insert(0, '${PROJECT_DIR}')
-from galvatron.models.varlen_llama_hf.meta_configs.config_utils import path_dict
-assert '${model}' in path_dict, f'${model} not in path_dict: {list(path_dict.keys())}'
-print('OK: ${model}')
-" 2>&1
+    local meta_config="${PROJECT_DIR}/galvatron/models/varlen_llama_hf/meta_configs/${model}.json"
+    [ -f "${meta_config}" ]
+}
+
+model_meta_args() {
+    local model=$1
+    local seqlen=$2
+    local meta_config="${PROJECT_DIR}/galvatron/models/varlen_llama_hf/meta_configs/${model}.json"
+
+    python - <<PY
+import json
+
+with open("${meta_config}") as f:
+    cfg = json.load(f)
+
+parts = [
+    f"--vocab_size {cfg['vocab_size']}",
+    f"--hidden_size {cfg['dim']}",
+    f"--num_hidden_layers {cfg['n_layers']}",
+    f"--num_attention_heads {cfg['n_heads']}",
+    f"--ffn_hidden_size {int(cfg.get('ffn_dim', cfg['dim'] * 4))}",
+    f"--max-position-embeddings ${seqlen}",
+]
+print(" ".join(parts))
+PY
 }
 
 ###############################################################################
@@ -168,6 +214,9 @@ Seq Lengths (K):  ${SEQ_LENGTHS_K}
 GBS:              ${GBS_LIST}
 GPU Configs:      ${GPU_CONFIGS}
 Strategies:       ${STRATEGIES}
+Learning Rate:    ${LR}
+Default DP Type:  ${DEFAULT_DP_TYPE}
+Num Workers:      ${NUM_WORKERS}
 Num Iters:        ${NUM_ITERS}
 Warmup Iters:     ${WARMUP_ITERS}
 Timeout (s):      ${TIMEOUT_SECONDS}
@@ -188,6 +237,8 @@ log "总卡数: ${GPU_CONFIGS}"
 log "策略: ${STRATEGIES}"
 log "=========================================="
 
+setup_cuda_runtime_env
+
 # 统计
 TOTAL=0
 PASSED=0
@@ -197,7 +248,7 @@ SKIPPED=0
 
 # 结果汇总 CSV
 SUMMARY_CSV="${RESULT_DIR}/summary.csv"
-echo "model,ngpus,seqlen_k,gbs,strategy,status,wall_time_s,avg_iter_time_ms,throughput_tokens_per_s,peak_memory_gb,log_file" > "${SUMMARY_CSV}"
+echo "model,ngpus,seqlen_k,gbs,strategy,status,wall_time_s,avg_iter_time_ms,throughput_tokens_per_s,peak_activation_mb,log_file" > "${SUMMARY_CSV}"
 
 # ======================== 遍历所有组合 ========================
 for ngpus in ${GPU_CONFIGS}; do
@@ -243,6 +294,7 @@ for ngpus in ${GPU_CONFIGS}; do
                     fi
                     
                     PROFILE_END_ITER=$(calc_profile_end_iter "${WARMUP_ITERS}" "${NUM_ITERS}")
+                    MODEL_META_ARGS=$(model_meta_args "${model}" "${seqlen}")
 
                     # 构建 torchrun 命令
                     CMD="torchrun \
@@ -253,17 +305,22 @@ for ngpus in ${GPU_CONFIGS}; do
                         --master_port=${MASTER_PORT} \
                         ${TRAIN_SCRIPT} \
                         --model_size ${model} \
+                        ${MODEL_META_ARGS} \
                         --set_seqlen_manually 1 \
                         -s ${seqlen} \
                         --global_train_batch_size ${gbs} \
+                        --train-iters ${PROFILE_END_ITER} \
                         --epochs ${EPOCHS} \
+                        --lr ${LR} \
+                        --num-workers ${NUM_WORKERS} \
                         --pp_deg 1 \
                         --global_tp_deg 1 \
                         --global_cp_deg 1 \
-                        --default_dp_type zero3 \
+                        --default_dp_type ${DEFAULT_DP_TYPE} \
                         --mixed_precision bf16 \
                         --use-flash-attn \
                         --dataset ${DATASET} \
+                        --initialize_on_meta 1 \
                         --memory-limit-gb ${MEMORY_LIMIT_GB} \
                         --profile 1 \
                         --profile_start_iter ${WARMUP_ITERS} \
@@ -316,8 +373,8 @@ for ngpus in ${GPU_CONFIGS}; do
                     # 从 log 中提取关键指标
                     AVG_ITER_S=$(grep -oP 'Average iteration time is:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
                     AVG_ITER_MS=$(awk -v s="${AVG_ITER_S}" 'BEGIN { printf "%.3f", s * 1000 }')
-                    THROUGHPUT=$(grep -oP 'Throughput.*?:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
-                    PEAK_MEM=$(grep -oP 'Peak memory.*?:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
+                    THROUGHPUT=$(grep -oP '[Tt]hroughput.*?:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
+                    PEAK_MEM=$(grep -oP 'peak_activation:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
                     
                     # 写入汇总
                     echo "${model},${ngpus},${seqlen_k},${gbs},${strategy},${STATUS},${WALL_TIME},${AVG_ITER_MS},${THROUGHPUT},${PEAK_MEM},${EXP_LOG}" >> "${SUMMARY_CSV}"

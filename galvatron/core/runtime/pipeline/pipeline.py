@@ -359,15 +359,7 @@ class PipelineParallel(nn.Module):
                 self.chunk_warning = False
 
         num_microbatches = self.real_chunks
-        # For AdaCPSP with heterogeneous groups: disable DDP/FSDP auto-sync
-        # during backward to prevent NCCL deadlock between DDP all-reduce and
-        # attention group communications (All-to-All / P2P ring).
-        # We manually reduce gradients after backward completes.
-        use_adacpsp_nosync = args.use_adaCPSP and any(
-            s.get("sp_size", 1) > 1 or s.get("cp_size", 1) > 1
-            for s in getattr(args, 'adacpsp_strategies', [])
-        )
-        if (num_microbatches > 1 and self.async_grad_reduce) or use_adacpsp_nosync:
+        if num_microbatches > 1 and self.async_grad_reduce:
             enter_no_sync_context(model)
 
         losses_reduced = []
@@ -416,26 +408,9 @@ class PipelineParallel(nn.Module):
                     m._exec_order_data.next_iter()
             return losses_reduced
 
-        if (num_microbatches > 1 and self.async_grad_reduce) or use_adacpsp_nosync:
+        if num_microbatches > 1 and self.async_grad_reduce:
             exit_no_sync_context(model)
-            if use_adacpsp_nosync:
-                # For AdaCPSP: use manual all-reduce instead of FSDP internal hooks
-                # because FSDP's _post_backward_hook can deadlock after heterogeneous
-                # communication patterns (All-to-All + P2P) on different sub-groups.
-                import torch.distributed as _dist
-                torch.cuda.synchronize()
-                for p in model.parameters():
-                    if p.grad is not None:
-                        # Cast to fp32 for all-reduce (FSDP normally does this internally)
-                        if p.grad.dtype != torch.float32:
-                            p.grad = p.grad.float()
-                        _dist.all_reduce(p.grad, op=_dist.ReduceOp.AVG)
-                # Still need to advance FSDP root state for next iteration
-                for m in model.modules():
-                    if isinstance(m, FSDP) and m._is_root:
-                        m._exec_order_data.next_iter()
-            else:
-                fsdp_reduce_gradients(model)
+            fsdp_reduce_gradients(model)
 
         if self.finalize_wte_grads:
             torch.distributed.barrier()

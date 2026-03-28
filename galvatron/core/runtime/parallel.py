@@ -132,7 +132,7 @@ def wrap_module_fsdp_manually(
         cast_forward_inputs=False,
         cast_root_forward_inputs=False,
     )
-    forward_prefetch = True if is_moe_model else False # For MoE model, we explicitly prefetch the parameters
+    forward_prefetch = True if is_moe_model else False
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
     fsdp_args = dict(
         process_group=comm_group,
@@ -325,6 +325,24 @@ def wrap_modules_data_parallel(
     assert len(module_list) == len(dp_groups)
 
     process_group = default_process_group.group if default_process_group is not None else dp_groups[0].group
+
+    # PyTorch FSDP1 requires all nested FSDP instances to share the SAME
+    # ProcessGroup object. Using distinct ProcessGroup objects (even with
+    # identical ranks) causes a deadlock during all_gather. When all
+    # dp_groups cover the same set of ranks, unify them to a single
+    # ProcessGroup so nested FSDP works correctly.
+    root_pg = process_group
+    root_ws = torch.distributed.get_world_size(root_pg)
+    all_same = all(
+        torch.distributed.get_world_size(g.group) == root_ws
+        for g in dp_groups if g is not None and g.group is not None
+    )
+    if all_same:
+        class _SharedCommGroup:
+            def __init__(self, group):
+                self.group = group
+        shared_cg = _SharedCommGroup(root_pg)
+        dp_groups = [shared_cg] * len(dp_groups)
     from galvatron.core import get_args
 
     args = get_args()
@@ -366,9 +384,8 @@ def wrap_modules_data_parallel(
         cast_forward_inputs=False,
         cast_root_forward_inputs=False, # For rotary embedding
     )
-    forward_prefetch = True if args.is_moe_model else False # For MoE model, we explicitly prefetch the parameters
+    forward_prefetch = True if args.is_moe_model else False
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
-    # Wrap router paramter into root FSDP with WORLD process group so that the grad of router can be reduce-scatter correctly
     fsdp_args = dict(
         process_group=process_group,
         sharding_strategy=sharding_strategy,

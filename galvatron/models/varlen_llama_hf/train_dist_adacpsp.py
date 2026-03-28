@@ -65,6 +65,149 @@ def _parse_forced_strategy(strategy_str):
     return groups
 
 
+def _build_forced_groups(seqs, world_size, forced_config):
+    """Build forced heterogeneous groups for testing.
+
+    forced_config: list of (attn_type, parallel_size) or
+                          (attn_type, parallel_size, sp_size, cp_size).
+    If a single entry doesn't cover all GPUs it is auto-replicated.
+    """
+    from galvatron.models.varlen_llama_hf.adacpsp_solver import ParallelStrategy
+
+    normalised = []
+    for entry in forced_config:
+        if len(entry) == 2:
+            attn_type, ps = entry
+            if attn_type == "ulysses":
+                normalised.append((attn_type, ps, ps, 1))
+            elif attn_type == "ring":
+                normalised.append((attn_type, ps, 1, ps))
+            else:
+                raise ValueError("USP requires 4-tuple")
+        elif len(entry) == 4:
+            normalised.append(tuple(entry))
+        else:
+            raise ValueError(f"Unexpected forced_config entry: {entry}")
+
+    total_ps = sum(ps for _, ps, _, _ in normalised)
+    if total_ps < world_size and len(normalised) == 1:
+        at, ps, sp, cp = normalised[0]
+        assert world_size % ps == 0
+        normalised = [(at, ps, sp, cp)] * (world_size // ps)
+        total_ps = sum(ps for _, ps, _, _ in normalised)
+    assert total_ps == world_size
+
+    group_seqs = [[] for _ in range(len(normalised))]
+    for i, seq in enumerate(seqs):
+        group_seqs[i % len(normalised)].append(seq)
+
+    groups = []
+    for (attn_type, parallel_size, sp_size, cp_size), g_seqs in zip(normalised, group_seqs):
+        groups.append((
+            ParallelStrategy(attn_type=attn_type, parallel_size=parallel_size,
+                             sp_size=sp_size, cp_size=cp_size),
+            g_seqs,
+        ))
+    return [groups]
+
+
+def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
+                              args, rank, world_size, device):
+    """
+    Rank 0 runs the solver, broadcasts the result, then ALL ranks
+    collectively create communication groups and build per-group microbatches.
+
+    Args:
+        batch: [packed_tokens, cu_seqlens] from DataLoader collate_fn
+    Returns:
+        microbatches list expected by forward_backward:
+          [[[tokens_mb0, cu_mb0]], [[tokens_mb1, cu_mb1]], ...]
+    """
+    from galvatron.models.varlen_llama_hf.adacpsp_solver import (
+        Sequence, ParallelStrategy,
+    )
+    from galvatron.models.varlen_llama_hf.adacpsp_group_manager import convert_microbatch_res
+
+    packed_tokens, cu_seqlens = batch
+    num_seqs = cu_seqlens.shape[0] - 1
+
+    # Reconstruct per-sequence lengths (needed by solver)
+    seq_lens = [(cu_seqlens[i + 1] - cu_seqlens[i]).item() for i in range(num_seqs)]
+
+    # ─── Rank 0 solves ───
+    all_micro_res = None
+    if rank == 0:
+        seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
+
+        if forced_strategy is not None:
+            all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
+        else:
+            all_groups, _ = adacpsp_optimizer.solve_globalbatch(seqs)
+
+        if len(all_groups) == 0:
+            print("[AdaCPSP] Solver failed, fallback to Ulysses×" + str(world_size))
+            fallback = ParallelStrategy("ulysses", world_size)
+            all_groups = [[(fallback, seqs)]]
+
+        all_micro_res = []
+        for micro_groups in all_groups:
+            micro_res = []
+            for strat, group_seqs in micro_groups:
+                seq_ids = [s.id for s in group_seqs]
+                micro_res.append((
+                    strat.attn_type, strat.parallel_size,
+                    strat.sp_size, strat.cp_size, seq_ids,
+                ))
+            all_micro_res.append(micro_res)
+
+    # ─── Broadcast solver result to all ranks ───
+    bcast_buf = [all_micro_res]
+    torch.distributed.broadcast_object_list(bcast_buf, src=0)
+    all_micro_res = bcast_buf[0]
+
+    # ─── All ranks collectively create groups & build microbatches ───
+    args.adacpsp_strategies = []
+    args.adacpsp_sp_groups = []
+    args.adacpsp_cp_groups = []
+
+    microbatches = []
+    for mb_idx, micro_res in enumerate(all_micro_res):
+        (my_seq_ids, my_sp_group, my_cp_group,
+         my_attn_type, my_sp_size, my_cp_size) = convert_microbatch_res(micro_res)
+
+        args.adacpsp_strategies.append({
+            "sp_size": my_sp_size,
+            "cp_size": my_cp_size,
+            "attn_type": my_attn_type,
+        })
+        args.adacpsp_sp_groups.append(my_sp_group)
+        args.adacpsp_cp_groups.append(my_cp_group)
+
+        if len(my_seq_ids) == 0:
+            mb_tokens = torch.zeros(1, dtype=torch.long, device=device)
+            mb_cu = torch.zeros(2, dtype=torch.int64, device=device)
+            mb_cu[1] = 1
+        else:
+            parts = []
+            offsets = [0]
+            for sid in my_seq_ids:
+                start = cu_seqlens[sid].item()
+                end = cu_seqlens[sid + 1].item()
+                parts.append(packed_tokens[start:end])
+                offsets.append(offsets[-1] + (end - start))
+            mb_tokens = torch.cat(parts)
+            mb_cu = torch.tensor(offsets, dtype=torch.int64, device=device)
+
+        microbatches.append([[mb_tokens, mb_cu]])
+
+    if rank == 0:
+        for mb_idx, strat in enumerate(args.adacpsp_strategies):
+            print(f"  [AdaCPSP] MB{mb_idx}: type={strat['attn_type']}, "
+                  f"sp={strat['sp_size']}, cp={strat['cp_size']}")
+
+    return microbatches
+
+
 def train(args):
     local_rank = args.local_rank
     rank = torch.distributed.get_rank()
@@ -113,6 +256,10 @@ def train(args):
 
     # Construct hybrid parallel model
     model = llama_model_hp(config, args)
+
+    torch.distributed.barrier()
+    if rank == 0:
+        print("[SYNC] All ranks finished model construction")
 
     param_size_B = sum(p.numel() for p in model.parameters()) / 1e9
     if rank == 0:
@@ -250,6 +397,9 @@ def train(args):
     
     # For AdaCPSP: dataloader gives ALL ranks the same data
     # For non-AdaCPSP: use the dp group for distributed loading
+    if args.use_adaCPSP:
+        dataloader_group = None
+    else:
         dataloader_group = model.dp_groups_whole[0].group
     
     # Parse forced strategy (for heterogeneous group testing)
@@ -258,34 +408,35 @@ def train(args):
         forced_strategy = _parse_forced_strategy(args.adaCPSP_forced_strategy)
         if rank == 0:
             print(f"[AdaCPSP] Forced strategy: {forced_strategy}")
-    
+
     trainloader = distributed_dataloader(
         dataset=DataLoaderForVarlenLlama(args, device),
         global_bsz=args.global_train_batch_size,
         shuffle=False,
         args=args,
         group=dataloader_group,
-        adaCPSP_optimizer_=adacpsp_optimizer,
-        adaCPSP_forced_strategy_=forced_strategy,
     )
-    
+
     if local_rank == 0:
         print("Start training...")
-    
+
     # Training loop
     for ep in range(args.epochs):
         if not args.check_loss and not args.profile:
             trainloader = tqdm(trainloader) if rank == 0 else trainloader
-        
+
         for iter, batch in enumerate(trainloader):
             profiler.profile_time_start(iter)
             profiler.profile_memory(iter, "Before Forward")
 
-            # Handle batch format
             if not args.use_packing:
                 batch = [batch]
-            
-            # Forward and backward
+            elif args.use_adaCPSP:
+                batch = _adacpsp_solve_and_assign(
+                    batch, adacpsp_optimizer, forced_strategy,
+                    args, rank, world_size, device,
+                )
+
             loss = model.forward_backward(batch, iter, profiler)
             profiler.profile_memory(iter, "After Backward")
 

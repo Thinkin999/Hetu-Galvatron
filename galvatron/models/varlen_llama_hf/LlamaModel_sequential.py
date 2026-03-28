@@ -105,8 +105,8 @@ class LlamaEmbeddings_(nn.Module):
                 torch.distributed.get_world_size(self.sp_group),
             )
             local_tokens = local_tokens[self.seq_start_index: self.seq_end_index]
-        
-            labels = local_tokens.clone()
+
+        labels = local_tokens.clone()
         hidden_states = self.embed_tokens(local_tokens)
         if args.use_packing:
             hidden_states = hidden_states.unsqueeze(1)
