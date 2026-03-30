@@ -88,29 +88,31 @@ def convert_microbatch_res(micro_res):
     assigned to single-rank dummy groups (sp=1, cp=1, no sequences).
 
     Args:
-        micro_res: List of (attn_type, parallel_size, sp_size, cp_size, [seq_id_list])
-            e.g. [("ulysses", 4, 4, 1, [0,1,2]),
-                  ("ring", 4, 1, 4, [3,4,5]),
-                  ("usp", 8, 2, 4, [6,7,8,9])]
-            The sum of all parallel_sizes should equal world_size.
+        micro_res: List of tuples. Supports both formats:
+            5-tuple (legacy): (attn_type, parallel_size, sp_size, cp_size, [seq_ids])
+            6-tuple (placement-aware): (attn_type, parallel_size, sp_size, cp_size,
+                                        placement, [seq_ids])
 
     Returns:
-        batch_indices: List of sequence IDs assigned to the current rank's group
-        sp_group: SP ProcessGroup (for Ulysses All-to-All), or None
-        cp_group: CP ProcessGroup (for Ring P2P), or None
-        attn_type: "ulysses", "ring", or "usp"
-        sp_size: Ulysses parallel size
-        cp_size: Ring parallel size
+        batch_indices, sp_group, cp_group, attn_type, sp_size, cp_size, placement
     """
     world_size = dist.get_world_size()
     rank = dist.get_rank()
 
-    # Safety: pad micro_res to cover all N GPUs
-    total_covered = sum(ps for _, ps, _, _, _ in micro_res)
+    # Normalize to 6-tuple format
+    normalized = []
+    for res_tuple in micro_res:
+        if len(res_tuple) == 5:
+            at, ps, sp, cp, sids = res_tuple
+            normalized.append((at, ps, sp, cp, "context_first", sids))
+        else:
+            normalized.append(res_tuple)
+
+    total_covered = sum(ps for _, ps, _, _, _, _ in normalized)
     if total_covered < world_size:
         remaining = world_size - total_covered
         for _ in range(remaining):
-            micro_res.append(("ulysses", 1, 1, 1, []))
+            normalized.append(("ulysses", 1, 1, 1, "context_first", []))
 
     cum_cnt = 0
     my_sp_group = None
@@ -119,95 +121,100 @@ def convert_microbatch_res(micro_res):
     my_attn_type = "ulysses"
     my_sp_size = 1
     my_cp_size = 1
+    my_placement = "context_first"
 
-    # We collect ALL groups that need to be created across all entries
-    # because dist.new_group is a collective — every rank must participate
     all_groups_to_create = []
 
-    for res_tuple in micro_res:
-        attn_type, parallel_size, sp_size, cp_size, seq_id_list = res_tuple
+    for res_tuple in normalized:
+        attn_type, parallel_size, sp_size, cp_size, placement, seq_id_list = res_tuple
         base_rank = cum_cnt
         group_ranks = list(range(base_rank, base_rank + parallel_size))
 
         if attn_type in ("ulysses", "ring"):
-            # Simple: one communication group for the whole set of ranks
             if parallel_size > 1:
-                all_groups_to_create.append(("simple", group_ranks, attn_type, sp_size, cp_size, seq_id_list))
+                all_groups_to_create.append(("simple", group_ranks, attn_type, sp_size, cp_size, placement, seq_id_list))
             else:
-                all_groups_to_create.append(("none", group_ranks, attn_type, sp_size, cp_size, seq_id_list))
+                all_groups_to_create.append(("none", group_ranks, attn_type, sp_size, cp_size, placement, seq_id_list))
         elif attn_type == "usp":
-            # USP: 2D mesh → need both SP groups and CP groups
-            # Layout: sp_size × cp_size grid on consecutive ranks
-            #   rank(sp_idx, cp_idx) = base_rank + sp_idx * cp_size + cp_idx
-            #
-            # CP groups (contiguous rows, size=cp_size):
-            #   for each sp_idx: [base + sp_idx*cp + 0, ..., base + sp_idx*cp + cp-1]
-            #
-            # SP groups (strided columns, size=sp_size):
-            #   for each cp_idx: [base + 0*cp + cp_idx, ..., base + (sp-1)*cp + cp_idx]
-            all_groups_to_create.append(("usp", group_ranks, attn_type, sp_size, cp_size, seq_id_list))
+            all_groups_to_create.append(("usp", group_ranks, attn_type, sp_size, cp_size, placement, seq_id_list))
         else:
             raise ValueError(f"Unknown attn_type: {attn_type}")
 
         cum_cnt += parallel_size
 
-    # Now create all groups (collective operation)
     for entry in all_groups_to_create:
         kind = entry[0]
         group_ranks = entry[1]
         attn_type = entry[2]
         sp_size = entry[3]
         cp_size = entry[4]
-        seq_id_list = entry[5]
+        placement = entry[5]
+        seq_id_list = entry[6]
         base_rank = group_ranks[0]
 
         if kind == "none":
-            # Single-rank group, no communication
             if rank in group_ranks:
                 my_batch_indices = seq_id_list
                 my_attn_type = attn_type
                 my_sp_size = sp_size
                 my_cp_size = cp_size
+                my_placement = placement
                 my_sp_group = None
                 my_cp_group = None
 
         elif kind == "simple":
-            # Ulysses or Ring: one group
             grp = _get_or_create_group(group_ranks)
             if rank in group_ranks:
                 my_batch_indices = seq_id_list
                 my_attn_type = attn_type
                 my_sp_size = sp_size
                 my_cp_size = cp_size
+                my_placement = placement
                 if attn_type == "ulysses":
                     my_sp_group = grp
                     my_cp_group = None
-                else:  # ring
+                else:
                     my_sp_group = None
                     my_cp_group = grp
 
         elif kind == "usp":
-            # Create CP groups (contiguous rows of cp_size)
-            for sp_idx in range(sp_size):
-                cp_ranks = [base_rank + sp_idx * cp_size + j for j in range(cp_size)]
-                cp_grp = _get_or_create_group(cp_ranks)
-                if rank in cp_ranks:
-                    my_cp_group = cp_grp
+            if placement == "head_first":
+                # Head-first: SP groups consecutive, CP groups strided
+                # rank(cp_idx, sp_idx) = base_rank + cp_idx * sp_size + sp_idx
+                for cp_idx in range(cp_size):
+                    sp_ranks = [base_rank + cp_idx * sp_size + j for j in range(sp_size)]
+                    sp_grp = _get_or_create_group(sp_ranks)
+                    if rank in sp_ranks:
+                        my_sp_group = sp_grp
 
-            # Create SP groups (strided columns of sp_size)
-            for cp_idx in range(cp_size):
-                sp_ranks = [base_rank + sp_idx * cp_size + cp_idx for sp_idx in range(sp_size)]
-                sp_grp = _get_or_create_group(sp_ranks)
-                if rank in sp_ranks:
-                    my_sp_group = sp_grp
+                for sp_idx in range(sp_size):
+                    cp_ranks = [base_rank + cp_idx * sp_size + sp_idx for cp_idx in range(cp_size)]
+                    cp_grp = _get_or_create_group(cp_ranks)
+                    if rank in cp_ranks:
+                        my_cp_group = cp_grp
+            else:
+                # Context-first (default): CP groups consecutive, SP groups strided
+                # rank(sp_idx, cp_idx) = base_rank + sp_idx * cp_size + cp_idx
+                for sp_idx in range(sp_size):
+                    cp_ranks = [base_rank + sp_idx * cp_size + j for j in range(cp_size)]
+                    cp_grp = _get_or_create_group(cp_ranks)
+                    if rank in cp_ranks:
+                        my_cp_group = cp_grp
+
+                for cp_idx in range(cp_size):
+                    sp_ranks = [base_rank + sp_idx * cp_size + cp_idx for sp_idx in range(sp_size)]
+                    sp_grp = _get_or_create_group(sp_ranks)
+                    if rank in sp_ranks:
+                        my_sp_group = sp_grp
 
             if rank in group_ranks:
                 my_batch_indices = seq_id_list
                 my_attn_type = "usp"
                 my_sp_size = sp_size
                 my_cp_size = cp_size
+                my_placement = placement
 
-    return my_batch_indices, my_sp_group, my_cp_group, my_attn_type, my_sp_size, my_cp_size
+    return my_batch_indices, my_sp_group, my_cp_group, my_attn_type, my_sp_size, my_cp_size, my_placement
 
 
 def set_model_strategy(

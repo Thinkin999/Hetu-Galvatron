@@ -38,11 +38,14 @@ SEQ_LENGTHS = [
     ("512k", 524288),
 ]
 
-# 策略配置: (strategy_label, attn_types_arg, description)
+# 策略配置: (strategy_label, attn_types_arg, force_placement, description)
+# force_placement: "auto" (solver decides), "head_first", "context_first"
 STRATEGIES = [
-    ("flexsp",       "ulysses",           "FlexSP (Ulysses only)"),
-    ("adacpsp_ur",   "ulysses ring",      "AdaCPSP (Ulysses + Ring)"),
-    ("adacpsp_full", "ulysses ring usp",  "AdaCPSP (Ulysses + Ring + USP)"),
+    ("flexsp",       "ulysses",           "auto",          "FlexSP (Ulysses only)"),
+    ("adacpsp_ur",   "ulysses ring",      "auto",          "AdaCPSP (Ulysses + Ring)"),
+    ("adacpsp_full", "ulysses ring usp",  "auto",          "AdaCPSP (Ulysses + Ring + USP)"),
+    ("adacpsp_hf",   "ulysses ring usp",  "head_first",    "AdaCPSP USP (force head_first)"),
+    ("adacpsp_cf",   "ulysses ring usp",  "context_first", "AdaCPSP USP (force context_first)"),
 ]
 
 # 数据集
@@ -64,7 +67,7 @@ FALLBACK_GBS = {
 def generate_single_experiment(
     model_name, model_size, hidden_size, num_layers, num_heads, num_kv_heads,
     head_dim, vocab_size, seq_label, seq_length, strategy_label, attn_types,
-    dataset, gbs, output_dir
+    dataset, gbs, output_dir, force_placement="auto",
 ):
     """生成单个实验的 shell 脚本"""
     
@@ -143,6 +146,7 @@ timeout {TIMEOUT_MINUTES}m torchrun \\
     --use-packing \\
     --use-adaCPSP \\
     --adaCPSP-attn-types {attn_types} \\
+    --force-placement {force_placement} \\
     --dataset {dataset} \\
     --initialize_on_meta 1 \\
     2>&1 | tee -a "$LOG_FILE"
@@ -295,10 +299,9 @@ def main():
         model_name, model_size, hidden, layers, heads, kv_heads, head_dim, vocab = model_info
         
         for seq_label, seq_length in SEQ_LENGTHS:
-            for strategy_label, attn_types, desc in STRATEGIES:
+            for strategy_label, attn_types, force_pl, desc in STRATEGIES:
                 for dataset in DATASETS:
                     gbs = GBS
-                    # 对大模型+长序列, 可能需要降低 GBS
                     if model_name in FALLBACK_GBS and seq_length >= 393216:
                         gbs = FALLBACK_GBS[model_name]
                     
@@ -318,9 +321,10 @@ def main():
                         dataset=dataset,
                         gbs=gbs,
                         output_dir=exp_scripts_dir,
+                        force_placement=force_pl,
                     )
                     experiments.append((exp_name, script_path, log_file))
-                    print(f"  Generated: {exp_name} (GBS={gbs})")
+                    print(f"  Generated: {exp_name} (GBS={gbs}, placement={force_pl})")
     
     print(f"\n  Total experiments: {len(experiments)}")
     print(f"  Scripts in: {exp_scripts_dir}/")

@@ -120,7 +120,21 @@ def parse_log(log_path: str) -> dict:
             k: {"count": v, "pct": v / total * 100}
             for k, v in strategy_counts.items()
         }
-    
+
+    # 提取 placement 分布 (placement-aware USP)
+    placement_counts = defaultdict(int)
+    pl_pattern = r"\[AdaCPSP\].*?placement=(\w+)"
+    for m in re.finditer(pl_pattern, content):
+        placement_counts[m.group(1)] += 1
+    if placement_counts:
+        pl_total = sum(placement_counts.values())
+        result["placement_distribution"] = {
+            k: {"count": v, "pct": v / pl_total * 100}
+            for k, v in placement_counts.items()
+        }
+    else:
+        result["placement_distribution"] = {}
+
     return result
 
 
@@ -286,8 +300,81 @@ def generate_report(log_dir: str, index_path: Optional[str] = None) -> str:
             report += f"- `{name}`\n"
         report += "\n建议: 降低 GBS 或增加 selective_checkpoint\n"
     
+    # ── Placement 对比 (head_first vs context_first) ──
+    has_placement = any("adacpsp_hf" in name or "adacpsp_cf" in name for name in results)
+    if has_placement:
+        report += "\n## 5. Placement 对比 (Head-First vs Context-First)\n\n"
+        for model in sorted(set(r.get("model", "?") for r in results.values())):
+            for dataset in sorted(set(r.get("dataset", "?") for r in results.values())):
+                headers = ["Seq Len", "Auto (ms)", "Head-First (ms)", "Context-First (ms)",
+                           "HF vs CF", "Auto Placement Choice"]
+                rows = []
+                for seq_len in ["128k", "256k", "384k", "512k"]:
+                    row = [seq_len]
+                    times = {}
+                    auto_pl = {}
+                    for strat_key, col_key in [("adacpsp_full", "auto"),
+                                               ("adacpsp_hf", "hf"),
+                                               ("adacpsp_cf", "cf")]:
+                        name = f"{model}_{dataset}_{seq_len}_{strat_key}"
+                        r = results.get(name, {})
+                        t = r.get("avg_iter_ms")
+                        if t is not None:
+                            times[col_key] = t
+                            row.append(f"{t:.1f}")
+                        elif r.get("status") in ["OOM", "TIMEOUT"]:
+                            row.append(r.get("status", "N/A"))
+                        else:
+                            row.append("N/A")
+                        if col_key == "auto" and r.get("placement_distribution"):
+                            auto_pl = r["placement_distribution"]
+
+                    hf_t = times.get("hf")
+                    cf_t = times.get("cf")
+                    if hf_t and cf_t and cf_t > 0:
+                        ratio = hf_t / cf_t
+                        better = "HF" if ratio < 1.0 else "CF"
+                        row.append(f"{ratio:.3f}x ({better} wins)")
+                    else:
+                        row.append("N/A")
+
+                    if auto_pl:
+                        pl_str = ", ".join(f"{k}:{v['pct']:.0f}%" for k, v in auto_pl.items())
+                        row.append(pl_str)
+                    else:
+                        row.append("N/A")
+                    rows.append(row)
+
+                if any(r[1] != "N/A" or r[2] != "N/A" or r[3] != "N/A" for r in rows):
+                    report += format_table(headers, rows, f"{model} / {dataset}")
+
+        # Solver placement accuracy
+        report += "\n### Solver Placement 选择准确率\n\n"
+        correct = 0
+        total_pl = 0
+        for seq_len in ["128k", "256k", "384k", "512k"]:
+            for model in sorted(set(r.get("model", "?") for r in results.values())):
+                for dataset in sorted(set(r.get("dataset", "?") for r in results.values())):
+                    hf_name = f"{model}_{dataset}_{seq_len}_adacpsp_hf"
+                    cf_name = f"{model}_{dataset}_{seq_len}_adacpsp_cf"
+                    auto_name = f"{model}_{dataset}_{seq_len}_adacpsp_full"
+                    hf_r = results.get(hf_name, {})
+                    cf_r = results.get(cf_name, {})
+                    auto_r = results.get(auto_name, {})
+                    hf_t = hf_r.get("avg_iter_ms")
+                    cf_t = cf_r.get("avg_iter_ms")
+                    auto_t = auto_r.get("avg_iter_ms")
+                    if hf_t and cf_t and auto_t:
+                        actual_best = min(hf_t, cf_t)
+                        total_pl += 1
+                        if abs(auto_t - actual_best) / actual_best < 0.05:
+                            correct += 1
+        if total_pl > 0:
+            report += f"准确率 (auto 在最佳 forced placement 5% 以内): {correct}/{total_pl} = {correct/total_pl*100:.1f}%\n\n"
+
     # ── 关键发现 ──
-    report += "\n## 5. 关键发现\n\n"
+    section_num = 6 if has_placement else 5
+    report += f"\n## {section_num}. 关键发现\n\n"
     report += "> 请在查看以上数据后, 补充分析结论\n\n"
     report += "### 需要关注的点:\n"
     report += "1. **Ring Attention 在长序列下是否有加速?** 对比 FlexSP 和 AdaCPSP-UR\n"
@@ -295,6 +382,9 @@ def generate_report(log_dir: str, index_path: Optional[str] = None) -> str:
     report += "3. **GQA 比例的影响**: 7B (1:7) vs 14B/32B (1:5)\n"
     report += "4. **跨机通信的影响**: 当 parallel_size > 8 时, 需要跨机\n"
     report += "5. **策略选择分布**: solver 在长序列下是否倾向选择 Ring/USP\n"
+    if has_placement:
+        report += "6. **Placement 选择**: head_first vs context_first 对不同模型/序列长度的影响\n"
+        report += "7. **Solver 自动选择准确率**: auto placement 是否接近最优 forced placement\n"
     
     return report
 

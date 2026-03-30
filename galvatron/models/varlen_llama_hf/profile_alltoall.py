@@ -23,6 +23,8 @@ from datetime import datetime
 import torch
 import torch.distributed as dist
 
+from profile_topo_utils import build_group_ranks_list, linear_fit, topo_key
+
 
 def profile_alltoall(
     sp_group,
@@ -197,6 +199,12 @@ def main():
     parser.add_argument("--mode", type=str, default="both", choices=["model", "raw", "both"],
                         help="model: profile with model-specific tensor shapes; "
                              "raw: profile with raw message sizes; both: do both")
+    parser.add_argument("--topology", type=str, default="both",
+                        choices=["consecutive", "strided", "both"],
+                        help="Topology to profile: consecutive (default ranks), "
+                             "strided (inter-node pattern), or both")
+    parser.add_argument("--gpus_per_node", type=int, default=8,
+                        help="Number of GPUs per node (for topology description)")
     args, _ = parser.parse_known_args()
 
     # Initialize distributed
@@ -214,89 +222,123 @@ def main():
         print(f" Hidden size: {args.hidden_size}, Heads: {args.num_attention_heads}, Layers: {args.num_layers}")
         print("=" * 70)
 
-    # Create SP groups for each power-of-2 size
-    all_results = {}
+    topologies_to_profile = (
+        ["consecutive", "strided"] if args.topology == "both"
+        else [args.topology]
+    )
+
+    # Create SP groups for each power-of-2 size and each topology
+    all_results = {}       # topo_key -> per-sp/topo results
+    bw_dict_consec = {}    # str(sp_size) -> bandwidth (consecutive)
+    bw_dict_strided = {}   # str(sp_size) -> bandwidth (strided)
+    linear_fits = {}       # topo_key -> {alpha, beta, r_squared}
+
     sp_size = 2
     while sp_size <= world_size:
-        num_groups = world_size // sp_size
-        # Create groups: consecutive ranks form a group
-        for g in range(num_groups):
-            group_ranks = list(range(g * sp_size, (g + 1) * sp_size))
-            group = dist.new_group(ranks=group_ranks)
-            if rank in group_ranks:
-                my_group = group
+        for topo in topologies_to_profile:
+            group_ranks_list = build_group_ranks_list(world_size, sp_size, topo)
+            num_groups = len(group_ranks_list)
 
-        if rank == 0:
-            print(f"\n--- Profiling All-to-All with sp_size={sp_size} ({num_groups} groups) ---")
-
-        sp_results = {}
-
-        if args.mode in ["model", "both"]:
-            # Model-specific profiling: simulate actual Ulysses all-to-all shapes
-            seq_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-            seq_lengths = [s for s in seq_lengths if s >= sp_size * 2]  # need at least 2 tokens per rank
+            my_group = None
+            for grp_ranks in group_ranks_list:
+                group = dist.new_group(ranks=grp_ranks)
+                if rank in grp_ranks:
+                    my_group = group
 
             if rank == 0:
-                print(f"  [Model-specific profiling]")
-            model_results = profile_alltoall(
-                my_group, sp_size,
-                args.hidden_size, args.num_attention_heads, args.num_layers,
-                seq_lengths,
-                warmup_iters=args.warmup,
-                profile_iters=args.iters,
-            )
-            sp_results["model"] = model_results
+                example_ranks = group_ranks_list[0]
+                print(f"\n--- AlltoAll sp={sp_size}, topo={topo} ({num_groups} groups, e.g. {example_ranks[:6]}...) ---")
 
-        if args.mode in ["raw", "both"]:
-            # Raw message size profiling
-            msg_sizes_mb = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+            sp_results = {}
+
+            if args.mode in ["model", "both"]:
+                seq_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+                seq_lengths = [s for s in seq_lengths if s >= sp_size * 2]
+
+                if rank == 0:
+                    print(f"  [Model-specific profiling]")
+                model_results = profile_alltoall(
+                    my_group, sp_size,
+                    args.hidden_size, args.num_attention_heads, args.num_layers,
+                    seq_lengths,
+                    warmup_iters=args.warmup,
+                    profile_iters=args.iters,
+                )
+                sp_results["model"] = model_results
+
+            if args.mode in ["raw", "both"]:
+                msg_sizes_mb = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+                if rank == 0:
+                    print(f"  [Raw message size profiling]")
+                raw_results = profile_alltoall_single_tensor(
+                    my_group, sp_size,
+                    msg_sizes_mb,
+                    warmup_iters=args.warmup,
+                    profile_iters=args.iters,
+                )
+                sp_results["raw"] = raw_results
+
+            if "raw" in sp_results:
+                large_msg_bw = [r["bandwidth_GBs"] for r in sp_results["raw"] if r["msg_size_MB"] >= 16]
+                summary_bw = sum(large_msg_bw) / len(large_msg_bw) if large_msg_bw else 0
+                xs = [r["msg_size_MB"] for r in sp_results["raw"]]
+                ys = [r["time_ms"] for r in sp_results["raw"]]
+                fit = linear_fit(xs, ys)
+            elif "model" in sp_results:
+                bws = [r["bandwidth_GBs"] for r in sp_results["model"]]
+                summary_bw = sum(bws) / len(bws) if bws else 0
+                xs = [r["total_bytes_MB"] for r in sp_results["model"]]
+                ys = [r["time_ms"] for r in sp_results["model"]]
+                fit = linear_fit(xs, ys)
+            else:
+                summary_bw = 0
+                fit = {"alpha": 0.0, "beta": 0.0, "r_squared": 0.0}
+
+            sp_results["summary_bandwidth_GBs"] = summary_bw
+            sp_results["topology"] = topo
+            tk = topo_key(sp_size, topo)
+            all_results[tk] = sp_results
+            linear_fits[tk] = fit
+
+            if topo == "consecutive":
+                bw_dict_consec[str(sp_size)] = summary_bw
+            else:
+                bw_dict_strided[str(sp_size)] = summary_bw
 
             if rank == 0:
-                print(f"  [Raw message size profiling]")
-            raw_results = profile_alltoall_single_tensor(
-                my_group, sp_size,
-                msg_sizes_mb,
-                warmup_iters=args.warmup,
-                profile_iters=args.iters,
-            )
-            sp_results["raw"] = raw_results
+                print(f"  → sp={sp_size} topo={topo}: BW={summary_bw:.2f} GB/s, "
+                      f"fit(alpha={fit['alpha']:.6f}, beta={fit['beta']:.4f}, R²={fit['r_squared']:.4f})")
 
-        # Compute summary bandwidth (average of raw results for messages >= 16MB)
-        if "raw" in sp_results:
-            large_msg_bw = [r["bandwidth_GBs"] for r in sp_results["raw"] if r["msg_size_MB"] >= 16]
-            summary_bw = sum(large_msg_bw) / len(large_msg_bw) if large_msg_bw else 0
-        elif "model" in sp_results:
-            bws = [r["bandwidth_GBs"] for r in sp_results["model"]]
-            summary_bw = sum(bws) / len(bws) if bws else 0
-        else:
-            summary_bw = 0
-
-        sp_results["summary_bandwidth_GBs"] = summary_bw
-        all_results[sp_size] = sp_results
-
-        if rank == 0:
-            print(f"  → Summary bandwidth for sp={sp_size}: {summary_bw:.2f} GB/s")
-
-        dist.barrier()
+            dist.barrier()
         sp_size *= 2
 
     # Save results
     if rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Legacy bandwidth_dict_GBs uses consecutive values for backward compat
+        legacy_bw = dict(bw_dict_consec)
+        if not legacy_bw and bw_dict_strided:
+            legacy_bw = dict(bw_dict_strided)
+        legacy_bw["1"] = 1e10
+
         output = {
             "type": "alltoall_profiling",
             "world_size": world_size,
+            "gpus_per_node": args.gpus_per_node,
             "hidden_size": args.hidden_size,
             "num_attention_heads": args.num_attention_heads,
             "num_layers": args.num_layers,
             "timestamp": timestamp,
-            "results": {str(k): v for k, v in all_results.items()},
-            # Summary dict for cost model: sp_size -> bandwidth in GB/s
-            "bandwidth_dict_GBs": {str(k): v["summary_bandwidth_GBs"] for k, v in all_results.items()},
+            "topologies_profiled": topologies_to_profile,
+            "results": all_results,
+            "linear_fits": linear_fits,
+            "bandwidth_dict_GBs": legacy_bw,
+            "bandwidth_dict_consec_GBs": {**bw_dict_consec, "1": 1e10},
+            "bandwidth_dict_strided_GBs": {**bw_dict_strided, "1": 1e10},
         }
-        # Add sp=1 (no communication)
-        output["bandwidth_dict_GBs"]["1"] = 1e10
 
         save_path = os.path.join(args.save_dir, f"alltoall_profile_{world_size}gpus_{timestamp}.json")
         with open(save_path, "w") as f:
@@ -305,9 +347,10 @@ def main():
         print(f"\n{'=' * 70}")
         print(f" Results saved to: {save_path}")
         print(f"\n Bandwidth Summary (for cost model):")
-        for sp_str, bw in output["bandwidth_dict_GBs"].items():
-            bw_display = f"{bw:.2f}" if bw < 1e9 else "inf (no comm)"
-            print(f"   sp_size={sp_str:>3}: {bw_display} GB/s")
+        for tk_str, fit in linear_fits.items():
+            bw = all_results[tk_str]["summary_bandwidth_GBs"]
+            bw_display = f"{bw:.2f}" if bw < 1e9 else "inf"
+            print(f"   {tk_str:>20}: BW={bw_display} GB/s, alpha={fit['alpha']:.6f}, beta={fit['beta']:.4f}")
         print(f"{'=' * 70}")
 
     dist.destroy_process_group()

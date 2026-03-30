@@ -156,7 +156,8 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
                 seq_ids = [s.id for s in group_seqs]
                 micro_res.append((
                     strat.attn_type, strat.parallel_size,
-                    strat.sp_size, strat.cp_size, seq_ids,
+                    strat.sp_size, strat.cp_size,
+                    strat.placement, seq_ids,
                 ))
             all_micro_res.append(micro_res)
 
@@ -173,12 +174,13 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
     microbatches = []
     for mb_idx, micro_res in enumerate(all_micro_res):
         (my_seq_ids, my_sp_group, my_cp_group,
-         my_attn_type, my_sp_size, my_cp_size) = convert_microbatch_res(micro_res)
+         my_attn_type, my_sp_size, my_cp_size, my_placement) = convert_microbatch_res(micro_res)
 
         args.adacpsp_strategies.append({
             "sp_size": my_sp_size,
             "cp_size": my_cp_size,
             "attn_type": my_attn_type,
+            "placement": my_placement,
         })
         args.adacpsp_sp_groups.append(my_sp_group)
         args.adacpsp_cp_groups.append(my_cp_group)
@@ -202,8 +204,9 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
 
     if rank == 0:
         for mb_idx, strat in enumerate(args.adacpsp_strategies):
+            pl_str = f", placement={strat['placement']}" if strat['attn_type'] == 'usp' else ""
             print(f"  [AdaCPSP] MB{mb_idx}: type={strat['attn_type']}, "
-                  f"sp={strat['sp_size']}, cp={strat['cp_size']}")
+                  f"sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}")
 
     return microbatches
 
@@ -408,6 +411,13 @@ def train(args):
         forced_strategy = _parse_forced_strategy(args.adaCPSP_forced_strategy)
         if rank == 0:
             print(f"[AdaCPSP] Forced strategy: {forced_strategy}")
+
+    # Placement override: "auto" (solver decides), "head_first", "context_first"
+    force_placement = getattr(args, "force_placement", "auto")
+    if force_placement != "auto" and adacpsp_optimizer is not None:
+        adacpsp_optimizer.force_placement = force_placement
+        if rank == 0:
+            print(f"[AdaCPSP] Forced placement: {force_placement}")
 
     trainloader = distributed_dataloader(
         dataset=DataLoaderForVarlenLlama(args, device),

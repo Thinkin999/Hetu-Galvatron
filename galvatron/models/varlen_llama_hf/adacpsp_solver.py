@@ -180,7 +180,7 @@ def chunk_globalbatch(seqs_gb: List[Sequence], mb_num: int, chunk_alg: str = "so
 @dataclass
 class ParallelStrategy:
     """
-    A (attn_type, parallel_size) pair representing a parallel group strategy.
+    A (attn_type, parallel_size, placement) tuple representing a parallel group strategy.
 
     attn_type:
       - "ulysses" : All-to-All (Ulysses SP), sp_size = parallel_size, cp_size = 1
@@ -189,41 +189,51 @@ class ParallelStrategy:
 
     parallel_size: total GPUs occupied by one such group (1, 2, 4, 8, …)
     sp_size / cp_size: explicit decomposition (auto-derived from attn_type if 0)
+    placement: "head_first" or "context_first"
+      - head_first:    SP groups use consecutive ranks (AlltoAll intra-node), CP groups strided
+      - context_first: CP groups use consecutive ranks (Ring intra-node), SP groups strided
+      Only meaningful for USP; ulysses/ring always use "context_first".
     """
     attn_type: str   # "ulysses", "ring", or "usp"
     parallel_size: int
     sp_size: int = 0
     cp_size: int = 0
+    placement: str = "context_first"  # "head_first" | "context_first"
 
     def __post_init__(self):
         if self.attn_type == "ulysses":
             self.sp_size = self.parallel_size
             self.cp_size = 1
+            self.placement = "context_first"
         elif self.attn_type == "ring":
             self.sp_size = 1
             self.cp_size = self.parallel_size
+            self.placement = "context_first"
         elif self.attn_type == "usp":
-            # For USP, sp_size and cp_size MUST be provided explicitly
             assert self.sp_size > 1 and self.cp_size > 1, \
                 f"USP requires sp_size>1 and cp_size>1, got sp={self.sp_size}, cp={self.cp_size}"
             assert self.sp_size * self.cp_size == self.parallel_size, \
                 f"sp_size*cp_size ({self.sp_size}*{self.cp_size}) != parallel_size ({self.parallel_size})"
+            assert self.placement in ("head_first", "context_first"), \
+                f"Unknown placement: {self.placement!r}"
         else:
             raise ValueError(f"Unknown attn_type: {self.attn_type}")
     
     def __repr__(self):
         if self.attn_type == "usp":
-            return f"usp(sp{self.sp_size}×cp{self.cp_size})"
+            pl = "hf" if self.placement == "head_first" else "cf"
+            return f"usp(sp{self.sp_size}×cp{self.cp_size},{pl})"
         return f"{self.attn_type}×{self.parallel_size}"
 
     def __hash__(self):
-        return hash((self.attn_type, self.parallel_size, self.sp_size, self.cp_size))
+        return hash((self.attn_type, self.parallel_size, self.sp_size, self.cp_size, self.placement))
 
     def __eq__(self, other):
         return (self.attn_type == other.attn_type
                 and self.parallel_size == other.parallel_size
                 and self.sp_size == other.sp_size
-                and self.cp_size == other.cp_size)
+                and self.cp_size == other.cp_size
+                and self.placement == other.placement)
 
 
 # ──────────────────────────────────────────────────────────
@@ -257,57 +267,41 @@ class AdaCPSPCostModel:
                  mixed_precision: bool = True,
                  act_per_token: float = 3.96,
         # ── GQA (Grouped-Query Attention) ──
-        # For MHA: n_kv_heads = n_heads (or None, defaults to n_heads = h / head_dim)
-        # For GQA: n_kv_heads < n_heads, reducing KV tensor size in P2P/A2A
-        num_attention_heads: Optional[int] = None,   # n_heads; inferred from h/128 if None
-        num_kv_heads: Optional[int] = None,           # n_kv_heads; defaults to n_heads (MHA)
-        head_dim: int = 128,                          # per-head dimension
-        # Piecewise compute coefficients:
-        #   list of dicts: [{"range": [lo, hi], "a": ..., "b": ..., "c": ...}, ...]
+        num_attention_heads: Optional[int] = None,
+        num_kv_heads: Optional[int] = None,
+        head_dim: int = 128,
+        # Piecewise compute coefficients
         piecewise_compute_coeffs: Optional[List[Dict]] = None,
-        # Fallback single-segment compute coefficients
         cpt_alpha1: float = 3.78e-8,
         cpt_alpha2: float = -1.06e-5,
-        cpt_beta1: float = 0.25,  # per-layer bias
+        cpt_beta1: float = 0.25,
         # Communication bandwidths (legacy: simple BW model)
         alltoall_bandwidth_dict_gbs: Optional[Dict[int, float]] = None,
         p2p_bandwidth_dict_gbs: Optional[Dict[int, float]] = None,
-        # Communication linear fit (new: time_ms = alpha * msg_MB + beta)
-        # Dict[group_size, {"alpha": float, "beta": float}]
+        # Communication linear fit
         alltoall_linear_fit: Optional[Dict[int, Dict[str, float]]] = None,
         p2p_linear_fit: Optional[Dict[int, Dict[str, float]]] = None,
-        # Ring per-step fit from actual ring profiling (preferred for P2P ring):
-        #   per_step_time_ms = alpha * kv_per_step_MB + beta
-        # This captures ring contention effects that raw P2P data misses.
         p2p_ring_step_fit: Optional[Dict[int, Dict[str, float]]] = None,
-        # Ring per-step interpolation table (most accurate for P2P ring):
-        #   Dict[group_size, List[(kv_per_step_MB, time_ms)]] sorted by kv_per_step_MB
-        # Uses linear interpolation between profiled data points.
         p2p_ring_interp: Optional[Dict[int, List[Tuple[float, float]]]] = None,
-        # A2A per-op interpolation table (most accurate for All-to-All):
-        #   Dict[group_size, List[(msg_MB, time_ms)]] sorted by msg_MB
         a2a_interp: Optional[Dict[int, List[Tuple[float, float]]]] = None,
         # ── Overlap-aware modeling parameters ──
-        # Backward/forward compute ratio for Flash Attention (profiled value)
         bwd_fwd_ratio: float = 2.0,
-        # Backward comm ratio for Ring Attention (dual ring in bwd: KV + dKV)
         ring_bwd_comm_ratio: float = 2.0,
-        # Enable overlap-aware total_time calculation for Ring Attention / USP
-        # When True: uses max(compute_step, comm_step) per ring step
-        # When False: uses simple additive model (compute + comm)
         enable_overlap_model: bool = True,
-        # ── Deprecated: ring_causal_correction ──
-        # Previously this added 2× FLOPs for non-diagonal ring steps. This was
-        # INCORRECT: zigzag ring attention uses half-Q or half-K for non-diagonal
-        # steps, making all steps have equal FLOPs ≈ S_local²/2.
-        # Kept for backward compatibility but no longer used.
         ring_causal_correction: bool = False,
-        # ── Overlap leakage ──
-        # Fraction of the minor term (min(compute, comm)) that "leaks" into
-        # the overlapped time: time = max(comp, comm) + leakage * min(comp, comm)
-        # leakage=0 → perfect overlap; leakage=1 → fully additive.
-        # Typical value: 0.1~0.2 (FlexSP uses ~0.15 when compute-bound).
         overlap_leakage: float = 0.1,
+        # ── Placement-aware topology bandwidth data ──
+        gpus_per_node: int = 8,
+        # Topology-split bandwidth dicts: {group_size: bandwidth_GBs}
+        alltoall_bw_consec: Optional[Dict[int, float]] = None,
+        alltoall_bw_strided: Optional[Dict[int, float]] = None,
+        p2p_bw_consec: Optional[Dict[int, float]] = None,
+        p2p_bw_strided: Optional[Dict[int, float]] = None,
+        # Topology-split linear fits: {group_size: {"alpha": .., "beta": ..}}
+        alltoall_linear_consec: Optional[Dict[int, Dict[str, float]]] = None,
+        alltoall_linear_strided: Optional[Dict[int, Dict[str, float]]] = None,
+        p2p_linear_consec: Optional[Dict[int, Dict[str, float]]] = None,
+        p2p_linear_strided: Optional[Dict[int, Dict[str, float]]] = None,
                  ):
         self.N = cluster_size
         self.h = hidden_size
@@ -345,16 +339,67 @@ class AdaCPSPCostModel:
         # Communication: prefer linear fit if available, fallback to bandwidth
         self.alltoall_bw = alltoall_bandwidth_dict_gbs or {1: 1e10, 2: 131.7, 4: 164.3, 8: 170.4}
         self.p2p_bw = p2p_bandwidth_dict_gbs or {1: 1e10, 2: 178.1, 4: 147.4, 8: 119.5}
-        self.alltoall_linear = alltoall_linear_fit  # {gs: {"alpha": ms_per_MB, "beta": ms}}
+        self.alltoall_linear = alltoall_linear_fit
         self.p2p_linear = p2p_linear_fit
-        self.p2p_ring_step = p2p_ring_step_fit  # {gs: {"alpha": ms_per_MB_kv, "beta": ms}}
-        self.p2p_ring_interp = p2p_ring_interp  # {gs: [(kv_MB, time_ms), ...] sorted}
-        self.a2a_interp = a2a_interp  # {gs: [(msg_MB, time_ms), ...] sorted}
-        
-        # Compute calibration: seq_len → correction_factor
-        # Populated by calibrate_from_validation to correct for profiling vs real discrepancies.
-        # [(seq_len, correction_factor), ...] sorted by seq_len.
+        self.p2p_ring_step = p2p_ring_step_fit
+        self.p2p_ring_interp = p2p_ring_interp
+        self.a2a_interp = a2a_interp
+
+        # Placement-aware topology data
+        self.gpus_per_node = gpus_per_node
+        self.alltoall_bw_consec = alltoall_bw_consec
+        self.alltoall_bw_strided = alltoall_bw_strided
+        self.p2p_bw_consec = p2p_bw_consec
+        self.p2p_bw_strided = p2p_bw_strided
+        self.alltoall_linear_consec = alltoall_linear_consec
+        self.alltoall_linear_strided = alltoall_linear_strided
+        self.p2p_linear_consec = p2p_linear_consec
+        self.p2p_linear_strided = p2p_linear_strided
+
         self.compute_correction: Optional[List[Tuple[int, float]]] = None
+
+    # ---- Placement-aware topology routing ----
+
+    @staticmethod
+    def _get_topo(placement: str, comm_type: str) -> str:
+        """Derive topology type from placement and communication primitive.
+
+        head_first:    AlltoAll=consecutive, Ring=strided
+        context_first: AlltoAll=strided,     Ring=consecutive
+        """
+        if placement == "head_first":
+            return "consecutive" if comm_type == "alltoall" else "strided"
+        else:  # context_first (default)
+            return "strided" if comm_type == "alltoall" else "consecutive"
+
+    def _select_a2a_bw(self, topo: str) -> Optional[Dict[int, float]]:
+        """Pick alltoall BW dict for the given topology, with fallback."""
+        if topo == "consecutive" and self.alltoall_bw_consec:
+            return self.alltoall_bw_consec
+        if topo == "strided" and self.alltoall_bw_strided:
+            return self.alltoall_bw_strided
+        return None  # caller uses self.alltoall_bw
+
+    def _select_a2a_linear(self, topo: str) -> Optional[Dict[int, Dict[str, float]]]:
+        if topo == "consecutive" and self.alltoall_linear_consec:
+            return self.alltoall_linear_consec
+        if topo == "strided" and self.alltoall_linear_strided:
+            return self.alltoall_linear_strided
+        return None  # caller uses self.alltoall_linear
+
+    def _select_p2p_bw(self, topo: str) -> Optional[Dict[int, float]]:
+        if topo == "consecutive" and self.p2p_bw_consec:
+            return self.p2p_bw_consec
+        if topo == "strided" and self.p2p_bw_strided:
+            return self.p2p_bw_strided
+        return None
+
+    def _select_p2p_linear(self, topo: str) -> Optional[Dict[int, Dict[str, float]]]:
+        if topo == "consecutive" and self.p2p_linear_consec:
+            return self.p2p_linear_consec
+        if topo == "strided" and self.p2p_linear_strided:
+            return self.p2p_linear_strided
+        return None
 
     # ---- GQA Head Padding Overhead ----
 
@@ -570,195 +615,173 @@ class AdaCPSPCostModel:
 
     # ---- Communication ----
 
-    def _a2a_per_op_time(self, msg_mb: float, sp_size: int) -> float:
+    def _a2a_per_op_time(self, msg_mb: float, sp_size: int,
+                          topo: str = "consecutive") -> float:
         """Get per-op A2A time (ms) with cascading fallback.
         
-        Priority: interpolation → linear fit → BW model.
+        Priority: topology-aware linear fit → generic interpolation →
+                  generic linear fit → topology-aware BW → generic BW.
         """
-        # Priority 1: Interpolation from actual A2A profiling
+        # Priority 1: Topology-aware linear fit
+        topo_lin = self._select_a2a_linear(topo)
+        if topo_lin and sp_size in topo_lin:
+            fit = topo_lin[sp_size]
+            return max(0.0, fit["alpha"] * msg_mb + fit["beta"])
+
+        # Priority 2: Generic interpolation from actual A2A profiling
         interp_val = self._interp_a2a(msg_mb, sp_size)
         if interp_val is not None:
             return interp_val
 
-        # Priority 2: Linear fit
+        # Priority 3: Generic linear fit
         if self.alltoall_linear and sp_size in self.alltoall_linear:
             fit = self.alltoall_linear[sp_size]
-            return fit["alpha"] * msg_mb + fit["beta"]
+            return max(0.0, fit["alpha"] * msg_mb + fit["beta"])
 
-        # Priority 3: Bandwidth model
+        # Priority 4: Topology-aware BW model
+        topo_bw = self._select_a2a_bw(topo)
+        if topo_bw and sp_size in topo_bw:
+            return msg_mb / topo_bw[sp_size]
+
+        # Priority 5: Generic BW model
         bw = self.alltoall_bw.get(sp_size, self.alltoall_bw.get(max(self.alltoall_bw.keys()), 100))
         return msg_mb / bw
 
-    def alltoall_time(self, seqlens: List[int], sp_size: int) -> float:
-        """All-to-All communication time (ms) for Ulysses SP.
-        
-        Each Ulysses attention layer does 4 all-to-all ops in forward (Q,K,V scatter + O gather)
-        and 4 in backward = 8 per layer.
-        
-        GQA-aware: Q and O use full hidden (n_heads * head_dim), but K and V use
-        kv_hidden (n_kv_heads * head_dim). For MHA these are the same.
-        
-        Head-padding-aware: when heads are not divisible by sp_size, the actual
-        communication volume increases by the padding factor.
-        
-        Per-op message size:
-          Q/O: total_tokens * hidden * q_factor / sp_size * 2 bytes
-          K/V: total_tokens * kv_hidden * kv_factor / sp_size * 2 bytes
-        """
+    def alltoall_time(self, seqlens: List[int], sp_size: int,
+                      topo: str = "consecutive") -> float:
+        """All-to-All communication time (ms) for Ulysses SP."""
         if sp_size <= 1:
             return 0.0
         total_tokens = sum(seqlens)
-        # Head padding overhead: q_factor >= 1.0, kv_factor >= 1.0
         q_factor, kv_factor = self.head_padding_overhead(sp_size)
-        # GQA-aware with head padding: effective hidden dims
         qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / sp_size
         kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / sp_size
-        # Fwd: scatter(Q), scatter(K), scatter(V), gather(O) = 2 qo + 2 kv
-        # Bwd: scatter(dO), gather(dQ), gather(dK), gather(dV) = 2 qo + 2 kv
-        num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
-        num_kv_ops = 2 * 2 * self.l  # K+V × fwd+bwd × layers
+        num_qo_ops = 2 * 2 * self.l
+        num_kv_ops = 2 * 2 * self.l
 
-        qo_time = self._a2a_per_op_time(qo_msg_mb, sp_size)
-        kv_time = self._a2a_per_op_time(kv_msg_mb, sp_size)
+        qo_time = self._a2a_per_op_time(qo_msg_mb, sp_size, topo)
+        kv_time = self._a2a_per_op_time(kv_msg_mb, sp_size, topo)
         return qo_time * num_qo_ops + kv_time * num_kv_ops
 
-    def p2p_ring_time(self, seqlens: List[int], cp_size: int) -> float:
-        """P2P ring communication time (ms) for Ring Attention.
-        
-        Ring attention does (cp_size - 1) ring steps per layer.
-        Each step sends K and V tensors via batch_isend_irecv (2 sends + 2 recvs).
-        
-        Four estimation methods (in priority order):
-        1. Interpolation table: exact lookup/linear interpolation from ring profiling data.
-        2. Ring-step linear fit: alpha * kv_per_step_MB + beta (from ring profiling).
-        3. Raw P2P linear fit: 2 × (alpha * single_kv_MB + beta) (isolated P2P data).
-        4. Bandwidth model: kv_per_step_MB / bw.
-        
-        GQA-aware: uses kv_hidden = n_kv_heads * head_dim instead of full hidden_size.
-        
-        Total = per_step_time × (cp_size - 1) steps × L (layers).
-        """
+    def p2p_ring_time(self, seqlens: List[int], cp_size: int,
+                      topo: str = "consecutive") -> float:
+        """P2P ring communication time (ms) for Ring Attention."""
         if cp_size <= 1:
             return 0.0
         total_tokens = sum(seqlens)
         single_kv_mb = (total_tokens / cp_size) * self.kv_hidden * 2 / 1024 / 1024
-        kv_per_step_mb = 2 * single_kv_mb  # K + V combined
+        kv_per_step_mb = 2 * single_kv_mb
 
-        per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size)
+        per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size, topo)
         return per_step_time * (cp_size - 1) * self.l
 
-    def _ring_per_step_time(self, kv_per_step_mb: float, cp_size: int) -> float:
+    def _ring_per_step_time(self, kv_per_step_mb: float, cp_size: int,
+                             topo: str = "consecutive") -> float:
         """Get per-step ring comm time (ms) with cascading fallback.
         
-        Priority: interpolation → ring-step fit → raw P2P fit → BW model.
+        Priority: topology-aware P2P linear fit → generic interpolation →
+                  ring-step fit → generic P2P fit → topology-aware BW → generic BW.
         """
-        # Priority 1: Interpolation from actual ring profiling
+        # Priority 1: Topology-aware P2P linear fit
+        topo_lin = self._select_p2p_linear(topo)
+        if topo_lin and cp_size in topo_lin:
+            fit = topo_lin[cp_size]
+            return max(0.0, fit["alpha"] * kv_per_step_mb + fit["beta"])
+
+        # Priority 2: Generic interpolation from actual ring profiling
         interp_val = self._interp_ring_per_step(kv_per_step_mb, cp_size)
         if interp_val is not None:
             return interp_val
 
-        # Priority 2: Ring per-step linear fit
+        # Priority 3: Ring per-step linear fit
         if self.p2p_ring_step and cp_size in self.p2p_ring_step:
             fit = self.p2p_ring_step[cp_size]
-            return fit["alpha"] * kv_per_step_mb + fit["beta"]
+            return max(0.0, fit["alpha"] * kv_per_step_mb + fit["beta"])
 
-        # Priority 3: Raw P2P linear fit
+        # Priority 4: Generic raw P2P linear fit
         if self.p2p_linear and cp_size in self.p2p_linear:
             fit = self.p2p_linear[cp_size]
             single_kv_mb = kv_per_step_mb / 2
             per_kv_time = fit["alpha"] * single_kv_mb + fit["beta"]
-            return 2 * per_kv_time
-        
-        # Priority 4: Bandwidth model
+            return max(0.0, 2 * per_kv_time)
+
+        # Priority 5: Topology-aware BW model
+        topo_bw = self._select_p2p_bw(topo)
+        if topo_bw and cp_size in topo_bw:
+            return kv_per_step_mb / topo_bw[cp_size]
+
+        # Priority 6: Generic BW model
         bw = self.p2p_bw.get(cp_size, self.p2p_bw.get(max(self.p2p_bw.keys()), 100))
         return kv_per_step_mb / bw
 
-    def usp_comm_time(self, seqlens: List[int], sp_size: int, cp_size: int) -> float:
+    def usp_comm_time(self, seqlens: List[int], sp_size: int, cp_size: int,
+                      placement: str = "context_first") -> float:
         """Communication time (ms) for USP (Ulysses + Ring combined).
 
-        In USP with sp_size=S, cp_size=C, total parallel = S*C:
-          - Each rank starts with total_tokens/(S*C) tokens
-          - All-to-All across sp_group (size S):
-            Q/O: per_op = total_tokens * H * q_factor * 2 / (S*C) / 1024² (MB)
-            K/V: per_op = total_tokens * kv_hidden * kv_factor * 2 / (S*C) / 1024² (MB)
-          - Ring Attention across cp_group (size C): exchanges K, V
-            After Ulysses split: each KV tensor has kv_hidden * kv_factor / S dims
-            → single_kv_msg = (total_tokens/C) * (kv_hidden * kv_factor / S) * 2 / 1024² (MB)
-        
-        Head-padding-aware: q_factor/kv_factor reflect GQA group replication overhead.
+        Placement determines which communication primitive gets the faster
+        (consecutive/intra-node) topology and which gets the slower (strided).
         """
+        a2a_topo = self._get_topo(placement, "alltoall")
+        ring_topo = self._get_topo(placement, "ring")
+
         if sp_size <= 1:
-            return self.p2p_ring_time(seqlens, cp_size)
+            return self.p2p_ring_time(seqlens, cp_size, ring_topo)
         if cp_size <= 1:
-            return self.alltoall_time(seqlens, sp_size)
+            return self.alltoall_time(seqlens, sp_size, a2a_topo)
 
         total_tokens = sum(seqlens)
         parallel_size = sp_size * cp_size
-        # Head padding overhead for the Ulysses SP component
         q_factor, kv_factor = self.head_padding_overhead(sp_size)
 
-        # --- AlltoAll component (GQA-aware with head padding, cascading fallback) ---
         qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
         kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
-        num_qo_ops = 2 * 2 * self.l  # Q+O × fwd+bwd × layers
-        num_kv_ops = 2 * 2 * self.l  # K+V × fwd+bwd × layers
+        num_qo_ops = 2 * 2 * self.l
+        num_kv_ops = 2 * 2 * self.l
 
-        qo_per_op = self._a2a_per_op_time(qo_msg_mb, sp_size)
-        kv_per_op = self._a2a_per_op_time(kv_msg_mb, sp_size)
+        qo_per_op = self._a2a_per_op_time(qo_msg_mb, sp_size, a2a_topo)
+        kv_per_op = self._a2a_per_op_time(kv_msg_mb, sp_size, a2a_topo)
         a2a_time = qo_per_op * num_qo_ops + kv_per_op * num_kv_ops
 
-        # --- P2P Ring component (GQA-aware with head padding, cascading fallback) ---
-        # After All-to-All, KV tensors have kv_hidden * kv_factor / sp_size dims
-        # (padded KV heads are distributed, then ring-exchanged)
         padded_kv_hidden = self.kv_hidden * kv_factor
         kv_hidden_after_uly = padded_kv_hidden / sp_size
         single_kv_mb = (total_tokens / cp_size) * kv_hidden_after_uly * 2 / 1024 / 1024
-        kv_per_step_mb = 2 * single_kv_mb  # K + V combined
-        per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size)
+        kv_per_step_mb = 2 * single_kv_mb
+        per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size, ring_topo)
         p2p_time = per_step_time * (cp_size - 1) * self.l
 
         return a2a_time + p2p_time
 
     def comm_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
         """Communication time for a strategy."""
+        placement = strategy.placement
+        a2a_topo = self._get_topo(placement, "alltoall")
+        ring_topo = self._get_topo(placement, "ring")
         if strategy.attn_type == "ulysses":
-            return self.alltoall_time(seqlens, strategy.sp_size)
+            return self.alltoall_time(seqlens, strategy.sp_size, a2a_topo)
         elif strategy.attn_type == "ring":
-            return self.p2p_ring_time(seqlens, strategy.cp_size)
+            return self.p2p_ring_time(seqlens, strategy.cp_size, ring_topo)
         elif strategy.attn_type == "usp":
-            return self.usp_comm_time(seqlens, strategy.sp_size, strategy.cp_size)
+            return self.usp_comm_time(seqlens, strategy.sp_size, strategy.cp_size, placement)
         else:
             raise ValueError(f"Unknown attn_type: {strategy.attn_type}")
 
     # ---- Ring P2P comm helpers (per-step, single direction) ----
 
     def _p2p_fwd_comm_per_step(self, total_tokens: int, cp_size: int,
-                                kv_hidden: Optional[int] = None) -> float:
-        """Forward ring: one step KV transfer time (ms).
-        
-        Each step sends K + V, each of shape [tokens/cp_size, kv_hidden, ...].
-        kv_hidden defaults to self.kv_hidden (GQA-aware), for USP it's kv_hidden/sp_size.
-        
-        Uses the same cascading priority as _ring_per_step_time.
-        """
+                                kv_hidden: Optional[int] = None,
+                                topo: str = "consecutive") -> float:
+        """Forward ring: one step KV transfer time (ms)."""
         if kv_hidden is None:
             kv_hidden = self.kv_hidden
         single_kv_mb = (total_tokens / cp_size) * kv_hidden * 2 / 1024 / 1024
-        kv_per_step_mb = 2 * single_kv_mb  # K + V combined
-        return self._ring_per_step_time(kv_per_step_mb, cp_size)
+        kv_per_step_mb = 2 * single_kv_mb
+        return self._ring_per_step_time(kv_per_step_mb, cp_size, topo)
 
     def _p2p_bwd_comm_per_step(self, total_tokens: int, cp_size: int,
-                                kv_hidden: Optional[int] = None) -> float:
-        """Backward ring: one step dual-ring transfer time (ms).
-        
-        Backward runs two concurrent rings:
-          1. Forward ring for KV (same as forward)
-          2. Reverse ring for dKV (same tensor size, opposite direction)
-        
-        The dual ring roughly doubles the comm time since both directions
-        compete for bandwidth (profiled as ring_bwd_comm_ratio).
-        """
-        fwd_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden)
+                                kv_hidden: Optional[int] = None,
+                                topo: str = "consecutive") -> float:
+        """Backward ring: one step dual-ring transfer time (ms)."""
+        fwd_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden, topo)
         return fwd_step * self.ring_bwd_comm_ratio
 
     # ---- Overlap-aware total time ----
@@ -773,49 +796,24 @@ class AdaCPSPCostModel:
 
     def _total_time_ring_overlap(self, seqlens: List[int],
                                   strategy: ParallelStrategy) -> float:
-        """Overlap-aware total time for Ring Attention (fwd + bwd).
-        
-        Zigzag Ring Attention overlaps P2P communication with flash attention compute.
-        
-        Key insight: every step has EQUAL compute ≈ f_causal(S/P) because zigzag
-        uses half-Q or half-K for non-diagonal steps, making all steps the same
-        FLOPs as the causal diagonal step.
-        
-        Forward (per layer):
-          step_compute = f_causal(S/P)                  (same for all steps)
-          fwd_per_layer = (cp-1) × max(step_compute, fwd_comm) + step_compute
-          
-          The last step has no communication to overlap → additive step_compute.
-          The first (cp-1) steps overlap compute with P2P send/recv.
-        
-        Backward (per layer):
-          bwd_step_compute = step_compute × bwd_fwd_ratio
-          bwd_per_layer = (cp-1) × max(bwd_step_compute, bwd_comm) + bwd_step_compute
-        
-        Total = (fwd_per_layer + bwd_per_layer) × L
-        """
+        """Overlap-aware total time for Ring Attention (fwd + bwd)."""
         cp_size = strategy.cp_size
         if cp_size <= 1:
-            # No communication, just fwd+bwd compute
             fwd_compute = self.compute_time(seqlens, strategy)
             return fwd_compute * (1 + self.bwd_fwd_ratio)
 
         total_tokens = sum(seqlens)
+        ring_topo = self._get_topo(strategy.placement, "ring")
 
-        # Per-step compute (same for all steps in zigzag ring)
         step_compute_per_layer = self._ring_step_compute_per_layer(
             seqlens, strategy)
 
-        # Per-step comm
-        fwd_comm_per_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size)
-        bwd_comm_per_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size)
+        fwd_comm_per_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, topo=ring_topo)
+        bwd_comm_per_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, topo=ring_topo)
 
-        # Forward per layer:
-        # (cp-1) overlapped steps + 1 non-overlapped final step
         fwd_per_layer = ((cp_size - 1) * self._leaky_max(step_compute_per_layer, fwd_comm_per_step)
                          + step_compute_per_layer)
 
-        # Backward per layer: same structure but with bwd ratios
         bwd_step = step_compute_per_layer * self.bwd_fwd_ratio
         bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_step, bwd_comm_per_step)
                          + bwd_step)
@@ -824,31 +822,16 @@ class AdaCPSPCostModel:
 
     def _total_time_usp_overlap(self, seqlens: List[int],
                                  strategy: ParallelStrategy) -> float:
-        """Overlap-aware total time for USP (Ulysses + Ring).
-        
-        USP has two phases per layer:
-          1. All-to-All (Ulysses): blocking, cannot overlap with compute
-          2. Ring Attention (CP): compute-comm overlap (same as pure Ring)
-        
-        Forward per layer:
-          a2a_fwd = 4 × per_op_a2a_time  (Q,K,V scatter + O gather)
-          ring_fwd = (cp-1) × max(compute_step, fwd_comm) + compute_step
-          total_fwd = a2a_fwd + ring_fwd
-        
-        Backward per layer:
-          a2a_bwd = 4 × per_op_a2a_time  (dO scatter + dQ,dK,dV gather)
-          ring_bwd = (cp-1) × max(bwd_compute, bwd_comm) + bwd_compute
-          total_bwd = a2a_bwd + ring_bwd
-        
-        Total = (total_fwd + total_bwd) × L
-        """
+        """Overlap-aware total time for USP (Ulysses + Ring)."""
         sp_size = strategy.sp_size
         cp_size = strategy.cp_size
+        placement = strategy.placement
+        a2a_topo = self._get_topo(placement, "alltoall")
+        ring_topo = self._get_topo(placement, "ring")
 
         if cp_size <= 1:
-            # Pure Ulysses: additive (a2a is blocking)
             fwd_compute = self.compute_time(seqlens, strategy)
-            a2a_comm = self.alltoall_time(seqlens, sp_size)
+            a2a_comm = self.alltoall_time(seqlens, sp_size, a2a_topo)
             return fwd_compute * (1 + self.bwd_fwd_ratio) + a2a_comm
 
         if sp_size <= 1:
@@ -856,27 +839,20 @@ class AdaCPSPCostModel:
 
         total_tokens = sum(seqlens)
         parallel_size = sp_size * cp_size
-        # Head padding overhead for the Ulysses SP component
         q_factor, kv_factor = self.head_padding_overhead(sp_size)
 
-        # ── All-to-All component (blocking, fwd + bwd, GQA + head-padding aware) ──
-        # Use _a2a_per_op_time for consistent cascading fallback
-        # (interpolation → linear fit → BW), same as alltoall_time().
         qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
         kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
-        qo_a2a_time = self._a2a_per_op_time(qo_msg_mb, sp_size)
-        kv_a2a_time = self._a2a_per_op_time(kv_msg_mb, sp_size)
-        # Per layer: 2 Q/O + 2 K/V ops per direction (fwd or bwd)
+        qo_a2a_time = self._a2a_per_op_time(qo_msg_mb, sp_size, a2a_topo)
+        kv_a2a_time = self._a2a_per_op_time(kv_msg_mb, sp_size, a2a_topo)
         a2a_fwd_per_layer = 2 * qo_a2a_time + 2 * kv_a2a_time
         a2a_bwd_per_layer = 2 * qo_a2a_time + 2 * kv_a2a_time
 
-        # ── Ring component (overlapped, uniform step compute) ──
         step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
 
-        # After Ulysses split: kv_hidden * kv_factor / sp_size (padded then split)
         kv_hidden_after_uly = self.kv_hidden * kv_factor / sp_size
-        fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden_after_uly)
-        bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, kv_hidden_after_uly)
+        fwd_comm_step = self._p2p_fwd_comm_per_step(total_tokens, cp_size, kv_hidden_after_uly, ring_topo)
+        bwd_comm_step = self._p2p_bwd_comm_per_step(total_tokens, cp_size, kv_hidden_after_uly, ring_topo)
 
         ring_fwd_per_layer = ((cp_size - 1) * self._leaky_max(step_compute, fwd_comm_step)
                               + step_compute)
@@ -884,7 +860,6 @@ class AdaCPSPCostModel:
         ring_bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_step, bwd_comm_step)
                               + bwd_step)
 
-        # Total per layer = a2a + ring (fwd and bwd separately)
         fwd_per_layer = a2a_fwd_per_layer + ring_fwd_per_layer
         bwd_per_layer = a2a_bwd_per_layer + ring_bwd_per_layer
 
@@ -912,43 +887,34 @@ class AdaCPSPCostModel:
         elif self.enable_overlap_model and strategy.attn_type == "usp":
             return self._total_time_usp_overlap(seqlens, strategy)
         elif strategy.attn_type == "ring":
-            # Ring additive model (no overlap):
-            # 1 diagonal (causal) + (cp-1) non-diagonal (non-causal) steps
-            # Total comm = fwd_ring + bwd_ring
             cp = strategy.cp_size
+            ring_topo = self._get_topo(strategy.placement, "ring")
             step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
-            fwd_compute_per_layer = cp * step_compute  # P steps, each equal FLOPs
+            fwd_compute_per_layer = cp * step_compute
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
-            fwd_ring_comm = self.p2p_ring_time(seqlens, cp)
+            fwd_ring_comm = self.p2p_ring_time(seqlens, cp, ring_topo)
             total_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
             return total_compute + total_comm
         elif strategy.attn_type == "usp":
-            # USP additive model:
-            # AlltoAll (blocking) + Ring (no overlap, cp steps with uniform compute).
-            #
-            # IMPORTANT: In USP each rank holds T/(S*C) tokens before A2A,
-            # so per-op A2A message size must divide by parallel_size = S*C,
-            # NOT just sp_size = S.  (alltoall_time divides by sp only,
-            # which is correct for pure Ulysses but wrong for USP.)
             sp, cp = strategy.sp_size, strategy.cp_size
+            placement = strategy.placement
+            a2a_topo = self._get_topo(placement, "alltoall")
+            ring_topo = self._get_topo(placement, "ring")
             step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
             fwd_compute_per_layer = cp * step_compute
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
 
-            # ── A2A comm (inline, same formula as usp_comm_time / _total_time_usp_overlap) ──
             total_tokens = sum(seqlens)
             parallel_size = sp * cp
             q_factor, kv_factor = self.head_padding_overhead(sp)
             qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
             kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
-            qo_a2a = self._a2a_per_op_time(qo_msg_mb, sp)
-            kv_a2a = self._a2a_per_op_time(kv_msg_mb, sp)
-            # 4 ops per direction (Q,K,V scatter + O gather), fwd+bwd, all layers
+            qo_a2a = self._a2a_per_op_time(qo_msg_mb, sp, a2a_topo)
+            kv_a2a = self._a2a_per_op_time(kv_msg_mb, sp, a2a_topo)
             a2a_comm = (2 * qo_a2a + 2 * kv_a2a) * 2 * self.l
 
-            # ── Ring comm (head-padding-aware) ──
             kv_h = self.kv_hidden * kv_factor / sp
-            fwd_comm = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h)
+            fwd_comm = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h, ring_topo)
             fwd_ring_comm = fwd_comm * (cp - 1) * self.l
             total_ring_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
             return total_compute + a2a_comm + total_ring_comm
@@ -1052,13 +1018,12 @@ class AdaCPSPCostModel:
         zero_stage: int = 3,
         act_per_token: float = 3.96,
         overlap_json: Optional[str] = None,
+        gpus_per_node: int = 8,
     ) -> "AdaCPSPCostModel":
         """Construct a cost model from profiling output files."""
-        # Attention coefficients
         with open(attention_json, "r") as f:
             attn_data = json.load(f)
         piecewise = []
-        # Support both old format (coefficients dict) and new format (segments list)
         if "coefficients" in attn_data:
             for seg_name, coeff in attn_data["coefficients"].items():
                 if coeff is not None:
@@ -1069,21 +1034,25 @@ class AdaCPSPCostModel:
                         "c": coeff["c"],
                     })
         elif "attention" in attn_data and "segments" in attn_data["attention"]:
-            # New unified format from profile_and_validate.py
             piecewise = attn_data["attention"]["segments"]
         config = attn_data.get("config", attn_data.get("attention", {}).get("config", {}))
 
-        # All-to-All bandwidth
         with open(alltoall_json, "r") as f:
             a2a_data = json.load(f)
         alltoall_bw = {int(k): v for k, v in a2a_data["bandwidth_dict_GBs"].items()}
 
-        # P2P bandwidth
         with open(p2p_json, "r") as f:
             p2p_data = json.load(f)
         p2p_bw = {int(k): v for k, v in p2p_data["bandwidth_dict_GBs"].items()}
 
-        # Overlap profiling (optional)
+        # Topology-aware bandwidth and linear fits (new format)
+        alltoall_bw_consec = cls._load_topo_bw(a2a_data, "bandwidth_dict_consec_GBs")
+        alltoall_bw_strided = cls._load_topo_bw(a2a_data, "bandwidth_dict_strided_GBs")
+        p2p_bw_consec = cls._load_topo_bw(p2p_data, "bandwidth_dict_consec_GBs")
+        p2p_bw_strided = cls._load_topo_bw(p2p_data, "bandwidth_dict_strided_GBs")
+        alltoall_lin_c, alltoall_lin_s = cls._load_topo_linear_fits(a2a_data)
+        p2p_lin_c, p2p_lin_s = cls._load_topo_linear_fits(p2p_data)
+
         bwd_fwd_ratio = 2.0
         ring_bwd_comm_ratio = 2.0
         if overlap_json is not None:
@@ -1112,7 +1081,43 @@ class AdaCPSPCostModel:
             p2p_bandwidth_dict_gbs=p2p_bw,
             bwd_fwd_ratio=bwd_fwd_ratio,
             ring_bwd_comm_ratio=ring_bwd_comm_ratio,
+            gpus_per_node=gpus_per_node,
+            alltoall_bw_consec=alltoall_bw_consec,
+            alltoall_bw_strided=alltoall_bw_strided,
+            p2p_bw_consec=p2p_bw_consec,
+            p2p_bw_strided=p2p_bw_strided,
+            alltoall_linear_consec=alltoall_lin_c,
+            alltoall_linear_strided=alltoall_lin_s,
+            p2p_linear_consec=p2p_lin_c,
+            p2p_linear_strided=p2p_lin_s,
         )
+
+    @staticmethod
+    def _load_topo_bw(data: Dict, key: str) -> Optional[Dict[int, float]]:
+        """Load topology-specific bandwidth dict from profile JSON."""
+        if key not in data:
+            return None
+        return {int(k): v for k, v in data[key].items()}
+
+    @staticmethod
+    def _load_topo_linear_fits(data: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """Extract consecutive/strided linear fits from profile JSON.
+
+        The new JSON format stores linear_fits as {topo_key: {alpha, beta, r_squared}}.
+        topo_key looks like "gs8_consecutive" or "gs16_strided".
+        Returns (consec_dict, strided_dict) each mapping group_size -> {alpha, beta}.
+        """
+        if "linear_fits" not in data:
+            return None, None
+        consec, strided = {}, {}
+        for tk, fit in data["linear_fits"].items():
+            if "_consecutive" in tk:
+                gs = int(tk.split("_")[0].replace("gs", ""))
+                consec[gs] = {"alpha": fit["alpha"], "beta": fit["beta"]}
+            elif "_strided" in tk:
+                gs = int(tk.split("_")[0].replace("gs", ""))
+                strided[gs] = {"alpha": fit["alpha"], "beta": fit["beta"]}
+        return consec if consec else None, strided if strided else None
 
     @classmethod
     def from_unified_profile(
@@ -1125,11 +1130,9 @@ class AdaCPSPCostModel:
         hidden_size: int = 4096,
         layer_num: int = 32,
         overlap_json: Optional[str] = None,
+        gpus_per_node: int = 8,
     ) -> "AdaCPSPCostModel":
-        """Construct from unified profile_and_validate.py output (single JSON).
-        
-        Optionally load overlap profiling data from profile_overlap.py output.
-        """
+        """Construct from unified profile_and_validate.py output (single JSON)."""
         with open(profile_json, "r") as f:
             data = json.load(f)
 
@@ -1150,7 +1153,6 @@ class AdaCPSPCostModel:
                 elif key.startswith("p2p"):
                     p2p_linear[gs] = entry
 
-        # Load overlap profiling data
         bwd_fwd_ratio = 2.0
         ring_bwd_comm_ratio = 2.0
         if overlap_json is not None:
@@ -1176,6 +1178,7 @@ class AdaCPSPCostModel:
             p2p_linear_fit=p2p_linear if p2p_linear else None,
             bwd_fwd_ratio=bwd_fwd_ratio,
             ring_bwd_comm_ratio=ring_bwd_comm_ratio,
+            gpus_per_node=gpus_per_node,
         )
 
     @staticmethod
@@ -1657,6 +1660,9 @@ class AdaCPSPOptimizer:
         self.max_parallel_size = max_parallel_size if max_parallel_size > 0 else cluster_size
         self.min_parallel_size = min_parallel_size
 
+        # Placement override: "auto" (solver decides), "head_first", "context_first"
+        self.force_placement: str = "auto"
+
         # Solver cache: maps a frozen set of sequence lengths to solver result
         # Avoids re-solving for batches with identical length distributions
         self._cache: Dict[tuple, Tuple[List, List]] = {}
@@ -1738,10 +1744,10 @@ class AdaCPSPOptimizer:
             ps *= 2
 
         # USP combinations (if "usp" in allowed_attn_types)
+        gpn = self.costmodel.gpus_per_node
         if "usp" in self.allowed_attn_types:
             sp = 2
             while sp <= self.max_parallel_size // 2:
-                # Check head padding overhead for the SP component
                 factor = _q_pad_factor(sp)
                 if factor > max_head_padding_factor:
                     self._log(f"  [strategy_pool] Skipping usp(sp={sp},cp=*): "
@@ -1752,13 +1758,23 @@ class AdaCPSPOptimizer:
                 while sp * cp <= self.max_parallel_size:
                     total = sp * cp
                     if total >= self.min_parallel_size:
-                        strategies.append(ParallelStrategy("usp", total, sp_size=sp, cp_size=cp))
+                        strategies.append(ParallelStrategy("usp", total, sp_size=sp, cp_size=cp,
+                                                           placement="context_first"))
+                        if total > gpn:
+                            strategies.append(ParallelStrategy("usp", total, sp_size=sp, cp_size=cp,
+                                                               placement="head_first"))
                     cp *= 2
                 sp *= 2
 
         if not strategies:
             # Fallback: at least include the minimum strategy
             strategies.append(ParallelStrategy("ulysses", self.min_parallel_size))
+
+        if self.force_placement != "auto":
+            strategies = [
+                s for s in strategies
+                if s.attn_type != "usp" or s.placement == self.force_placement
+            ]
 
         return strategies
 
@@ -1999,23 +2015,25 @@ class AdaCPSPOptimizer:
     def _strategies_for_group_size(self, group_size: int) -> List[ParallelStrategy]:
         """Generate all possible strategies for a given group size.
 
-        For group_size=8: ulysses×8, ring×8, usp(sp2×cp4), usp(sp4×cp2)
-        For group_size=4: ulysses×4, ring×4, usp(sp2×cp2)
-        For group_size=2: ulysses×2, ring×2
-        For group_size=1: ulysses×1
+        For group_size=16 (gpn=8): ulysses×16, ring×16,
+            usp(sp2×cp8,cf), usp(sp2×cp8,hf), usp(sp4×cp4,cf), usp(sp4×cp4,hf), ...
         """
         strats = []
+        gpn = self.costmodel.gpus_per_node
         for at in self.allowed_attn_types:
             if at in ("ulysses", "ring"):
                 strats.append(ParallelStrategy(at, group_size))
             elif at == "usp":
-                # Enumerate all (sp, cp) decompositions where sp>=2, cp>=2
                 sp = 2
                 while sp <= group_size // 2:
                     if group_size % sp == 0:
                         cp = group_size // sp
                         if cp >= 2:
-                            strats.append(ParallelStrategy("usp", group_size, sp_size=sp, cp_size=cp))
+                            strats.append(ParallelStrategy("usp", group_size, sp_size=sp,
+                                                           cp_size=cp, placement="context_first"))
+                            if group_size > gpn:
+                                strats.append(ParallelStrategy("usp", group_size, sp_size=sp,
+                                                               cp_size=cp, placement="head_first"))
                     sp *= 2
         return strats
 
@@ -2959,12 +2977,16 @@ class AdaCPSPOptimizer:
                     self.min_parallel_size, self.max_parallel_size,
                     self.allowed_attn_types,
                     self.scip_param_dict,
-                    # CostModel params (reconstruct in worker)
                     self.costmodel.N, self.costmodel.h, self.costmodel.l,
                     self.costmodel.p, self.costmodel.zero_stage,
                     self.costmodel.act_per_token,
                     self.costmodel.piecewise,
                     self.costmodel.alltoall_bw, self.costmodel.p2p_bw,
+                    self.costmodel.gpus_per_node,
+                    self.costmodel.alltoall_bw_consec, self.costmodel.alltoall_bw_strided,
+                    self.costmodel.p2p_bw_consec, self.costmodel.p2p_bw_strided,
+                    self.costmodel.alltoall_linear_consec, self.costmodel.alltoall_linear_strided,
+                    self.costmodel.p2p_linear_consec, self.costmodel.p2p_linear_strided,
                 ))
                 for seqs_mb_ser in seqs_mb_serialized
             ]
@@ -3059,6 +3081,11 @@ class AdaCPSPOptimizer:
                     self.costmodel.piecewise,
                     self.costmodel.alltoall_bw, self.costmodel.p2p_bw,
                     result_dict,
+                    self.costmodel.gpus_per_node,
+                    self.costmodel.alltoall_bw_consec, self.costmodel.alltoall_bw_strided,
+                    self.costmodel.p2p_bw_consec, self.costmodel.p2p_bw_strided,
+                    self.costmodel.alltoall_linear_consec, self.costmodel.alltoall_linear_strided,
+                    self.costmodel.p2p_linear_consec, self.costmodel.p2p_linear_strided,
                 )
             )
             p.start()
@@ -3131,21 +3158,33 @@ def _deserialize_seqs(seqs_ser: List[Tuple[int, int]]) -> List[Sequence]:
 def _serialize_strategy_groups(groups):
     """Serialize [(ParallelStrategy, [Sequence])] for IPC."""
     return [
-        (strat.attn_type, strat.parallel_size, strat.sp_size, strat.cp_size, _serialize_seqs(seqs))
+        (strat.attn_type, strat.parallel_size, strat.sp_size, strat.cp_size,
+         strat.placement, _serialize_seqs(seqs))
         for strat, seqs in groups
     ]
 
 def _deserialize_strategy_groups(groups_ser):
-    """Deserialize [(attn_type, parallel_size, sp_size, cp_size, [(seq, id)])] from IPC."""
-    return [
-        (ParallelStrategy(at, ps, sp_size=sp, cp_size=cp), _deserialize_seqs(seqs_ser))
-        for at, ps, sp, cp, seqs_ser in groups_ser
-    ]
+    """Deserialize 6-tuple strategy groups from IPC."""
+    result = []
+    for item in groups_ser:
+        if len(item) == 5:
+            at, ps, sp, cp, seqs_ser = item
+            placement = "context_first"
+        else:
+            at, ps, sp, cp, placement, seqs_ser = item
+        strat = ParallelStrategy(at, ps, sp_size=sp, cp_size=cp, placement=placement)
+        result.append((strat, _deserialize_seqs(seqs_ser)))
+    return result
 
 def _reconstruct_optimizer(
     cluster_size, mem_limit_gb, min_parallel_size, max_parallel_size,
     allowed_attn_types, scip_param_dict, hide_output,
     cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
+    cm_gpus_per_node=8,
+    cm_a2a_bw_consec=None, cm_a2a_bw_strided=None,
+    cm_p2p_bw_consec=None, cm_p2p_bw_strided=None,
+    cm_a2a_lin_consec=None, cm_a2a_lin_strided=None,
+    cm_p2p_lin_consec=None, cm_p2p_lin_strided=None,
 ):
     """Reconstruct AdaCPSPOptimizer in a worker process."""
     costmodel = AdaCPSPCostModel(
@@ -3154,6 +3193,15 @@ def _reconstruct_optimizer(
         piecewise_compute_coeffs=cm_piecewise,
         alltoall_bandwidth_dict_gbs=cm_a2a_bw,
         p2p_bandwidth_dict_gbs=cm_p2p_bw,
+        gpus_per_node=cm_gpus_per_node,
+        alltoall_bw_consec=cm_a2a_bw_consec,
+        alltoall_bw_strided=cm_a2a_bw_strided,
+        p2p_bw_consec=cm_p2p_bw_consec,
+        p2p_bw_strided=cm_p2p_bw_strided,
+        alltoall_linear_consec=cm_a2a_lin_consec,
+        alltoall_linear_strided=cm_a2a_lin_strided,
+        p2p_linear_consec=cm_p2p_lin_consec,
+        p2p_linear_strided=cm_p2p_lin_strided,
     )
     return AdaCPSPOptimizer(
         cluster_size=cluster_size,
@@ -3174,19 +3222,27 @@ def _mp_worker(
     min_parallel_size, max_parallel_size,
     allowed_attn_types, scip_param_dict,
     cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
+    cm_gpus_per_node=8,
+    cm_a2a_bw_consec=None, cm_a2a_bw_strided=None,
+    cm_p2p_bw_consec=None, cm_p2p_bw_strided=None,
+    cm_a2a_lin_consec=None, cm_a2a_lin_strided=None,
+    cm_p2p_lin_consec=None, cm_p2p_lin_strided=None,
 ):
     """Worker function for solve_globalbatch_mp."""
     if stop_flag.value == 1:
         return None
 
     seqs_mb = _deserialize_seqs(seqs_mb_ser)
-    # Re-index for this microbatch
     seqs_mb = [Sequence(seq=s.seq, id=j) for j, s in enumerate(seqs_mb)]
 
     optimizer = _reconstruct_optimizer(
         cluster_size, mem_limit_gb, min_parallel_size, max_parallel_size,
         allowed_attn_types, scip_param_dict, hide_output,
         cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
+        cm_gpus_per_node, cm_a2a_bw_consec, cm_a2a_bw_strided,
+        cm_p2p_bw_consec, cm_p2p_bw_strided,
+        cm_a2a_lin_consec, cm_a2a_lin_strided,
+        cm_p2p_lin_consec, cm_p2p_lin_strided,
     )
 
     result = optimizer._solve_microbatch(seqs_mb, method, bucket_num)
@@ -3211,6 +3267,11 @@ def _mp_gbmb_worker(
     allowed_attn_types, scip_param_dict,
     cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
     result_dict,
+    cm_gpus_per_node=8,
+    cm_a2a_bw_consec=None, cm_a2a_bw_strided=None,
+    cm_p2p_bw_consec=None, cm_p2p_bw_strided=None,
+    cm_a2a_lin_consec=None, cm_a2a_lin_strided=None,
+    cm_p2p_lin_consec=None, cm_p2p_lin_strided=None,
 ):
     """Worker function for solve_globalbatch_mp_gbmb."""
     seqs_gb = _deserialize_seqs(seqs_gb_ser)
@@ -3220,6 +3281,10 @@ def _mp_gbmb_worker(
         cluster_size, mem_limit_gb, min_parallel_size, max_parallel_size,
         allowed_attn_types, scip_param_dict, hide_output,
         cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
+        cm_gpus_per_node, cm_a2a_bw_consec, cm_a2a_bw_strided,
+        cm_p2p_bw_consec, cm_p2p_bw_strided,
+        cm_a2a_lin_consec, cm_a2a_lin_strided,
+        cm_p2p_lin_consec, cm_p2p_lin_strided,
     )
 
     gb_groups, gb_results = [], []

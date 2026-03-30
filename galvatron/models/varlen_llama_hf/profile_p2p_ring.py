@@ -27,6 +27,8 @@ from datetime import datetime
 import torch
 import torch.distributed as dist
 
+from profile_topo_utils import build_group_ranks_list, linear_fit, topo_key
+
 
 def profile_p2p_ring(
     cp_group,
@@ -217,6 +219,11 @@ def main():
     parser.add_argument("--save_dir", type=str, default="./configs")
     parser.add_argument("--local-rank", "--local_rank", type=int, default=-1)
     parser.add_argument("--mode", type=str, default="both", choices=["model", "raw", "both"])
+    parser.add_argument("--topology", type=str, default="both",
+                        choices=["consecutive", "strided", "both"],
+                        help="Topology to profile: consecutive, strided, or both")
+    parser.add_argument("--gpus_per_node", type=int, default=8,
+                        help="Number of GPUs per node (for topology description)")
     args, _ = parser.parse_known_args()
 
     # Initialize distributed
@@ -235,86 +242,122 @@ def main():
               f"KV Heads: {args.num_kv_heads}, Layers: {args.num_layers}")
         print("=" * 70)
 
-    all_results = {}
+    topologies_to_profile = (
+        ["consecutive", "strided"] if args.topology == "both"
+        else [args.topology]
+    )
+
+    all_results = {}       # topo_key -> per-cp/topo results
+    bw_dict_consec = {}    # str(cp_size) -> bandwidth (consecutive)
+    bw_dict_strided = {}   # str(cp_size) -> bandwidth (strided)
+    linear_fits = {}       # topo_key -> {alpha, beta, r_squared}
+
     cp_size = 2
     while cp_size <= world_size:
-        num_groups = world_size // cp_size
-        # Create CP groups: consecutive ranks form a group
-        for g in range(num_groups):
-            group_ranks = list(range(g * cp_size, (g + 1) * cp_size))
-            group = dist.new_group(ranks=group_ranks)
-            if rank in group_ranks:
-                my_group = group
+        for topo in topologies_to_profile:
+            group_ranks_list = build_group_ranks_list(world_size, cp_size, topo)
+            num_groups = len(group_ranks_list)
 
-        if rank == 0:
-            print(f"\n--- Profiling P2P Ring with cp_size={cp_size} ({num_groups} groups) ---")
-
-        cp_results = {}
-
-        if args.mode in ["model", "both"]:
-            seq_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-            seq_lengths = [s for s in seq_lengths if s >= cp_size * 2]
+            my_group = None
+            for grp_ranks in group_ranks_list:
+                group = dist.new_group(ranks=grp_ranks)
+                if rank in grp_ranks:
+                    my_group = group
 
             if rank == 0:
-                print(f"  [Model-specific profiling]")
-            model_results = profile_p2p_ring(
-                my_group, cp_size,
-                args.hidden_size, args.num_kv_heads,
-                seq_lengths,
-                warmup_iters=args.warmup,
-                profile_iters=args.iters,
-            )
-            cp_results["model"] = model_results
+                example_ranks = group_ranks_list[0]
+                print(f"\n--- P2P Ring cp={cp_size}, topo={topo} ({num_groups} groups, e.g. {example_ranks[:6]}...) ---")
 
-        if args.mode in ["raw", "both"]:
-            msg_sizes_mb = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+            cp_results = {}
+
+            if args.mode in ["model", "both"]:
+                seq_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+                seq_lengths = [s for s in seq_lengths if s >= cp_size * 2]
+
+                if rank == 0:
+                    print(f"  [Model-specific profiling]")
+                model_results = profile_p2p_ring(
+                    my_group, cp_size,
+                    args.hidden_size, args.num_kv_heads,
+                    seq_lengths,
+                    warmup_iters=args.warmup,
+                    profile_iters=args.iters,
+                )
+                cp_results["model"] = model_results
+
+            if args.mode in ["raw", "both"]:
+                msg_sizes_mb = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+                if rank == 0:
+                    print(f"  [Raw message size profiling]")
+                raw_results = profile_p2p_raw(
+                    my_group, cp_size,
+                    msg_sizes_mb,
+                    warmup_iters=args.warmup,
+                    profile_iters=args.iters,
+                )
+                cp_results["raw"] = raw_results
+
+            if "raw" in cp_results:
+                large_msg_bw = [r["bandwidth_GBs"] for r in cp_results["raw"] if r["msg_size_MB"] >= 16]
+                summary_bw = sum(large_msg_bw) / len(large_msg_bw) if large_msg_bw else 0
+                xs = [r["msg_size_MB"] for r in cp_results["raw"]]
+                ys = [r["time_ms"] for r in cp_results["raw"]]
+                fit = linear_fit(xs, ys)
+            elif "model" in cp_results:
+                bws = [r["bandwidth_GBs"] for r in cp_results["model"]]
+                summary_bw = sum(bws) / len(bws) if bws else 0
+                xs = [r["kv_bytes_per_step_MB"] for r in cp_results["model"]]
+                ys = [r["per_step_time_ms"] for r in cp_results["model"]]
+                fit = linear_fit(xs, ys)
+            else:
+                summary_bw = 0
+                fit = {"alpha": 0.0, "beta": 0.0, "r_squared": 0.0}
+
+            cp_results["summary_bandwidth_GBs"] = summary_bw
+            cp_results["topology"] = topo
+            tk = topo_key(cp_size, topo)
+            all_results[tk] = cp_results
+            linear_fits[tk] = fit
+
+            if topo == "consecutive":
+                bw_dict_consec[str(cp_size)] = summary_bw
+            else:
+                bw_dict_strided[str(cp_size)] = summary_bw
 
             if rank == 0:
-                print(f"  [Raw message size profiling]")
-            raw_results = profile_p2p_raw(
-                my_group, cp_size,
-                msg_sizes_mb,
-                warmup_iters=args.warmup,
-                profile_iters=args.iters,
-            )
-            cp_results["raw"] = raw_results
+                print(f"  → cp={cp_size} topo={topo}: BW={summary_bw:.2f} GB/s, "
+                      f"fit(alpha={fit['alpha']:.6f}, beta={fit['beta']:.4f}, R²={fit['r_squared']:.4f})")
 
-        # Compute summary bandwidth
-        if "raw" in cp_results:
-            large_msg_bw = [r["bandwidth_GBs"] for r in cp_results["raw"] if r["msg_size_MB"] >= 16]
-            summary_bw = sum(large_msg_bw) / len(large_msg_bw) if large_msg_bw else 0
-        elif "model" in cp_results:
-            bws = [r["bandwidth_GBs"] for r in cp_results["model"]]
-            summary_bw = sum(bws) / len(bws) if bws else 0
-        else:
-            summary_bw = 0
-
-        cp_results["summary_bandwidth_GBs"] = summary_bw
-        all_results[cp_size] = cp_results
-
-        if rank == 0:
-            print(f"  → Summary bandwidth for cp={cp_size}: {summary_bw:.2f} GB/s")
-
-        dist.barrier()
+            dist.barrier()
         cp_size *= 2
 
     # Save results
     if rank == 0:
         os.makedirs(args.save_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        legacy_bw = dict(bw_dict_consec)
+        if not legacy_bw and bw_dict_strided:
+            legacy_bw = dict(bw_dict_strided)
+        legacy_bw["1"] = 1e10
+
         output = {
             "type": "p2p_ring_profiling",
             "world_size": world_size,
+            "gpus_per_node": args.gpus_per_node,
             "hidden_size": args.hidden_size,
             "num_attention_heads": args.num_attention_heads,
             "num_kv_heads": args.num_kv_heads,
             "num_layers": args.num_layers,
             "timestamp": timestamp,
-            "results": {str(k): v for k, v in all_results.items()},
-            # Summary dict for cost model: cp_size -> bandwidth in GB/s
-            "bandwidth_dict_GBs": {str(k): v["summary_bandwidth_GBs"] for k, v in all_results.items()},
+            "topologies_profiled": topologies_to_profile,
+            "results": all_results,
+            "linear_fits": linear_fits,
+            "bandwidth_dict_GBs": legacy_bw,
+            "bandwidth_dict_consec_GBs": {**bw_dict_consec, "1": 1e10},
+            "bandwidth_dict_strided_GBs": {**bw_dict_strided, "1": 1e10},
         }
-        output["bandwidth_dict_GBs"]["1"] = 1e10  # no communication
 
         save_path = os.path.join(args.save_dir, f"p2p_ring_profile_{world_size}gpus_{timestamp}.json")
         with open(save_path, "w") as f:
@@ -323,9 +366,10 @@ def main():
         print(f"\n{'=' * 70}")
         print(f" Results saved to: {save_path}")
         print(f"\n P2P Ring Bandwidth Summary (for cost model):")
-        for cp_str, bw in output["bandwidth_dict_GBs"].items():
-            bw_display = f"{bw:.2f}" if bw < 1e9 else "inf (no comm)"
-            print(f"   cp_size={cp_str:>3}: {bw_display} GB/s")
+        for tk_str, fit in linear_fits.items():
+            bw = all_results[tk_str]["summary_bandwidth_GBs"]
+            bw_display = f"{bw:.2f}" if bw < 1e9 else "inf"
+            print(f"   {tk_str:>20}: BW={bw_display} GB/s, alpha={fit['alpha']:.6f}, beta={fit['beta']:.4f}")
         print(f"{'=' * 70}")
 
     dist.destroy_process_group()

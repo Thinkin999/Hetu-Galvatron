@@ -84,11 +84,13 @@ for MODEL_CFG in "qwen2.5-7b:3584:28:4:128:28" "qwen2.5-14b:5120:40:8:128:48" "q
             --num_layers "$N_LAYERS" \
             --save_dir "$CONFIGS_DIR" \
             --model_name "$MODEL_NAME" \
+            --topology both \
+            --gpus_per_node "$NUM_GPUS_PER_NODE" \
         2>&1 | tee "$LOG_DIR/a2a_${MODEL_NAME}_${TIMESTAMP}.log"
     
-    echo "    ✓ $MODEL_NAME All-to-All profile done"
+    echo "    ✓ $MODEL_NAME All-to-All profile done (consecutive + strided)"
     
-    # P2P Ring profiling
+    # P2P Ring profiling (consecutive + strided topologies)
     torchrun \
         --nnodes "$NUM_NODES" \
         --nproc_per_node "$NUM_GPUS_PER_NODE" \
@@ -102,6 +104,8 @@ for MODEL_CFG in "qwen2.5-7b:3584:28:4:128:28" "qwen2.5-14b:5120:40:8:128:48" "q
             --num_layers "$N_LAYERS" \
             --save_dir "$CONFIGS_DIR" \
             --model_name "$MODEL_NAME" \
+            --topology both \
+            --gpus_per_node "$NUM_GPUS_PER_NODE" \
         2>&1 | tee "$LOG_DIR/p2p_${MODEL_NAME}_${TIMESTAMP}.log"
     
     echo "    ✓ $MODEL_NAME P2P Ring profile done"
