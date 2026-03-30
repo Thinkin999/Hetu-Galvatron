@@ -26,7 +26,7 @@ Design:
 
 import torch
 import torch.distributed as dist
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, List, Optional, Set, Tuple
 
 from galvatron.core.runtime.tensor_parallel.attention import SelfAttention
 from galvatron.core.runtime.tensor_parallel.attention_impl import (
@@ -36,8 +36,12 @@ from galvatron.core.runtime.tensor_parallel.attention_impl import (
 )
 
 
-# Global group cache: rank_tuple -> ProcessGroup
-# All ranks must participate in dist.new_group() together (collective op)
+# Per-process caches. Two layers:
+# - _created_group_keys: every rank records that this rank-tuple has already been
+#   created via a collective dist.new_group(), so subsequent calls must skip
+#   new_group (fixes member/non-member _group_pool missync).
+# - _group_pool: member ranks store the usable ProcessGroup handle only.
+_created_group_keys: Set[Tuple[int, ...]] = set()
 _group_pool: Dict[Tuple[int, ...], dist.ProcessGroup] = {}
 
 
@@ -51,23 +55,23 @@ def _get_or_create_group(ranks: List[int]) -> Optional[dist.ProcessGroup]:
 
     For parallel_size == 1, returns None (no communication needed).
     """
-    global _group_pool
+    global _group_pool, _created_group_keys
 
     if len(ranks) <= 1:
         return None  # No group needed for single-rank
 
     key = tuple(ranks)
-    if key not in _group_pool:
-        # Collective: all ranks call new_group
+    rank = dist.get_rank()
+
+    if key not in _created_group_keys:
+        # Collective: all ranks must take this branch once per key, in lockstep.
         new_group = dist.new_group(ranks)
-        rank = dist.get_rank()
+        _created_group_keys.add(key)
         if rank in ranks:
             _group_pool[key] = new_group
-        # Ranks NOT in the group don't store it (they can't use it anyway)
 
-    rank = dist.get_rank()
     if rank in ranks:
-        return _group_pool.get(key, None)
+        return _group_pool.get(key)
     return None
 
 
