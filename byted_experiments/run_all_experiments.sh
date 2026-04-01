@@ -40,15 +40,76 @@ DEFAULT_DP_TYPE="${DEFAULT_DP_TYPE:-zero3}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 DATASET="${DATASET:-wikipedia}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+# Whether to mirror rank-0 experiment logs to terminal in real time.
+# 1 = print to terminal + file, 0 = file only.
+LIVE_LOG_TO_STDOUT="${LIVE_LOG_TO_STDOUT:-1}"
 
 # Paths.
-RESULT_ROOT="${RESULT_ROOT:-${SCRIPT_DIR}/results}"
+LOCAL_RESULT_ROOT="${LOCAL_RESULT_ROOT:-${SCRIPT_DIR}/results}"
+RESULT_ROOT="${RESULT_ROOT:-${LOCAL_RESULT_ROOT}}"
+HDFS_RESULT_ROOT="${HDFS_RESULT_ROOT:-hdfs://harunawl/home/byte_data_seed_wl/user/liuqingshuo}"
+HDFS_EXPERIMENT_DIR="${HDFS_EXPERIMENT_DIR:-byted_experiments}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RESULT_DIR="${RESULT_ROOT}/${TIMESTAMP}"
+HDFS_RESULT_DIR="${HDFS_RESULT_ROOT%/}/${HDFS_EXPERIMENT_DIR}/${TIMESTAMP}"
 DATASET_MOUNT_DIR="${DATASET_MOUNT_DIR:-}"
+ANALYSIS_TXT="${RESULT_DIR}/analysis.txt"
+HDFS_CMD=""
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+detect_hdfs_cmd() {
+    if command -v hdfs >/dev/null 2>&1; then
+        HDFS_CMD="hdfs"
+    elif command -v /opt/tiger/yarn_deploy/hadoop/bin/hdfs >/dev/null 2>&1; then
+        HDFS_CMD="/opt/tiger/yarn_deploy/hadoop/bin/hdfs"
+    else
+        HDFS_CMD=""
+    fi
+}
+
+run_hdfs() {
+    if [ -z "${HDFS_CMD}" ]; then
+        return 1
+    fi
+    "${HDFS_CMD}" dfs "$@"
+}
+
+sync_results_to_hdfs() {
+    if [ "${PLATFORM_NODE_RANK}" -ne 0 ]; then
+        return 0
+    fi
+
+    if [ -z "${HDFS_CMD}" ]; then
+        log "WARNING: HDFS client not found. Skip syncing results to ${HDFS_RESULT_DIR}"
+        return 0
+    fi
+
+    log "Syncing results to HDFS: ${HDFS_RESULT_DIR}"
+    if ! run_hdfs -mkdir -p "${HDFS_RESULT_DIR}"; then
+        log "WARNING: failed to create HDFS directory ${HDFS_RESULT_DIR}"
+        return 0
+    fi
+
+    if ! run_hdfs -put -f "${RESULT_DIR}"/* "${HDFS_RESULT_DIR}/"; then
+        log "WARNING: failed to upload one or more result files to ${HDFS_RESULT_DIR}"
+        return 0
+    fi
+}
+
+run_analysis() {
+    if [ "${PLATFORM_NODE_RANK}" -ne 0 ]; then
+        return 0
+    fi
+
+    log "Running result analysis..."
+    python "${SCRIPT_DIR}/analyze_results.py" "${RESULT_DIR}" --detailed > "${ANALYSIS_TXT}" 2>&1 || {
+        log "WARNING: analysis command failed. See ${ANALYSIS_TXT}"
+        return 0
+    }
+    log "Analysis written to ${ANALYSIS_TXT}"
 }
 
 calc_profile_end_iter() {
@@ -192,6 +253,11 @@ TARGET_GPUS="${GPU_CONFIGS}"
 cat > "${RESULT_DIR}/experiment_config.txt" <<EOF
 === AdaCPSP ByteDance Experiment Configuration ===
 Timestamp:           ${TIMESTAMP}
+Local Result Root:   ${RESULT_ROOT}
+Local Result Dir:    ${RESULT_DIR}
+HDFS Result Root:    ${HDFS_RESULT_ROOT}
+HDFS Experiment Dir: ${HDFS_EXPERIMENT_DIR}
+HDFS Result Dir:     ${HDFS_RESULT_DIR}
 Models:              ${MODELS}
 Seq Lengths (K):     ${SEQ_LENGTHS_K}
 GBS:                 ${GBS_LIST}
@@ -219,6 +285,7 @@ log "=========================================="
 log "AdaCPSP ByteDance experiment runner"
 log "=========================================="
 log "Result dir: ${RESULT_DIR}"
+log "HDFS result dir: ${HDFS_RESULT_DIR}"
 log "Allocated nodes: ${PLATFORM_NNODES}"
 log "Allocated gpus/node: ${PLATFORM_NPROC_PER_NODE}"
 log "Allocated gpus total: ${ALLOCATED_GPUS}"
@@ -229,6 +296,7 @@ log "=========================================="
 
 setup_cuda_runtime_env
 setup_dataset_mount || exit 1
+detect_hdfs_cmd
 
 TOTAL=0
 PASSED=0
@@ -340,8 +408,13 @@ for model in ${MODELS}; do
                 fi
 
                 START_TIME=$(date +%s)
-                timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" >> "${NODE_LOG}" 2>&1
-                EXIT_CODE=$?
+                if [ "${PLATFORM_NODE_RANK}" -eq 0 ] && [ "${LIVE_LOG_TO_STDOUT}" = "1" ]; then
+                    timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" 2>&1 | tee -a "${NODE_LOG}"
+                    EXIT_CODE=${PIPESTATUS[0]}
+                else
+                    timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" >> "${NODE_LOG}" 2>&1
+                    EXIT_CODE=$?
+                fi
                 END_TIME=$(date +%s)
                 WALL_TIME=$((END_TIME - START_TIME))
 
@@ -387,6 +460,8 @@ for model in ${MODELS}; do
 done
 
 if [ "${PLATFORM_NODE_RANK}" -eq 0 ]; then
+    run_analysis
+    sync_results_to_hdfs
     log ""
     log "=========================================="
     log "Experiment sweep finished"
@@ -398,6 +473,9 @@ if [ "${PLATFORM_NODE_RANK}" -eq 0 ]; then
     log "Skipped: ${SKIPPED}"
     log "Result dir: ${RESULT_DIR}"
     log "Summary CSV: ${SUMMARY_CSV}"
+    log "Analysis TXT: ${ANALYSIS_TXT}"
+    log "Analyze command: python byted_experiments/analyze_results.py ${RESULT_DIR} --detailed"
+    log "HDFS result dir: ${HDFS_RESULT_DIR}"
     log "=========================================="
     column -t -s',' "${SUMMARY_CSV}" 2>/dev/null || cat "${SUMMARY_CSV}"
 fi
