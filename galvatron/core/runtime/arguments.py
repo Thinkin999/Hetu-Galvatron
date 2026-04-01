@@ -285,4 +285,9 @@ def galvatron_training_args(parser, use_megatron=True):
         help="Override GPU memory limit (GB) for AdaCPSP solver. "
              "0 = auto-detect (90%% of GPU memory).",
     )
+    group.add_argument(
+        "--adaCPSP-sync-solver", action="store_true",
+        help="Disable async solver overlap (double-buffering). "
+             "When set, solver runs synchronously before each training step.",
+    )
     return parser

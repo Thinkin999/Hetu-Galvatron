@@ -20,6 +20,8 @@ import torch.distributed
 from transformers import LlamaForCausalLM
 from tqdm import tqdm
 import os
+import multiprocessing as mp
+import time as time_module
 
 from galvatron.core import (
     RuntimeProfiler,
@@ -209,6 +211,242 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
                   f"sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}")
 
     return microbatches
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Async Solver: double-buffered overlap of solver (CPU) with training (GPU)
+#
+# Timeline:
+#   iter 0 (warmup): launch solver(B0) in subprocess, buffer B0, skip training
+#   iter N (N>=1):   join solver(B_{N-1}) → broadcast → launch solver(B_N)
+#                    → build microbatches from B_{N-1} → train B_{N-1}
+#                    (solver(B_N) runs on CPU in parallel with GPU training)
+#
+# Cost: 1 warmup iteration (no training). Across epoch boundaries the buffered
+# batch carries over, so no data is lost except the very last batch of the
+# final epoch.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Module-level reference so the forked subprocess can access the optimizer
+# without pickling (Linux fork inherits parent memory).
+_async_optimizer = None
+
+
+def _groups_to_micro_res(all_groups):
+    """Convert solver group objects to pickle-safe list-of-list-of-tuples."""
+    all_micro_res = []
+    for micro_groups in all_groups:
+        micro_res = []
+        for strat, group_seqs in micro_groups:
+            seq_ids = [s.id for s in group_seqs]
+            micro_res.append((
+                strat.attn_type, strat.parallel_size,
+                strat.sp_size, strat.cp_size,
+                strat.placement, seq_ids,
+            ))
+        all_micro_res.append(micro_res)
+    return all_micro_res
+
+
+def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size):
+    """
+    Solver subprocess entry point (runs on CPU only).
+    Uses fork-inherited module-level _async_optimizer.
+    """
+    from galvatron.models.varlen_llama_hf.adacpsp_solver import (
+        Sequence, ParallelStrategy,
+    )
+
+    start = time_module.time()
+    seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
+
+    if forced_strategy is not None:
+        all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
+    else:
+        all_groups, _ = _async_optimizer.solve_globalbatch(seqs)
+
+    if len(all_groups) == 0:
+        fallback = ParallelStrategy("ulysses", world_size)
+        all_groups = [[(fallback, seqs)]]
+
+    result_queue.put(_groups_to_micro_res(all_groups))
+    elapsed = time_module.time() - start
+    print(f"[AdaCPSP] Async solver completed in {elapsed:.3f}s")
+
+
+class _AsyncSolverState:
+    """
+    Double-buffer state machine for overlapping AdaCPSP solver with training.
+
+    The solver runs in a forked subprocess on CPU while the GPU executes the
+    previous iteration's forward/backward pass.  All distributed collective
+    operations (broadcast, new_group) happen in the main process so every rank
+    stays synchronised.
+    """
+
+    def __init__(self, optimizer, forced_strategy, world_size, rank):
+        self._optimizer = optimizer
+        self._forced_strategy = forced_strategy
+        self._world_size = world_size
+        self._rank = rank
+        self._process = None
+        self._result_queue = None
+        self._prev_batch = None
+        self._is_first = True
+
+    @property
+    def is_warmup(self):
+        return self._is_first
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def warmup(self, batch):
+        """Iter 0: launch solver for this batch, buffer data, no training."""
+        self._launch_solver(batch)
+        self._prev_batch = batch
+        self._is_first = False
+        if self._rank == 0:
+            print("[AdaCPSP] Warmup iter: solver launched, training skipped")
+
+    def step(self, current_batch, args, device):
+        """
+        Iter >= 1.  Returns microbatches built from *prev_batch*.
+        Meanwhile solver(current_batch) starts running in background.
+        """
+        all_micro_res = self._collect_result()
+        self._launch_solver(current_batch)
+        microbatches = self._build_microbatches(all_micro_res, args, device)
+        self._prev_batch = current_batch
+        return microbatches
+
+    def cleanup(self):
+        """Join any lingering subprocess at the very end of training."""
+        if self._process is not None and self._process.is_alive():
+            self._process.join(timeout=10)
+            if self._process.is_alive():
+                self._process.kill()
+                self._process.join()
+            self._process = None
+
+    # ── private helpers ───────────────────────────────────────────────────
+
+    def _launch_solver(self, batch):
+        """Extract seq_lens and fork solver subprocess (rank 0 only)."""
+        packed_tokens, cu_seqlens = batch
+        num_seqs = cu_seqlens.shape[0] - 1
+        seq_lens = [(cu_seqlens[i + 1] - cu_seqlens[i]).item()
+                     for i in range(num_seqs)]
+
+        if self._rank == 0:
+            self._result_queue = mp.Queue(maxsize=1)
+            self._process = mp.Process(
+                target=_async_solver_worker,
+                args=(seq_lens, self._result_queue,
+                      self._forced_strategy, self._world_size),
+            )
+            self._process.start()
+
+    def _collect_result(self):
+        """Join solver subprocess (rank 0), broadcast result to all ranks."""
+        all_micro_res = None
+        if self._rank == 0:
+            self._process.join(timeout=600)
+            if self._process.is_alive():
+                print("[AdaCPSP] WARNING: solver timed out (600s), killing")
+                self._process.kill()
+                self._process.join()
+
+            if self._process.exitcode != 0:
+                print(f"[AdaCPSP] WARNING: solver exited with code "
+                      f"{self._process.exitcode}, falling back to sync")
+                all_micro_res = self._sync_fallback()
+            else:
+                try:
+                    all_micro_res = self._result_queue.get_nowait()
+                except Exception:
+                    print("[AdaCPSP] WARNING: result queue empty, "
+                          "falling back to sync")
+                    all_micro_res = self._sync_fallback()
+
+        bcast_buf = [all_micro_res]
+        torch.distributed.broadcast_object_list(bcast_buf, src=0)
+        return bcast_buf[0]
+
+    def _sync_fallback(self):
+        """Synchronous solve on rank 0 when the async subprocess fails."""
+        from galvatron.models.varlen_llama_hf.adacpsp_solver import (
+            Sequence, ParallelStrategy,
+        )
+        packed_tokens, cu_seqlens = self._prev_batch
+        num_seqs = cu_seqlens.shape[0] - 1
+        seq_lens = [(cu_seqlens[i + 1] - cu_seqlens[i]).item()
+                     for i in range(num_seqs)]
+        seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
+
+        if self._forced_strategy is not None:
+            all_groups = _build_forced_groups(
+                seqs, self._world_size, self._forced_strategy)
+        else:
+            all_groups, _ = self._optimizer.solve_globalbatch(seqs)
+
+        if len(all_groups) == 0:
+            fallback = ParallelStrategy("ulysses", self._world_size)
+            all_groups = [[(fallback, seqs)]]
+
+        return _groups_to_micro_res(all_groups)
+
+    def _build_microbatches(self, all_micro_res, args, device):
+        """Build microbatch tensors from prev_batch + solver result."""
+        from galvatron.models.varlen_llama_hf.adacpsp_group_manager import (
+            convert_microbatch_res,
+        )
+
+        packed_tokens, cu_seqlens = self._prev_batch
+
+        args.adacpsp_strategies = []
+        args.adacpsp_sp_groups = []
+        args.adacpsp_cp_groups = []
+
+        microbatches = []
+        for mb_idx, micro_res in enumerate(all_micro_res):
+            (my_seq_ids, my_sp_group, my_cp_group,
+             my_attn_type, my_sp_size, my_cp_size,
+             my_placement) = convert_microbatch_res(micro_res)
+
+            args.adacpsp_strategies.append({
+                "sp_size": my_sp_size,
+                "cp_size": my_cp_size,
+                "attn_type": my_attn_type,
+                "placement": my_placement,
+            })
+            args.adacpsp_sp_groups.append(my_sp_group)
+            args.adacpsp_cp_groups.append(my_cp_group)
+
+            if len(my_seq_ids) == 0:
+                mb_tokens = torch.zeros(1, dtype=torch.long, device=device)
+                mb_cu = torch.zeros(2, dtype=torch.int64, device=device)
+                mb_cu[1] = 1
+            else:
+                parts = []
+                offsets = [0]
+                for sid in my_seq_ids:
+                    start = cu_seqlens[sid].item()
+                    end = cu_seqlens[sid + 1].item()
+                    parts.append(packed_tokens[start:end])
+                    offsets.append(offsets[-1] + (end - start))
+                mb_tokens = torch.cat(parts)
+                mb_cu = torch.tensor(offsets, dtype=torch.int64, device=device)
+
+            microbatches.append([[mb_tokens, mb_cu]])
+
+        if self._rank == 0:
+            for mb_idx, strat in enumerate(args.adacpsp_strategies):
+                pl_str = (f", placement={strat['placement']}"
+                          if strat['attn_type'] == 'usp' else "")
+                print(f"  [AdaCPSP] MB{mb_idx}: type={strat['attn_type']}, "
+                      f"sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}")
+
+        return microbatches
 
 
 def train(args):
@@ -419,6 +657,26 @@ def train(args):
         if rank == 0:
             print(f"[AdaCPSP] Forced placement: {force_placement}")
 
+    # ═══════════════════════════════════════════════════════
+    # Async solver state (double-buffering)
+    # ═══════════════════════════════════════════════════════
+    async_state = None
+    use_async = (args.use_adaCPSP
+                 and not getattr(args, 'adaCPSP_sync_solver', False))
+    if use_async:
+        global _async_optimizer
+        _async_optimizer = adacpsp_optimizer
+        async_state = _AsyncSolverState(
+            optimizer=adacpsp_optimizer,
+            forced_strategy=forced_strategy,
+            world_size=world_size,
+            rank=rank,
+        )
+        if rank == 0:
+            print("[AdaCPSP] Async solver enabled (double-buffering)")
+    elif args.use_adaCPSP and rank == 0:
+        print("[AdaCPSP] Sync solver mode (no overlap)")
+
     trainloader = distributed_dataloader(
         dataset=DataLoaderForVarlenLlama(args, device),
         global_bsz=args.global_train_batch_size,
@@ -436,23 +694,32 @@ def train(args):
             trainloader = tqdm(trainloader) if rank == 0 else trainloader
 
         for iter, batch in enumerate(trainloader):
-            profiler.profile_time_start(iter)
-            profiler.profile_memory(iter, "Before Forward")
 
+            # ── Async double-buffer: warmup iter (launch solver, skip train) ──
+            if async_state is not None and async_state.is_warmup:
+                async_state.warmup(batch)
+                continue
+
+            # ── Prepare microbatches ──
             if not args.use_packing:
                 batch = [batch]
             elif args.use_adaCPSP:
-                batch = _adacpsp_solve_and_assign(
-                    batch, adacpsp_optimizer, forced_strategy,
-                    args, rank, world_size, device,
-                )
+                if async_state is not None:
+                    batch = async_state.step(batch, args, device)
+                else:
+                    batch = _adacpsp_solve_and_assign(
+                        batch, adacpsp_optimizer, forced_strategy,
+                        args, rank, world_size, device,
+                    )
+
+            profiler.profile_time_start(iter)
+            profiler.profile_memory(iter, "Before Forward")
 
             loss = model.forward_backward(batch, iter, profiler)
             profiler.profile_memory(iter, "After Backward")
 
             total_norm = clip_grad_norm(model, args.clip_grad)
 
-            # Optimizer step
             optimizer.step()
             opt_param_scheduler.step(increment=args.global_batch_size)
             profiler.profile_memory(iter, "After optimizer_step")
@@ -466,7 +733,11 @@ def train(args):
 
             if local_rank == 0:
                 print_loss(args, loss, ep, iter)
-            torch.distributed.barrier()    
+            torch.distributed.barrier()
+
+    # Clean up lingering solver subprocess
+    if async_state is not None:
+        async_state.cleanup()
 
 
 if __name__ == '__main__':
