@@ -43,6 +43,11 @@ EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
 # Whether to mirror rank-0 experiment logs to terminal in real time.
 # 1 = print to terminal + file, 0 = file only.
 LIVE_LOG_TO_STDOUT="${LIVE_LOG_TO_STDOUT:-1}"
+# Log streaming scope: rank0 | all | none.
+LIVE_LOG_SCOPE="${LIVE_LOG_SCOPE:-rank0}"
+# If enabled, derive MEMORY_LIMIT_GB from current free GPU memory.
+AUTO_MEMORY_LIMIT="${AUTO_MEMORY_LIMIT:-1}"
+MEMORY_LIMIT_HEADROOM_GB="${MEMORY_LIMIT_HEADROOM_GB:-4}"
 
 # Paths.
 LOCAL_RESULT_ROOT="${LOCAL_RESULT_ROOT:-${SCRIPT_DIR}/results}"
@@ -140,6 +145,65 @@ PY
         export LD_LIBRARY_PATH="${extra_lib_dirs}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
         log "Appended CUDA runtime libraries: ${extra_lib_dirs}"
     fi
+}
+
+should_stream_logs() {
+    case "${LIVE_LOG_SCOPE}" in
+        all)
+            return 0
+            ;;
+        rank0)
+            [ "${PLATFORM_NODE_RANK}" -eq 0 ]
+            return
+            ;;
+        none)
+            return 1
+            ;;
+        *)
+            log "WARNING: unknown LIVE_LOG_SCOPE=${LIVE_LOG_SCOPE}, fallback to rank0"
+            [ "${PLATFORM_NODE_RANK}" -eq 0 ]
+            return
+            ;;
+    esac
+}
+
+auto_detect_memory_limit_gb() {
+    local query_output
+    local min_free_mb
+    local free_mb
+    local usable_gb
+    local visible_gpu_ids
+
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log "WARNING: nvidia-smi not found, keep MEMORY_LIMIT_GB=${MEMORY_LIMIT_GB}"
+        return 0
+    fi
+
+    visible_gpu_ids="${CUDA_VISIBLE_DEVICES:-}"
+    if [ -n "${visible_gpu_ids}" ]; then
+        query_output=$(nvidia-smi --id="${visible_gpu_ids}" --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)
+    else
+        query_output=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null || true)
+    fi
+
+    if [ -z "${query_output}" ]; then
+        log "WARNING: failed to query GPU memory, keep MEMORY_LIMIT_GB=${MEMORY_LIMIT_GB}"
+        return 0
+    fi
+
+    min_free_mb=$(printf "%s\n" "${query_output}" | awk 'NR==1{min=$1} $1<min{min=$1} END{print min}')
+    if [ -z "${min_free_mb}" ]; then
+        log "WARNING: failed to parse free memory, keep MEMORY_LIMIT_GB=${MEMORY_LIMIT_GB}"
+        return 0
+    fi
+
+    free_mb="${min_free_mb%.*}"
+    usable_gb=$(( (free_mb - MEMORY_LIMIT_HEADROOM_GB * 1024) / 1024 ))
+    if [ "${usable_gb}" -lt 8 ]; then
+        usable_gb=8
+    fi
+    MEMORY_LIMIT_GB="${usable_gb}"
+    log "Auto memory limit enabled: min_free=${free_mb}MB, headroom=${MEMORY_LIMIT_HEADROOM_GB}GB, MEMORY_LIMIT_GB=${MEMORY_LIMIT_GB}"
 }
 
 setup_dataset_mount() {
@@ -297,6 +361,9 @@ log "=========================================="
 setup_cuda_runtime_env
 setup_dataset_mount || exit 1
 detect_hdfs_cmd
+if [ "${AUTO_MEMORY_LIMIT}" = "1" ]; then
+    auto_detect_memory_limit_gb
+fi
 
 TOTAL=0
 PASSED=0
@@ -408,7 +475,7 @@ for model in ${MODELS}; do
                 fi
 
                 START_TIME=$(date +%s)
-                if [ "${PLATFORM_NODE_RANK}" -eq 0 ] && [ "${LIVE_LOG_TO_STDOUT}" = "1" ]; then
+                if [ "${LIVE_LOG_TO_STDOUT}" = "1" ] && should_stream_logs; then
                     timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" 2>&1 | tee -a "${NODE_LOG}"
                     EXIT_CODE=${PIPESTATUS[0]}
                 else
@@ -442,6 +509,10 @@ for model in ${MODELS}; do
                             log "  OOM (${WALL_TIME}s)"
                         else
                             log "  FAIL exit=${EXIT_CODE} (${WALL_TIME}s)"
+                        fi
+                        if [ "${LIVE_LOG_TO_STDOUT}" != "1" ] || ! should_stream_logs; then
+                            log "  Last 120 lines from ${NODE_LOG}:"
+                            tail -n 120 "${NODE_LOG}" || true
                         fi
                     fi
 
