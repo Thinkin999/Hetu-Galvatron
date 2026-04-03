@@ -290,4 +290,22 @@ def galvatron_training_args(parser, use_megatron=True):
         help="Disable async solver overlap (double-buffering). "
              "When set, solver runs synchronously before each training step.",
     )
+    group.add_argument(
+        "--adaCPSP-method", type=str, default="ilp",
+        choices=["adaptive_bfd", "adaptive_ffd", "hetero_bfd", "hetero_ffd", "ilp", "bucket_ilp"],
+        help="AdaCPSP microbatch solver method.",
+    )
+    group.add_argument(
+        "--adaCPSP-solve-mode", type=str, default="mp_gbmb",
+        choices=["sequential", "mp", "mp_gbmb"],
+        help="AdaCPSP global batch solve mode.",
+    )
+    group.add_argument(
+        "--adaCPSP-bucket-num", type=int, default=16,
+        help="Bucket count for ILP/bucket ILP based methods.",
+    )
+    group.add_argument(
+        "--adaCPSP-mb-option-num", type=int, default=5,
+        help="Number of microbatch-count options explored in mp_gbmb mode.",
+    )
     return parser

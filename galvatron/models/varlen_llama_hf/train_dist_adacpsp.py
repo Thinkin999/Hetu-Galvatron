@@ -299,6 +299,49 @@ def _log_microbatch_layout(prefix, mb_idx, group_descs):
         )
 
 
+def _get_adacpsp_solver_config(args):
+    """Resolve runtime solver options from training args."""
+    return {
+        "method": getattr(args, "adaCPSP_method", "adaptive_bfd"),
+        "solve_mode": getattr(args, "adaCPSP_solve_mode", "sequential"),
+        "bucket_num": getattr(args, "adaCPSP_bucket_num", 16),
+        "mb_option_num": getattr(args, "adaCPSP_mb_option_num", 5),
+        "chunk_alg": getattr(args, "chunk_alg", "sort_consec"),
+    }
+
+
+def _solve_global_batch_with_config(optimizer, seqs, solver_cfg, log_context=None):
+    """Dispatch to the selected global-batch solving mode."""
+    method = solver_cfg["method"]
+    solve_mode = solver_cfg["solve_mode"]
+    bucket_num = solver_cfg["bucket_num"]
+    mb_option_num = solver_cfg["mb_option_num"]
+    chunk_alg = solver_cfg["chunk_alg"]
+
+    if solve_mode == "mp_gbmb":
+        return optimizer.solve_globalbatch_mp_gbmb(
+            seqs,
+            chunk_alg=chunk_alg,
+            method=method,
+            bucket_num=bucket_num,
+            mb_option_num=mb_option_num,
+        )
+    if solve_mode == "mp":
+        return optimizer.solve_globalbatch_mp(
+            seqs,
+            chunk_alg=chunk_alg,
+            method=method,
+            bucket_num=bucket_num,
+        )
+    return optimizer.solve_globalbatch(
+        seqs,
+        chunk_alg=chunk_alg,
+        method=method,
+        bucket_num=bucket_num,
+        log_context=log_context,
+    )
+
+
 def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
                               args, rank, world_size, device, step_ctx):
     """
@@ -326,11 +369,14 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
     if rank == 0:
         _log_global_batch_layout(solve_prefix, cu_seqlens, batch_meta)
         seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
+        solver_cfg = _get_adacpsp_solver_config(args)
 
         if forced_strategy is not None:
             all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
         else:
-            all_groups, _ = adacpsp_optimizer.solve_globalbatch(seqs, log_context=solve_prefix)
+            all_groups, _ = _solve_global_batch_with_config(
+                adacpsp_optimizer, seqs, solver_cfg, log_context=solve_prefix
+            )
 
         if len(all_groups) == 0:
             print(f"{solve_prefix} Solver failed, fallback to Ulysses×{world_size}")
@@ -431,7 +477,9 @@ def _groups_to_micro_res(all_groups):
     return all_micro_res
 
 
-def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size, log_context=None):
+def _async_solver_worker(
+    seq_lens, result_queue, forced_strategy, world_size, solver_cfg, log_context=None
+):
     """
     Solver subprocess entry point (runs on CPU only).
     Uses fork-inherited module-level _async_optimizer.
@@ -446,7 +494,9 @@ def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size, lo
     if forced_strategy is not None:
         all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
     else:
-        all_groups, _ = _async_optimizer.solve_globalbatch(seqs, log_context=log_context)
+        all_groups, _ = _solve_global_batch_with_config(
+            _async_optimizer, seqs, solver_cfg, log_context=log_context
+        )
 
     if len(all_groups) == 0:
         fallback = ParallelStrategy("ulysses", world_size)
@@ -470,9 +520,10 @@ class _AsyncSolverState:
     stays synchronised.
     """
 
-    def __init__(self, optimizer, forced_strategy, world_size, rank):
+    def __init__(self, optimizer, forced_strategy, solver_cfg, world_size, rank):
         self._optimizer = optimizer
         self._forced_strategy = forced_strategy
+        self._solver_cfg = solver_cfg
         self._world_size = world_size
         self._rank = rank
         self._process = None
@@ -532,7 +583,7 @@ class _AsyncSolverState:
             self._process = mp.Process(
                 target=_async_solver_worker,
                 args=(seq_lens, self._result_queue,
-                      self._forced_strategy, self._world_size, solve_prefix),
+                      self._forced_strategy, self._world_size, self._solver_cfg, solve_prefix),
             )
             self._process.start()
 
@@ -576,7 +627,9 @@ class _AsyncSolverState:
             all_groups = _build_forced_groups(
                 seqs, self._world_size, self._forced_strategy)
         else:
-            all_groups, _ = self._optimizer.solve_globalbatch(seqs, log_context=solve_prefix)
+            all_groups, _ = _solve_global_batch_with_config(
+                self._optimizer, seqs, self._solver_cfg, log_context=solve_prefix
+            )
 
         if len(all_groups) == 0:
             fallback = ParallelStrategy("ulysses", self._world_size)
@@ -880,15 +933,30 @@ def train(args):
     if use_async:
         global _async_optimizer
         _async_optimizer = adacpsp_optimizer
+        solver_cfg = _get_adacpsp_solver_config(args)
         async_state = _AsyncSolverState(
             optimizer=adacpsp_optimizer,
             forced_strategy=forced_strategy,
+            solver_cfg=solver_cfg,
             world_size=world_size,
             rank=rank,
         )
         if rank == 0:
+            print(
+                "[AdaCPSP] Solver config: "
+                f"method={solver_cfg['method']}, mode={solver_cfg['solve_mode']}, "
+                f"chunk_alg={solver_cfg['chunk_alg']}, bucket_num={solver_cfg['bucket_num']}, "
+                f"mb_option_num={solver_cfg['mb_option_num']}"
+            )
             print("[AdaCPSP] Async solver enabled (double-buffering)")
     elif args.use_adaCPSP and rank == 0:
+        solver_cfg = _get_adacpsp_solver_config(args)
+        print(
+            "[AdaCPSP] Solver config: "
+            f"method={solver_cfg['method']}, mode={solver_cfg['solve_mode']}, "
+            f"chunk_alg={solver_cfg['chunk_alg']}, bucket_num={solver_cfg['bucket_num']}, "
+            f"mb_option_num={solver_cfg['mb_option_num']}"
+        )
         print("[AdaCPSP] Sync solver mode (no overlap)")
 
     trainloader = distributed_dataloader(

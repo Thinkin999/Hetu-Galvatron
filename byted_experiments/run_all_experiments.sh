@@ -41,6 +41,11 @@ DEFAULT_DP_TYPE="${DEFAULT_DP_TYPE:-zero3}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 DATASET="${DATASET:-wikipedia}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+# AdaCPSP solver knobs (applied when strategy uses AdaCPSP).
+ADACPSP_METHOD="${ADACPSP_METHOD:-ilp}"
+ADACPSP_SOLVE_MODE="${ADACPSP_SOLVE_MODE:-mp_gbmb}"
+ADACPSP_BUCKET_NUM="${ADACPSP_BUCKET_NUM:-16}"
+ADACPSP_MB_OPTION_NUM="${ADACPSP_MB_OPTION_NUM:-5}"
 # Keep NCCL logging at warning level by default to avoid noisy INFO logs.
 export NCCL_DEBUG="WARN"
 # Whether to mirror rank-0 experiment logs to terminal in real time.
@@ -193,18 +198,19 @@ auto_gbs() {
 
 strategy_to_args() {
     local strategy=$1
+    local solver_args="--adaCPSP-method ${ADACPSP_METHOD} --adaCPSP-solve-mode ${ADACPSP_SOLVE_MODE} --adaCPSP-bucket-num ${ADACPSP_BUCKET_NUM} --adaCPSP-mb-option-num ${ADACPSP_MB_OPTION_NUM}"
     case "${strategy}" in
         adacpsp)
-            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ulysses ring usp"
+            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ulysses ring usp ${solver_args}"
             ;;
         flexsp)
-            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ulysses"
+            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ulysses ${solver_args}"
             ;;
         ring_only)
-            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ring"
+            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ring ${solver_args}"
             ;;
         ulysses_ring)
-            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ulysses ring"
+            echo "--use-adaCPSP --use-packing --adaCPSP-attn-types ulysses ring ${solver_args}"
             ;;
         *)
             log "ERROR: Unknown strategy: ${strategy}"
@@ -294,6 +300,10 @@ Timeout (s):         ${TIMEOUT_SECONDS}
 Memory Limit:        ${MEMORY_LIMIT_GB} GB
 Dataset:             ${DATASET}
 Dataset Mount Dir:   ${DATASET_MOUNT_DIR:-<unset>}
+AdaCPSP Method:      ${ADACPSP_METHOD}
+AdaCPSP Solve Mode:  ${ADACPSP_SOLVE_MODE}
+AdaCPSP Bucket Num:  ${ADACPSP_BUCKET_NUM}
+AdaCPSP MB Options:  ${ADACPSP_MB_OPTION_NUM}
 Allocated Nodes:     ${PLATFORM_NNODES}
 Allocated GPUs/node: ${PLATFORM_NPROC_PER_NODE}
 Allocated GPUs:      ${ALLOCATED_GPUS}
