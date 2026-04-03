@@ -45,12 +45,14 @@ if [ "$NODE_RANK" -eq 0 ]; then
         echo ""
         echo "    --- $MODEL_NAME (heads=$N_HEADS, kv_heads=$N_KV_HEADS, head_dim=$HEAD_DIM) ---"
         
-        python3 "$BASE_DIR/profile_attention_fit.py" \
+        python3 "$BASE_DIR/profile_and_validate.py" \
+            --mode attention \
             --n_heads "$N_HEADS" \
             --n_kv_heads "$N_KV_HEADS" \
             --head_dim "$HEAD_DIM" \
             --model_name "$MODEL_NAME" \
             --save_dir "$CONFIGS_DIR" \
+            --attn_max 32768 \
             2>&1 | tee "$LOG_DIR/attn_${MODEL_NAME}_${TIMESTAMP}.log"
         
         echo "    ✓ $MODEL_NAME attention profile done"

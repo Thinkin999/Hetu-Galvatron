@@ -26,7 +26,7 @@ import json
 import argparse
 import math
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
 
 import torch
@@ -50,6 +50,189 @@ except ImportError:
 # PART 1: Attention Profiling with Automatic Breakpoint Detection
 # ═══════════════════════════════════════════════════════════════════════
 
+def _extract_attention_xy(data: List[Any]) -> Tuple[np.ndarray, np.ndarray]:
+    """Normalize attention profiling records into aligned seq/time arrays."""
+    xs, ts = [], []
+    for item in data:
+        if isinstance(item, dict):
+            xs.append(item["seq_len"])
+            ts.append(item["time_ms"])
+        else:
+            xs.append(item[0])
+            ts.append(item[1])
+    return np.array(xs, dtype=np.float64), np.array(ts, dtype=np.float64)
+
+
+def _segment_mask(xs: np.ndarray, lo: float, hi: float, include_hi: bool) -> np.ndarray:
+    """Build a half-open mask for segments, only keeping the last hi inclusive."""
+    if include_hi:
+        return (xs >= lo) & (xs <= hi)
+    return (xs >= lo) & (xs < hi)
+
+
+def _eval_quadratic(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+    """Evaluate quadratic in the original seq_len basis."""
+    return a * x ** 2 + b * x + c
+
+
+def _fit_centered_quadratic(seg_x: np.ndarray, seg_t: np.ndarray) -> Dict[str, Any]:
+    """Fit quadratic on centered/scaled seq_len for better numerical stability."""
+    x_center = float((seg_x.min() + seg_x.max()) / 2.0)
+    x_scale = float(max(1.0, (seg_x.max() - seg_x.min()) / 2.0))
+    z = (seg_x - x_center) / x_scale
+
+    alpha, beta, gamma = np.polyfit(z, seg_t, deg=2)
+    y_pred = alpha * z ** 2 + beta * z + gamma
+
+    ss_res = np.sum((seg_t - y_pred) ** 2)
+    ss_tot = np.sum((seg_t - np.mean(seg_t)) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+
+    # Convert local basis back into the original seq_len basis.
+    a = alpha / (x_scale ** 2)
+    b = beta / x_scale - 2.0 * alpha * x_center / (x_scale ** 2)
+    c = gamma - beta * x_center / x_scale + alpha * (x_center ** 2) / (x_scale ** 2)
+
+    return {
+        "a": float(a),
+        "b": float(b),
+        "c": float(c),
+        "r_squared": float(r2),
+        "max_error_ms": float(np.max(np.abs(seg_t - y_pred))),
+        "mean_error_ms": float(np.mean(np.abs(seg_t - y_pred))),
+        "y_pred": y_pred,
+        "fit_basis": {
+            "type": "centered_quadratic",
+            "variable": "z=(seq_len-center)/scale",
+            "center": x_center,
+            "scale": x_scale,
+        },
+        "local_fit_params": {
+            "alpha": float(alpha),
+            "beta": float(beta),
+            "gamma": float(gamma),
+        },
+    }
+
+
+def _serialize_attention_measurements(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert attention measurements into JSON-friendly objects."""
+    output = []
+    for item in data:
+        output.append({
+            "seq_len": int(item["seq_len"]),
+            "time_ms": float(item["time_ms"]),
+            "mean_ms": float(item["mean_ms"]),
+            "std_ms": float(item["std_ms"]),
+            "min_ms": float(item["min_ms"]),
+            "max_ms": float(item["max_ms"]),
+            "samples_ms": [float(v) for v in item["samples_ms"]],
+            "timing_groups": int(item["timing_groups"]),
+            "base_iters_per_group": int(item["base_iters_per_group"]),
+            "iters_per_group": int(item["iters_per_group"]),
+            "actual_profile_iters": int(item["actual_profile_iters"]),
+            "pilot_total_ms": float(item["pilot_total_ms"]),
+        })
+    return output
+
+
+def _profile_attention_point(
+    seq_len: int,
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+    warmup: int,
+    iters: int,
+    timing_groups: int,
+    timing_stat: str,
+    min_group_elapsed_ms: float,
+    max_iters_per_group: int,
+    use_varlen: bool,
+    device: str,
+    dtype: torch.dtype,
+) -> Dict[str, Any]:
+    """Profile one seq_len and return robust timing statistics."""
+    if use_varlen and flash_attn_varlen_func is not None:
+        q = torch.randn(seq_len, n_heads, head_dim, dtype=dtype, device=device)
+        k = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+        v = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+        cu = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
+
+        def attn_call():
+            return flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
+
+        cleanup_tensors = (q, k, v, cu)
+    elif flash_attn_func is not None:
+        q = torch.randn(1, seq_len, n_heads, head_dim, dtype=dtype, device=device)
+        k = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+        v = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
+
+        def attn_call():
+            return flash_attn_func(q, k, v, causal=True)
+
+        cleanup_tensors = (q, k, v)
+    else:
+        raise RuntimeError("No flash_attn implementation available")
+
+    try:
+        for _ in range(warmup):
+            attn_call()
+        torch.cuda.synchronize()
+
+        group_count = max(1, min(timing_groups, iters))
+        base_iters_per_group = max(1, int(math.ceil(iters / group_count)))
+        iters_per_group = base_iters_per_group
+        samples_ms = []
+
+        # Pilot timing to ensure each measurement window is long enough.
+        pilot_start = torch.cuda.Event(enable_timing=True)
+        pilot_end = torch.cuda.Event(enable_timing=True)
+        pilot_start.record()
+        for _ in range(base_iters_per_group):
+            attn_call()
+        pilot_end.record()
+        torch.cuda.synchronize()
+        pilot_total_ms = max(pilot_start.elapsed_time(pilot_end), 1e-6)
+        if pilot_total_ms < min_group_elapsed_ms:
+            scale = int(math.ceil(min_group_elapsed_ms / pilot_total_ms))
+            iters_per_group = min(max_iters_per_group, max(base_iters_per_group, base_iters_per_group * scale))
+
+        for _ in range(group_count):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(iters_per_group):
+                attn_call()
+            end.record()
+            torch.cuda.synchronize()
+            samples_ms.append(start.elapsed_time(end) / iters_per_group)
+
+        samples_arr = np.array(samples_ms, dtype=np.float64)
+        if timing_stat == "mean":
+            time_ms = float(np.mean(samples_arr))
+        else:
+            time_ms = float(np.median(samples_arr))
+
+        return {
+            "seq_len": int(seq_len),
+            "time_ms": time_ms,
+            "mean_ms": float(np.mean(samples_arr)),
+            "std_ms": float(np.std(samples_arr)),
+            "min_ms": float(np.min(samples_arr)),
+            "max_ms": float(np.max(samples_arr)),
+            "samples_ms": [float(v) for v in samples_ms],
+            "timing_groups": int(group_count),
+            "base_iters_per_group": int(base_iters_per_group),
+            "iters_per_group": int(iters_per_group),
+            "actual_profile_iters": int(group_count * iters_per_group),
+            "pilot_total_ms": float(pilot_total_ms),
+        }
+    finally:
+        for tensor in cleanup_tensors:
+            del tensor
+        torch.cuda.empty_cache()
+
+
 def profile_attention_dense(
     n_heads: int,
     n_kv_heads: int,
@@ -58,63 +241,54 @@ def profile_attention_dense(
     step: int = 64,
     warmup: int = 5,
     iters: int = 20,
+    timing_groups: int = 3,
+    timing_stat: str = "median",
+    min_group_elapsed_ms: float = 1.0,
+    max_iters_per_group: int = 512,
     use_varlen: bool = True,
     device: str = "cuda",
     dtype=torch.bfloat16,
-) -> List[Tuple[int, float]]:
+) -> List[Dict[str, Any]]:
     """
     Densely profile Flash Attention across the full seq_len range.
-    Returns list of (seq_len, time_ms).
+    Returns list of per-seq measurements with robust timing statistics.
     """
     results = []
     lo, hi = seq_range
     seq_lengths = list(range(lo, hi + 1, step))
     print(f"\n[Attention Profiling] Dense sampling: {lo} -> {hi}, step={step}, "
           f"total={len(seq_lengths)} points, {'varlen' if use_varlen else 'padded'}")
+    print(f"  Timing groups: {timing_groups}, aggregation: {timing_stat}, "
+          f"requested iters per point: {iters}")
+    print(f"  Adaptive timing: min_group_elapsed_ms={min_group_elapsed_ms}, "
+          f"max_iters_per_group={max_iters_per_group}")
 
     for i, seq_len in enumerate(seq_lengths):
         try:
-            if use_varlen and flash_attn_varlen_func is not None:
-                q = torch.randn(seq_len, n_heads, head_dim, dtype=dtype, device=device)
-                k = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                v = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                cu = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
-                for _ in range(warmup):
-                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
-                torch.cuda.synchronize()
-                s = torch.cuda.Event(enable_timing=True)
-                e = torch.cuda.Event(enable_timing=True)
-                s.record()
-                for _ in range(iters):
-                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
-                e.record()
-                torch.cuda.synchronize()
-                t = s.elapsed_time(e) / iters
-                del q, k, v, cu
-            elif flash_attn_func is not None:
-                q = torch.randn(1, seq_len, n_heads, head_dim, dtype=dtype, device=device)
-                k = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                v = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                for _ in range(warmup):
-                    flash_attn_func(q, k, v, causal=True)
-                torch.cuda.synchronize()
-                s = torch.cuda.Event(enable_timing=True)
-                e = torch.cuda.Event(enable_timing=True)
-                s.record()
-                for _ in range(iters):
-                    flash_attn_func(q, k, v, causal=True)
-                e.record()
-                torch.cuda.synchronize()
-                t = s.elapsed_time(e) / iters
-                del q, k, v
-            else:
+            if flash_attn_varlen_func is None and flash_attn_func is None:
                 print("  No flash_attn available, aborting")
                 return results
 
-            torch.cuda.empty_cache()
-            results.append((seq_len, t))
+            measurement = _profile_attention_point(
+                seq_len=seq_len,
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                warmup=warmup,
+                iters=iters,
+                timing_groups=timing_groups,
+                timing_stat=timing_stat,
+                min_group_elapsed_ms=min_group_elapsed_ms,
+                max_iters_per_group=max_iters_per_group,
+                use_varlen=use_varlen,
+                device=device,
+                dtype=dtype,
+            )
+            results.append(measurement)
             if (i + 1) % 50 == 0 or i == 0:
-                print(f"  [{i+1}/{len(seq_lengths)}] seq={seq_len}: {t:.4f} ms")
+                print(f"  [{i+1}/{len(seq_lengths)}] seq={seq_len}: "
+                      f"{measurement['time_ms']:.4f} ms "
+                      f"(std={measurement['std_ms']:.4f}, groups={measurement['timing_groups']})")
 
         except RuntimeError as ex:
             if "out of memory" in str(ex).lower():
@@ -128,7 +302,7 @@ def profile_attention_dense(
 
 
 def detect_breakpoints(
-    data: List[Tuple[int, float]],
+    data: List[Any],
     window: int = 5,
     threshold_factor: float = 3.0,
     min_segment_points: int = 8,
@@ -153,18 +327,21 @@ def detect_breakpoints(
     if len(data) < 2 * window + min_segment_points:
         return []
 
-    xs = np.array([d[0] for d in data], dtype=np.float64)
-    ts = np.array([d[1] for d in data], dtype=np.float64)
+    xs, ts = _extract_attention_xy(data)
 
     # 1. Compute r(x) = time / x²
     r = ts / (xs ** 2)
+    r_smooth = np.zeros_like(r)
+    for i in range(len(r)):
+        lo = max(0, i - window)
+        hi = min(len(r), i + window + 1)
+        r_smooth[i] = np.median(r[lo:hi])
 
     # 2. Compute smoothed derivative of r
-    # Use Savitzky-Golay-like smoothing: average over a window
     dr = np.zeros(len(r))
     for i in range(window, len(r) - window):
-        r_left = np.mean(r[max(0, i - window):i])
-        r_right = np.mean(r[i:min(len(r), i + window)])
+        r_left = np.mean(r_smooth[max(0, i - window):i])
+        r_right = np.mean(r_smooth[i:min(len(r_smooth), i + window)])
         dx = xs[min(len(xs)-1, i + window//2)] - xs[max(0, i - window//2)]
         if dx > 0:
             dr[i] = abs(r_right - r_left) / dx
@@ -225,7 +402,7 @@ def detect_breakpoints(
 
 
 def consolidate_breakpoints(
-    data: List[Tuple[int, float]],
+    data: List[Any],
     raw_breakpoints: List[int],
     max_segments: int = 5,
     min_r2: float = 0.995,
@@ -237,60 +414,113 @@ def consolidate_breakpoints(
     causes the least drop in overall R². Stop when we have ≤ max_segments
     or removing any breakpoint drops R² below min_r2.
     """
-    from scipy.optimize import curve_fit
+    xs, ts = _extract_attention_xy(data)
 
-    xs = np.array([d[0] for d in data], dtype=np.float64)
-    ts = np.array([d[1] for d in data], dtype=np.float64)
+    def segmentation_stats(bounds: List[float]) -> Dict[str, Any]:
+        fits = []
+        r2s = []
+        jumps = []
+        rel_errs = []
+        for j in range(len(bounds) - 1):
+            lo, hi = bounds[j], bounds[j + 1]
+            mask = _segment_mask(xs, lo, hi, include_hi=(j == len(bounds) - 2))
+            sx, st = xs[mask], ts[mask]
+            if len(sx) < 3:
+                return {
+                    "r2s": [0.0],
+                    "jumps": [1.0],
+                    "mean_rel_err": float("inf"),
+                    "max_rel_err": float("inf"),
+                }
+            fit = _fit_centered_quadratic(sx, st)
+            fits.append(fit)
+            r2s.append(fit["r_squared"])
+            y_pred = _eval_quadratic(sx, fit["a"], fit["b"], fit["c"])
+            rel_errs.extend(np.abs(st - y_pred) / np.maximum(st, 1e-6) * 100.0)
+
+        for j, bp in enumerate(bounds[1:-1]):
+            left_fit = fits[j]
+            right_fit = fits[j + 1]
+            left_val = float(_eval_quadratic(np.array([bp], dtype=np.float64),
+                                             left_fit["a"], left_fit["b"], left_fit["c"])[0])
+            right_val = float(_eval_quadratic(np.array([bp], dtype=np.float64),
+                                              right_fit["a"], right_fit["b"], right_fit["c"])[0])
+            denom = max(abs(left_val), abs(right_val), 1e-6)
+            jumps.append(abs(left_val - right_val) / denom)
+        return {
+            "r2s": r2s,
+            "jumps": jumps,
+            "mean_rel_err": float(np.mean(rel_errs)) if rel_errs else 0.0,
+            "max_rel_err": float(np.max(rel_errs)) if rel_errs else 0.0,
+        }
 
     def segment_r2(lo, hi):
         """Compute R² for a single segment [lo, hi]."""
-        mask = (xs >= lo) & (xs <= hi)
+        mask = _segment_mask(xs, lo, hi, include_hi=(hi >= xs[-1]))
         sx, st = xs[mask], ts[mask]
         if len(sx) < 3:
             return 0.0
         try:
-            def quad(x, a, b, c):
-                return a * x**2 + b * x + c
-            popt, _ = curve_fit(quad, sx, st, p0=[1e-9, 1e-6, 0.01], maxfev=10000)
-            y_pred = quad(sx, *popt)
-            ss_res = np.sum((st - y_pred) ** 2)
-            ss_tot = np.sum((st - np.mean(st)) ** 2)
-            return 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            return _fit_centered_quadratic(sx, st)["r_squared"]
         except Exception:
             return 0.0
 
     current_bps = list(raw_breakpoints)
     start_x, end_x = float(xs[0]), float(xs[-1])
 
-    while len(current_bps) + 1 > max_segments:
-        # Try removing each breakpoint and compute the resulting min-R² 
+    while current_bps:
+        current_bounds = [start_x] + current_bps + [end_x]
+        current_stats = segmentation_stats(current_bounds)
+        current_r2s = current_stats["r2s"]
+        current_jumps = current_stats["jumps"]
+        current_min_r2 = min(current_r2s) if current_r2s else 0.0
+        current_max_jump = max(current_jumps) if current_jumps else 0.0
+        current_score = current_min_r2 - 0.02 * current_max_jump
+
+        need_reduce_segments = len(current_bps) + 1 > max_segments
+        need_quality_improvement = current_min_r2 < min_r2
+        if not need_reduce_segments and not need_quality_improvement:
+            break
+
+        # Try removing each breakpoint and compute the resulting score.
         best_remove_idx = -1
-        best_min_r2_after = -1.0
+        best_score_after = -1e18
+        best_candidate_stats = None
 
         for i in range(len(current_bps)):
             trial_bps = current_bps[:i] + current_bps[i+1:]
             bounds = [start_x] + trial_bps + [end_x]
-            seg_r2s = []
-            for j in range(len(bounds) - 1):
-                r2 = segment_r2(bounds[j], bounds[j+1])
-                seg_r2s.append(r2)
+            trial_stats = segmentation_stats(bounds)
+            seg_r2s = trial_stats["r2s"]
+            jumps = trial_stats["jumps"]
             min_r2_val = min(seg_r2s) if seg_r2s else 0
-            if min_r2_val > best_min_r2_after:
-                best_min_r2_after = min_r2_val
+            max_jump = max(jumps) if jumps else 0.0
+            score = min_r2_val - 0.02 * max_jump
+            if score > best_score_after:
+                best_score_after = score
                 best_remove_idx = i
+                best_candidate_stats = trial_stats
 
-        if best_min_r2_after < min_r2 and len(current_bps) + 1 <= max_segments + 2:
-            # Dropping further would hurt quality too much
+        if best_remove_idx < 0:
             break
 
-        if best_remove_idx >= 0:
-            removed = current_bps.pop(best_remove_idx)
-            bounds = [start_x] + current_bps + [end_x]
-            seg_r2s = [segment_r2(bounds[j], bounds[j+1]) for j in range(len(bounds)-1)]
-            print(f"  Merged: removed bp={int(removed)}, now {len(current_bps)+1} segments, "
-                  f"min_R²={min(seg_r2s):.5f}")
-        else:
+        if not need_reduce_segments:
+            if best_score_after <= current_score:
+                break
+            if best_candidate_stats["mean_rel_err"] > current_stats["mean_rel_err"] * 1.05:
+                break
+            if best_candidate_stats["max_rel_err"] > current_stats["max_rel_err"] * 1.10:
+                break
+
+        if (not need_reduce_segments) and best_score_after <= current_score:
             break
+
+        removed = current_bps.pop(best_remove_idx)
+        seg_r2s = best_candidate_stats["r2s"] if best_candidate_stats is not None else []
+        jumps = best_candidate_stats["jumps"] if best_candidate_stats is not None else []
+        print(f"  Merged: removed bp={int(removed)}, now {len(current_bps)+1} segments, "
+              f"min_R²={min(seg_r2s):.5f}, max_jump={max(jumps) * 100 if jumps else 0.0:.2f}%, "
+              f"mean_rel_err={best_candidate_stats['mean_rel_err']:.2f}%")
 
     print(f"\n[Consolidation] {len(raw_breakpoints)} → {len(current_bps)} breakpoints: {[int(b) for b in current_bps]}")
     bounds = [start_x] + current_bps + [end_x]
@@ -303,23 +533,20 @@ def consolidate_breakpoints(
 
 
 def fit_segments_quadratic(
-    data: List[Tuple[int, float]],
+    data: List[Any],
     breakpoints: List[int],
 ) -> List[Dict]:
     """
     Fit quadratic time = a*x² + b*x + c for each segment defined by breakpoints.
     """
-    from scipy.optimize import curve_fit
-
-    xs = np.array([d[0] for d in data], dtype=np.float64)
-    ts = np.array([d[1] for d in data], dtype=np.float64)
+    xs, ts = _extract_attention_xy(data)
 
     bounds_list = [xs[0]] + breakpoints + [xs[-1]]
     segments = []
 
     for i in range(len(bounds_list) - 1):
         lo, hi = bounds_list[i], bounds_list[i + 1]
-        mask = (xs >= lo) & (xs <= hi)
+        mask = _segment_mask(xs, lo, hi, include_hi=(i == len(bounds_list) - 2))
         seg_x = xs[mask]
         seg_t = ts[mask]
 
@@ -327,36 +554,198 @@ def fit_segments_quadratic(
             print(f"  Segment [{int(lo)}, {int(hi)}]: only {len(seg_x)} points, skipping")
             continue
 
-        def quadratic(x, a, b, c):
-            return a * x**2 + b * x + c
-
         try:
-            popt, _ = curve_fit(quadratic, seg_x, seg_t, p0=[1e-9, 1e-6, 0.01], maxfev=20000)
-            a, b, c = popt
-            y_pred = quadratic(seg_x, a, b, c)
-            ss_res = np.sum((seg_t - y_pred) ** 2)
-            ss_tot = np.sum((seg_t - np.mean(seg_t)) ** 2)
-            r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-            max_err = float(np.max(np.abs(seg_t - y_pred)))
-            mean_err = float(np.mean(np.abs(seg_t - y_pred)))
-
+            fit = _fit_centered_quadratic(seg_x, seg_t)
+            a, b, c = fit["a"], fit["b"], fit["c"]
             seg_info = {
                 "range": [int(lo), int(hi)],
                 "a": float(a),
                 "b": float(b),
                 "c": float(c),
-                "r_squared": float(r2),
-                "max_error_ms": max_err,
-                "mean_error_ms": mean_err,
+                "r_squared": fit["r_squared"],
+                "max_error_ms": fit["max_error_ms"],
+                "mean_error_ms": fit["mean_error_ms"],
                 "n_points": len(seg_x),
+                "fit_basis": fit["fit_basis"],
+                "local_fit_params": fit["local_fit_params"],
             }
             segments.append(seg_info)
             print(f"  Segment [{int(lo):>6}, {int(hi):>6}]: a={a:.6e}, b={b:.6e}, c={c:.4f}, "
-                  f"R²={r2:.6f}, maxErr={max_err:.4f}ms ({len(seg_x)} pts)")
+                  f"R²={fit['r_squared']:.6f}, maxErr={fit['max_error_ms']:.4f}ms "
+                  f"({len(seg_x)} pts, center={fit['fit_basis']['center']:.0f}, "
+                  f"scale={fit['fit_basis']['scale']:.0f})")
         except Exception as e:
             print(f"  Segment [{int(lo)}, {int(hi)}]: fit failed: {e}")
 
     return segments
+
+
+def summarize_attention_segments(
+    data: List[Any],
+    segments: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build diagnostics for segment quality, continuity, and timing noise."""
+    xs, ts = _extract_attention_xy(data)
+    measurement_lookup = {
+        int(item["seq_len"]): item for item in data if isinstance(item, dict)
+    }
+
+    per_segment = []
+    boundary_jumps = []
+
+    for idx, seg in enumerate(segments):
+        lo, hi = seg["range"]
+        mask = _segment_mask(xs, lo, hi, include_hi=(idx == len(segments) - 1))
+        seg_x = xs[mask]
+        seg_t = ts[mask]
+        y_pred = _eval_quadratic(seg_x, seg["a"], seg["b"], seg["c"])
+        rel_err_pct = np.abs(seg_t - y_pred) / np.maximum(seg_t, 1e-6) * 100.0
+        monotonic_violations = int(np.sum(np.diff(y_pred) < -1e-6))
+        stds = [
+            measurement_lookup[int(x)]["std_ms"]
+            for x in seg_x
+            if int(x) in measurement_lookup
+        ]
+        per_segment.append({
+            "range": [int(lo), int(hi)],
+            "n_points": int(len(seg_x)),
+            "mean_rel_error_pct": float(np.mean(rel_err_pct)) if len(rel_err_pct) else 0.0,
+            "max_rel_error_pct": float(np.max(rel_err_pct)) if len(rel_err_pct) else 0.0,
+            "mean_sample_std_ms": float(np.mean(stds)) if stds else None,
+            "monotonic_violations": monotonic_violations,
+        })
+
+    for idx, bp in enumerate([seg["range"][1] for seg in segments[:-1]]):
+        left = segments[idx]
+        right = segments[idx + 1]
+        left_val = float(_eval_quadratic(np.array([bp], dtype=np.float64),
+                                         left["a"], left["b"], left["c"])[0])
+        right_val = float(_eval_quadratic(np.array([bp], dtype=np.float64),
+                                          right["a"], right["b"], right["c"])[0])
+        denom = max(abs(left_val), abs(right_val), 1e-6)
+        boundary_jumps.append({
+            "breakpoint": int(bp),
+            "left_range": left["range"],
+            "right_range": right["range"],
+            "left_ms": left_val,
+            "right_ms": right_val,
+            "abs_jump_ms": abs(left_val - right_val),
+            "rel_jump_pct": abs(left_val - right_val) / denom * 100.0,
+        })
+
+    min_r2 = min((seg["r_squared"] for seg in segments), default=0.0)
+    max_jump_pct = max((j["rel_jump_pct"] for j in boundary_jumps), default=0.0)
+    mean_jump_pct = float(np.mean([j["rel_jump_pct"] for j in boundary_jumps])) if boundary_jumps else 0.0
+
+    return {
+        "per_segment": per_segment,
+        "boundary_jumps": boundary_jumps,
+        "selection_score": {
+            "min_r_squared": float(min_r2),
+            "max_boundary_rel_jump_pct": float(max_jump_pct),
+            "mean_boundary_rel_jump_pct": float(mean_jump_pct),
+        },
+    }
+
+
+def _predict_attention_piecewise(seq_len: int, segments: List[Dict[str, Any]]) -> float:
+    """Evaluate piecewise quadratic attention fit for one seq_len."""
+    if not segments:
+        return 0.0
+    for seg in segments:
+        lo, hi = seg["range"]
+        if lo <= seq_len <= hi:
+            return float(_eval_quadratic(np.array([seq_len], dtype=np.float64),
+                                         seg["a"], seg["b"], seg["c"])[0])
+    if seq_len < segments[0]["range"][0]:
+        seg = segments[0]
+    else:
+        seg = segments[-1]
+    return float(_eval_quadratic(np.array([seq_len], dtype=np.float64),
+                                 seg["a"], seg["b"], seg["c"])[0])
+
+
+def validate_head_scaling(
+    full_measurements: List[Dict[str, Any]],
+    fitted_segments: List[Dict[str, Any]],
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+    seq_lengths: List[int],
+    sp_sizes: List[int],
+    warmup: int = 5,
+    iters: int = 20,
+    timing_groups: int = 3,
+    timing_stat: str = "median",
+    min_group_elapsed_ms: float = 1.0,
+    max_iters_per_group: int = 512,
+    use_varlen: bool = True,
+    device: str = "cuda",
+    dtype=torch.bfloat16,
+) -> List[Dict[str, Any]]:
+    """Validate how well reduced local head counts follow simple Ulysses scaling."""
+    full_lookup = {int(item["seq_len"]): item for item in full_measurements}
+    results = []
+
+    for sp in sp_sizes:
+        if sp <= 1 or n_heads % sp != 0 or n_kv_heads % sp != 0:
+            continue
+        local_heads = n_heads // sp
+        local_kv_heads = n_kv_heads // sp
+
+        for seq_len in seq_lengths:
+            if seq_len not in full_lookup:
+                continue
+            full_measured = full_lookup[seq_len]["time_ms"]
+            full_fit = _predict_attention_piecewise(seq_len, fitted_segments)
+            scaled_from_measured = full_measured / sp
+            scaled_from_fit = full_fit / sp
+
+            try:
+                local_measurement = _profile_attention_point(
+                    seq_len=seq_len,
+                    n_heads=local_heads,
+                    n_kv_heads=local_kv_heads,
+                    head_dim=head_dim,
+                    warmup=warmup,
+                    iters=iters,
+                    timing_groups=timing_groups,
+                    timing_stat=timing_stat,
+                    min_group_elapsed_ms=min_group_elapsed_ms,
+                    max_iters_per_group=max_iters_per_group,
+                    use_varlen=use_varlen,
+                    device=device,
+                    dtype=dtype,
+                )
+            except RuntimeError as ex:
+                if "out of memory" in str(ex).lower():
+                    torch.cuda.empty_cache()
+                    continue
+                raise
+
+            actual = local_measurement["time_ms"]
+            err_measured = abs(actual - scaled_from_measured) / max(actual, 1e-6) * 100.0
+            err_fit = abs(actual - scaled_from_fit) / max(actual, 1e-6) * 100.0
+
+            results.append({
+                "seq_len": int(seq_len),
+                "sp_size": int(sp),
+                "local_heads": int(local_heads),
+                "local_kv_heads": int(local_kv_heads),
+                "actual_local_ms": float(actual),
+                "actual_local_std_ms": float(local_measurement["std_ms"]),
+                "full_measured_ms": float(full_measured),
+                "full_fit_ms": float(full_fit),
+                "scaled_from_measured_ms": float(scaled_from_measured),
+                "scaled_from_fit_ms": float(scaled_from_fit),
+                "error_scaled_measured_pct": float(err_measured),
+                "error_scaled_fit_pct": float(err_fit),
+            })
+            print(f"  head-scaling sp={sp} seq={seq_len:>6}: actual={actual:.4f}ms, "
+                  f"full/sp={scaled_from_measured:.4f}ms, fit/sp={scaled_from_fit:.4f}ms, "
+                  f"err_fit={err_fit:.1f}%")
+
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -670,6 +1059,10 @@ def validate_cost_model_compute(
     seq_lengths: List[int],
     warmup: int = 5,
     iters: int = 20,
+    timing_groups: int = 3,
+    timing_stat: str = "median",
+    min_group_elapsed_ms: float = 1.0,
+    max_iters_per_group: int = 512,
     use_varlen: bool = True,
     device: str = "cuda",
     dtype=torch.bfloat16,
@@ -684,41 +1077,22 @@ def validate_cost_model_compute(
 
     for seq_len in seq_lengths:
         try:
-            if use_varlen and flash_attn_varlen_func is not None:
-                q = torch.randn(seq_len, n_heads, head_dim, dtype=dtype, device=device)
-                k = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                v = torch.randn(seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                cu = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
-                for _ in range(warmup):
-                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
-                torch.cuda.synchronize()
-                se = torch.cuda.Event(enable_timing=True)
-                ee = torch.cuda.Event(enable_timing=True)
-                se.record()
-                for _ in range(iters):
-                    flash_attn_varlen_func(q, k, v, cu, cu, seq_len, seq_len, causal=True)
-                ee.record()
-                torch.cuda.synchronize()
-                measured_per_layer = se.elapsed_time(ee) / iters
-                del q, k, v, cu
-            else:
-                q = torch.randn(1, seq_len, n_heads, head_dim, dtype=dtype, device=device)
-                k = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                v = torch.randn(1, seq_len, n_kv_heads, head_dim, dtype=dtype, device=device)
-                for _ in range(warmup):
-                    flash_attn_func(q, k, v, causal=True)
-                torch.cuda.synchronize()
-                se = torch.cuda.Event(enable_timing=True)
-                ee = torch.cuda.Event(enable_timing=True)
-                se.record()
-                for _ in range(iters):
-                    flash_attn_func(q, k, v, causal=True)
-                ee.record()
-                torch.cuda.synchronize()
-                measured_per_layer = se.elapsed_time(ee) / iters
-                del q, k, v
-
-            torch.cuda.empty_cache()
+            measurement = _profile_attention_point(
+                seq_len=seq_len,
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                head_dim=head_dim,
+                warmup=warmup,
+                iters=iters,
+                timing_groups=timing_groups,
+                timing_stat=timing_stat,
+                min_group_elapsed_ms=min_group_elapsed_ms,
+                max_iters_per_group=max_iters_per_group,
+                use_varlen=use_varlen,
+                device=device,
+                dtype=dtype,
+            )
+            measured_per_layer = measurement["time_ms"]
 
             predicted_per_layer = costmodel.compute_time_single(seq_len, strategy)
             error_pct = abs(predicted_per_layer - measured_per_layer) / measured_per_layer * 100 \
@@ -729,9 +1103,11 @@ def validate_cost_model_compute(
                 "measured_per_layer_ms": measured_per_layer,
                 "predicted_per_layer_ms": predicted_per_layer,
                 "error_pct": error_pct,
+                "measurement_std_ms": measurement["std_ms"],
             })
             print(f"  seq={seq_len:>6}: measured={measured_per_layer:.4f}ms/layer, "
-                  f"predicted={predicted_per_layer:.4f}ms/layer, error={error_pct:.1f}%")
+                  f"predicted={predicted_per_layer:.4f}ms/layer, error={error_pct:.1f}% "
+                  f"(std={measurement['std_ms']:.4f})")
 
         except RuntimeError as ex:
             if "out of memory" in str(ex).lower():
@@ -905,8 +1281,7 @@ def plot_all(
 
         # 1a: raw data + fitted curves
         ax = axes[0, 0]
-        xs = np.array([d[0] for d in attn_data])
-        ts = np.array([d[1] for d in attn_data])
+        xs, ts = _extract_attention_xy(attn_data)
         ax.scatter(xs, ts, s=3, alpha=0.5, label="measured", color="gray")
         colors = ["blue", "green", "orange", "red", "purple", "cyan"]
         for i, seg in enumerate(attn_segments):
@@ -958,7 +1333,7 @@ def plot_all(
         ax = axes[1, 1]
         for i, seg in enumerate(attn_segments):
             lo, hi = seg["range"]
-            mask = (xs >= lo) & (xs <= hi)
+            mask = _segment_mask(xs, lo, hi, include_hi=(i == len(attn_segments) - 1))
             seg_x = xs[mask]
             seg_t = ts[mask]
             y_pred = seg["a"] * seg_x**2 + seg["b"] * seg_x + seg["c"]
@@ -1087,13 +1462,29 @@ def main():
     parser.add_argument("--num_layers", type=int, default=32)
     parser.add_argument("--param_size_B", type=float, default=7.0)
     # Profiling
+    parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=30)
+    parser.add_argument("--attn_timing_groups", type=int, default=3,
+                        help="Split attention timing into multiple groups and aggregate them robustly")
+    parser.add_argument("--attn_timing_stat", type=str, default="median",
+                        choices=["median", "mean"],
+                        help="How to aggregate attention timing groups for each seq_len")
+    parser.add_argument("--attn_min_group_elapsed_ms", type=float, default=1.0,
+                        help="Adaptive timing target: each attention timing group should last at least this long")
+    parser.add_argument("--attn_max_iters_per_group", type=int, default=512,
+                        help="Upper bound on adaptive iterations per attention timing group")
     parser.add_argument("--attn_step", type=int, default=64,
                         help="Dense attention profiling step size")
     parser.add_argument("--attn_max", type=int, default=32768,
                         help="Max seq_len for attention profiling")
     parser.add_argument("--use_varlen", action="store_true", default=True)
+    parser.add_argument("--skip_head_scaling_check", action="store_true",
+                        help="Skip the reduced-head scaling validation after fitting the baseline")
+    parser.add_argument("--head_scaling_seqs", type=int, nargs="+", default=[2048, 8192, 16384],
+                        help="Seq lengths used to validate reduced-head scaling")
+    parser.add_argument("--head_scaling_sp_sizes", type=int, nargs="+", default=[2, 4, 8],
+                        help="Ulysses SP sizes used to validate reduced-head scaling")
     # Breakpoint detection
     parser.add_argument("--bp_window", type=int, default=5,
                         help="Sliding window for breakpoint detection")
@@ -1143,6 +1534,11 @@ def main():
     else:
         torch.cuda.set_device(0)
 
+    torch.manual_seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed + rank)
+
     if rank == 0:
         print("=" * 80)
         print(" AdaCPSP Comprehensive Profiling & Validation Suite")
@@ -1163,6 +1559,8 @@ def main():
     compute_val = None
     comm_val_all = []
     memory_val = None
+    attn_segment_diagnostics = None
+    head_scaling_val = None
 
     # ── Auto-detect best profile JSONs from configs dir if not specified ──
     if args.mode in ["validate_cost_model", "all"] and not args.profile_json:
@@ -1200,6 +1598,10 @@ def main():
                 args.n_heads, args.n_kv_heads, args.head_dim,
                 seq_range=(64, args.attn_max), step=args.attn_step,
                 warmup=args.warmup, iters=args.iters,
+                timing_groups=args.attn_timing_groups,
+                timing_stat=args.attn_timing_stat,
+                min_group_elapsed_ms=args.attn_min_group_elapsed_ms,
+                max_iters_per_group=args.attn_max_iters_per_group,
                 use_varlen=args.use_varlen,
             )
 
@@ -1221,12 +1623,42 @@ def main():
 
                 print(f"\n--- Piecewise Quadratic Fitting (consolidated) ---")
                 attn_segments = fit_segments_quadratic(attn_data, breakpoints)
+                attn_segment_diagnostics = summarize_attention_segments(attn_data, attn_segments)
+                score = attn_segment_diagnostics["selection_score"]
+                print(f"\n--- Segment Diagnostics ---")
+                print(f"  min_R²={score['min_r_squared']:.6f}, "
+                      f"max_boundary_jump={score['max_boundary_rel_jump_pct']:.2f}%, "
+                      f"mean_boundary_jump={score['mean_boundary_rel_jump_pct']:.2f}%")
+
+                if not args.skip_head_scaling_check:
+                    head_scaling_seqs = [s for s in args.head_scaling_seqs if s <= args.attn_max]
+                    if head_scaling_seqs:
+                        print(f"\n--- Head Scaling Validation ---")
+                        head_scaling_val = validate_head_scaling(
+                            full_measurements=attn_data,
+                            fitted_segments=attn_segments,
+                            n_heads=args.n_heads,
+                            n_kv_heads=args.n_kv_heads,
+                            head_dim=args.head_dim,
+                            seq_lengths=head_scaling_seqs,
+                            sp_sizes=args.head_scaling_sp_sizes,
+                            warmup=args.warmup,
+                            iters=args.iters,
+                            timing_groups=args.attn_timing_groups,
+                            timing_stat=args.attn_timing_stat,
+                            min_group_elapsed_ms=args.attn_min_group_elapsed_ms,
+                            max_iters_per_group=args.attn_max_iters_per_group,
+                            use_varlen=args.use_varlen,
+                        )
 
                 all_output["attention"] = {
                     "raw_breakpoints": raw_breakpoints,
                     "consolidated_breakpoints": breakpoints,
                     "segments": attn_segments,
-                    "raw_data": [(int(x), float(t)) for x, t in attn_data],
+                    "raw_data": [(int(x), float(t)) for x, t in zip(*_extract_attention_xy(attn_data))],
+                    "raw_measurements": _serialize_attention_measurements(attn_data),
+                    "segment_diagnostics": attn_segment_diagnostics,
+                    "head_scaling_validation": head_scaling_val,
                     "config": {
                         "n_heads": args.n_heads,
                         "n_kv_heads": args.n_kv_heads,
@@ -1234,6 +1666,13 @@ def main():
                         "hidden_size": args.hidden_size,
                         "step": args.attn_step,
                         "use_varlen": args.use_varlen,
+                        "timing_groups": args.attn_timing_groups,
+                        "timing_stat": args.attn_timing_stat,
+                        "min_group_elapsed_ms": args.attn_min_group_elapsed_ms,
+                        "max_iters_per_group": args.attn_max_iters_per_group,
+                        "seed": args.seed,
+                        "head_scaling_seqs": args.head_scaling_seqs,
+                        "head_scaling_sp_sizes": args.head_scaling_sp_sizes,
                     },
                 }
 
@@ -1399,6 +1838,10 @@ def main():
                 args.n_heads, args.n_kv_heads, args.head_dim,
                 args.num_layers, costmodel, test_seqs,
                 warmup=args.warmup, iters=args.iters,
+                timing_groups=args.attn_timing_groups,
+                timing_stat=args.attn_timing_stat,
+                min_group_elapsed_ms=args.attn_min_group_elapsed_ms,
+                max_iters_per_group=args.attn_max_iters_per_group,
                 use_varlen=args.use_varlen,
             )
             all_output["compute_validation"] = compute_val
@@ -1495,6 +1938,14 @@ def main():
                 print(f"   [{seg['range'][0]:>6}, {seg['range'][1]:>6}]: "
                       f"a={seg['a']:.6e}, b={seg['b']:.6e}, c={seg['c']:.4f}, "
                       f"R²={seg['r_squared']:.6f}")
+            if attn_segment_diagnostics:
+                score = attn_segment_diagnostics["selection_score"]
+                print(f"   Diagnostics: min_R²={score['min_r_squared']:.6f}, "
+                      f"max_boundary_jump={score['max_boundary_rel_jump_pct']:.2f}%, "
+                      f"mean_boundary_jump={score['mean_boundary_rel_jump_pct']:.2f}%")
+            if head_scaling_val:
+                errs = [v["error_scaled_fit_pct"] for v in head_scaling_val]
+                print(f"   Head scaling (/sp) error: mean={np.mean(errs):.1f}%, max={np.max(errs):.1f}%")
 
         if comm_fits_all:
             print(f"\n Communication (linear fit: time = α*msg_MB + β):")

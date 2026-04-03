@@ -7,8 +7,7 @@ echo "=============================================="
 echo " Full CostModel Validation"
 echo "=============================================="
 
-# Use existing profile files if available, or run fresh
-ATTN_JSON=""
+# Use existing communication profile files if available, or rely on auto-detected unified profile JSONs
 A2A_JSON=""
 P2P_JSON=""
 
@@ -19,10 +18,6 @@ for f in configs/profile_validate_*.json; do
     fi
 done
 
-# Check for individual profile files
-if [ -f "configs/attention_fit_llama-7b_20260303_231108.json" ]; then
-    ATTN_JSON="--attn_json configs/attention_fit_llama-7b_20260303_231108.json"
-fi
 if [ -f "configs/alltoall_profile_8gpus_20260303_231306.json" ]; then
     A2A_JSON="--alltoall_json configs/alltoall_profile_8gpus_20260303_231306.json"
 fi
@@ -42,5 +37,5 @@ torchrun --nproc_per_node=8 profile_and_validate.py \
     --iters 30 \
     --attn_max 32768 \
     --save_dir ./configs \
-    $ATTN_JSON $A2A_JSON $P2P_JSON
+    $A2A_JSON $P2P_JSON
 

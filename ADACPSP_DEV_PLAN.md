@@ -167,7 +167,7 @@ bash llama_scripts/profile_p2p_ring.sh
 
 # 3. Attention 计算时间分段拟合
 bash llama_scripts/profile_attention.sh
-# 输出: configs/attention_fit_*.json + *.png（拟合可视化）
+# 输出: configs/profile_validate_*.json + *.png（拟合可视化）
 ```
 
 **Profiling 结果示例** (8×A100-SXM 40GB):
@@ -181,7 +181,7 @@ bash llama_scripts/profile_attention.sh
 | P2P Ring | cp=4 | 147.4 GB/s |
 | P2P Ring | cp=8 | 119.5 GB/s |
 
-Attention 拟合使用分段二次函数 `time = a*x² + b*x + c`，4 段：short [128,1024], medium_low [1024,4096], medium_high [4096,8192], long [8192,32768]。
+Attention 拟合使用分段二次函数 `time = a*x² + b*x + c`，由 `profile_and_validate.py` 自动检测断点并合并为少量稳定分段。
 
 ### 3.2 单策略训练验证
 
@@ -313,7 +313,7 @@ bash llama_scripts/test_hetero_groups_4way.sh   # Ulysses×2 + Ring×2 + Ulysses
 | `test_combined.sh` | 20 iterations 完成，loss 下降 |
 | `profile_alltoall.sh` | 生成 `configs/alltoall_profile_*.json` |
 | `profile_p2p_ring.sh` | 生成 `configs/p2p_ring_profile_*.json` |
-| `profile_attention.sh` | 生成 `configs/attention_fit_*.json` |
+| `profile_attention.sh` | 生成 `configs/profile_validate_*.json` |
 | `test_adacpsp.sh` | 20 iterations 完成，solver 日志输出策略 |
 | `test_adacpsp_varlen.sh` | 5 iterations 完成，可观察到 ulysses×8 和 ring×2/4 策略自适应切换 |
 | `test_hetero_groups.sh` | 20 iterations 完成，Ulysses×4 + Ring×4 异构组 |
@@ -541,15 +541,14 @@ galvatron/models/varlen_llama_hf/
 │
 ├── profile_alltoall.py             # ★ All-to-All 通信 profiling
 ├── profile_p2p_ring.py             # ★ P2P Ring 通信 profiling
-├── profile_attention_fit.py        # ★ Attention 分段二次函数拟合
-├── profile_and_validate.py         # ★ 统一 profiling：自动断点检测 + 线性通信拟合 + 模型验证
+├── profile_and_validate.py         # ★ 统一 profiling：Attention 自动断点检测 + 线性通信拟合 + 模型验证
 ├── profile_overlap.py              # ★ Overlap profiling：Ring overlap + fwd/bwd ratio + bwd comm ratio
 ├── test_costmodel_analysis.py      # ★ CostModel 精度分析：计算/通信/内存/策略排名/overlap 对比
 │
 ├── configs/                        # Profiling 结果
 │   ├── alltoall_profile_*.json
 │   ├── p2p_ring_profile_*.json
-│   ├── attention_fit_*.json
+│   ├── profile_validate_*.json
 │   └── ... (computation/memory profiling 结果)
 │
 └── llama_scripts/                  # 启动脚本
@@ -953,7 +952,6 @@ total = 1 × f_causal(x) + (cp-1) × [f_causal(x) + a*x²]
 |------|------|------|
 | `profile_and_validate.py` | 统一 JSON | Attention 自动断点检测 + 通信线性拟合 + 模型验证 |
 | `profile_overlap.py` | overlap JSON | Ring overlap + fwd/bwd ratio + bwd comm ratio |
-| `profile_attention_fit.py` | attention JSON | Attention 分段二次拟合（手动断点） |
 | `profile_alltoall.py` | alltoall JSON | All-to-All 带宽测量 |
 | `profile_p2p_ring.py` | p2p JSON | P2P Ring 带宽测量 |
 

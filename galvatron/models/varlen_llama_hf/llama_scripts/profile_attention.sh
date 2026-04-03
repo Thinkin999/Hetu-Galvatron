@@ -5,7 +5,8 @@
 export CUDA_VISIBLE_DEVICES=0
 
 # llama-7b config (MHA: n_kv_heads = n_heads)
-python3 profile_attention_fit.py \
+python3 profile_and_validate.py \
+    --mode attention \
     --n_heads 32 \
     --n_kv_heads 32 \
     --head_dim 128 \
@@ -13,5 +14,5 @@ python3 profile_attention_fit.py \
     --iters 20 \
     --model_name llama-7b \
     --save_dir ./configs \
-    --skip_very_long
+    --attn_max 32768
 

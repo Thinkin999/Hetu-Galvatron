@@ -23,7 +23,6 @@ import sys
 import json
 import copy
 import time
-import glob
 import argparse
 import numpy as np
 from typing import List, Dict, Tuple, Optional
@@ -100,21 +99,8 @@ def build_costmodel(mem_limit_gb: float) -> AdaCPSPCostModel:
         with open(ATTN_PROFILE) as f:
             data = json.load(f)
         piecewise = data.get("attention", {}).get("segments")
-    
     if piecewise is None:
-        # Fallback to standalone attention fit
-        for pf in sorted(glob.glob(os.path.join(CONFIGS_DIR, "attention_fit_*.json")), reverse=True):
-            with open(pf) as f:
-                adata = json.load(f)
-            if "coefficients" in adata:
-                piecewise = []
-                for seg_name, coeff in adata["coefficients"].items():
-                    if coeff:
-                        piecewise.append({
-                            "range": coeff["seq_range"],
-                            "a": coeff["a"], "b": coeff["b"], "c": coeff["c"]
-                        })
-            break
+        raise FileNotFoundError(f"Attention profile not found or missing attention.segments: {ATTN_PROFILE}")
 
     # ── 2. Load communication bandwidths ──
     alltoall_bw, p2p_bw = {}, {}

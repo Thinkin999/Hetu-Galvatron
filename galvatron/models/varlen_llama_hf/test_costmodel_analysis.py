@@ -15,7 +15,7 @@ Loads real profiling data and systematically tests:
   10. Optimization recommendations
 """
 
-import sys, json, os
+import sys, json, os, glob
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -29,25 +29,25 @@ A2A_PROFILE_PATH = os.path.join(CONFIGS_DIR, "alltoall_profile_8gpus_20260303_23
 # Load real profiling data
 # ──────────────────────────────────────────────────────────
 def load_attention_profile():
-    path = os.path.join(CONFIGS_DIR, "attention_fit_llama-7b_20260303_231108.json")
-    with open(path) as f:
-        data = json.load(f)
-    piecewise = []
-    for seg_name, coeff in data["coefficients"].items():
-        if coeff is not None:
-            piecewise.append({
-                "range": coeff["seq_range"],
-                "a": coeff["a"], "b": coeff["b"], "c": coeff["c"],
-            })
-    raw_points = {}
-    for seg_name, points in data["raw_data"].items():
-        for seqlen, time_ms in points:
-            s = int(seqlen)
-            if s not in raw_points:
-                raw_points[s] = float(time_ms)
-            else:
-                raw_points[s] = (raw_points[s] + float(time_ms)) / 2
-    return piecewise, sorted(raw_points.items()), data
+    candidates = sorted(glob.glob(os.path.join(CONFIGS_DIR, "profile_validate_*.json")), reverse=True)
+    path = None
+    data = None
+    for cand in candidates:
+        with open(cand) as f:
+            maybe = json.load(f)
+        if "attention" in maybe and "segments" in maybe["attention"]:
+            path = cand
+            data = maybe
+            break
+
+    if data is None:
+        raise FileNotFoundError("No profile_validate_*.json with attention segments found")
+
+    attention = data["attention"]
+    piecewise = attention["segments"]
+    raw_points = sorted((int(seqlen), float(time_ms)) for seqlen, time_ms in attention.get("raw_data", []))
+    print(f"  Using attention profile: {os.path.basename(path)}")
+    return piecewise, raw_points, data
 
 def load_comm_profiles():
     a2a_path = os.path.join(CONFIGS_DIR, "alltoall_profile_8gpus_20260303_231306.json")
@@ -656,6 +656,11 @@ if __name__ == "__main__":
     mem_validation = load_memory_validation()
 
     print(f"  Attention: {len(raw_points)} points, {len(piecewise)} segments")
+    if "attention" in attn_data and "segment_diagnostics" in attn_data["attention"]:
+        score = attn_data["attention"]["segment_diagnostics"]["selection_score"]
+        print(f"    Diagnostics: min_R²={score['min_r_squared']:.6f}, "
+              f"max_jump={score['max_boundary_rel_jump_pct']:.2f}%, "
+              f"mean_jump={score['mean_boundary_rel_jump_pct']:.2f}%")
     print(f"  AlltoAll:  gs={list(a2a_data['results'].keys())}")
     print(f"  P2P:       gs={list(p2p_data['results'].keys())}")
     print(f"  Memory:    {len(mem_validation)} points")
