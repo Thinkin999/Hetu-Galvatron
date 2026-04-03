@@ -144,7 +144,11 @@ def test_profile_time_start_normal(base_profiler):
         
         base_profiler.time_list = [0.1, 0.2, 0.3]
         base_profiler.profile_time_start(iter=3)
-        mock_print.assert_called_with("Average iteration time is: 0.2000 s")
+        mock_print.assert_any_call("Average iteration time is: 0.2000 s")
+        assert any(
+            call.args[0].startswith("[Profile Summary]")
+            for call in mock_print.call_args_list
+        )
 
 def test_profile_time_start_with_save(base_profiler):
     """Test time profiling start with saving"""
@@ -172,6 +176,7 @@ def test_profile_time_end_with_loss(base_profiler):
     mock_loss.item.return_value = 0.5
     base_profiler.rank = 3  # last rank
     base_profiler.world_size = 4
+    base_profiler.set_time_log_rank(3)
     base_profiler.args.lr = 0.001
     base_profiler.args.global_train_batch_size = 32
     base_profiler.start_iter = 0
@@ -199,7 +204,11 @@ def test_profile_time_end_with_loss(base_profiler):
             "grad norm: 1.00 |"
         )
 
-        mock_print.assert_called_once_with(expected_output)
+        mock_print.assert_any_call(expected_output)
+        assert any(
+            call.args[0].startswith("[Profile Step]")
+            for call in mock_print.call_args_list
+        )
 
 
 def test_profile_time_python(base_profiler):
@@ -222,7 +231,11 @@ def test_profile_time_python(base_profiler):
             assert base_profiler.total_end_time == 101.0
             
             # Verify average time calculation
-            mock_print.assert_called_with("Average iteration time is: 0.3333 s")
+            mock_print.assert_any_call("Average iteration time is: 0.3333 s")
+            assert any(
+                call.args[0].startswith("[Profile Summary]")
+                for call in mock_print.call_args_list
+            )
             
             # Verify save
             mock_save.assert_called_once()

@@ -29,23 +29,38 @@ def collate_fn(batch):
       - Packing mode (with or without AdaCPSP): [packed_tokens, cu_seqlens]
         The training loop handles solver + group assignment for AdaCPSP.
     """
-    max_len = max([len(seq) for seq in batch])
+    batch_meta = None
+    seq_batch = batch
+    if batch and isinstance(batch[0], dict):
+        batch_meta = [
+            {
+                "sample_id": int(item["sample_id"]),
+                "raw_length": int(item["raw_length"]),
+                "padded_length": int(item["padded_length"]),
+            }
+            for item in batch
+        ]
+        seq_batch = [item["input_ids"] for item in batch]
+
+    max_len = max([len(seq) for seq in seq_batch])
     world_size = torch.distributed.get_world_size()
     max_len = ((max_len - 1) // world_size + 1) * world_size
     args = get_args()
     max_len = min(max_len, args.seq_length)
 
     if not args.use_packing:
-        padded_batch = torch.zeros((len(batch), max_len), dtype=torch.long, device=batch[0].device)
-        for i, seq in enumerate(batch):
+        padded_batch = torch.zeros((len(seq_batch), max_len), dtype=torch.long, device=seq_batch[0].device)
+        for i, seq in enumerate(seq_batch):
             padded_batch[i, :len(seq)] = seq
         return padded_batch
 
-    cu_seqlens = torch.empty(len(batch) + 1, dtype=torch.int64)
+    cu_seqlens = torch.empty(len(seq_batch) + 1, dtype=torch.int64)
     cu_seqlens[0] = 0
     for i in range(1, len(cu_seqlens)):
-        cu_seqlens[i] = cu_seqlens[i - 1] + len(batch[i - 1])
-    packed = torch.concat(batch)
+        cu_seqlens[i] = cu_seqlens[i - 1] + len(seq_batch[i - 1])
+    packed = torch.concat(seq_batch)
+    if batch_meta is not None:
+        return [packed, cu_seqlens, batch_meta]
     return [packed, cu_seqlens]
 
 

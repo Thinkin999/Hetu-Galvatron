@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUN_MODE="${RUN_MODE:-full}"
+RUN_MODE="${RUN_MODE:-slow}"
 
 echo "=========================================="
 echo "ByteDance Merlin Seed entrypoint"

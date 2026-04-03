@@ -32,6 +32,14 @@ The scripts read these variables when running on Merlin Seed:
 - `DATASET_MOUNT_DIR`
 - `EXTRA_TRAIN_ARGS`
 
+## Result logs
+
+Experiment logs now default to the mounted workspace path instead of HDFS:
+
+- default root: `/mnt/bn/wyj-data0-hl/lqs/logs/Hetu-Galvatron/byted_experiments`
+- one timestamped subdirectory per run
+- override with `RESULT_ROOT=/your/path`
+
 ## Dataset placement
 
 `train_dist_adacpsp.py` currently searches datasets under repo-relative

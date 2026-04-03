@@ -113,8 +113,194 @@ def _build_forced_groups(seqs, world_size, forced_config):
     return [groups]
 
 
+def _unpack_packed_batch(batch):
+    """Unpack [packed_tokens, cu_seqlens, optional_batch_meta]."""
+    if not isinstance(batch, (tuple, list)) or len(batch) < 2:
+        raise ValueError(f"Unexpected packed batch format: {type(batch)!r}")
+    packed_tokens = batch[0]
+    cu_seqlens = batch[1]
+    batch_meta = batch[2] if len(batch) > 2 else None
+    return packed_tokens, cu_seqlens, batch_meta
+
+
+def _build_step_context(loader_iter, use_async):
+    if use_async:
+        if loader_iter == 0:
+            return {
+                "loader_iter": 0,
+                "train_step_id": None,
+                "training_batch_id": None,
+                "solver_batch_id": 0,
+            }
+        return {
+            "loader_iter": loader_iter,
+            "train_step_id": loader_iter,
+            "training_batch_id": loader_iter - 1,
+            "solver_batch_id": loader_iter,
+        }
+
+    return {
+        "loader_iter": loader_iter,
+        "train_step_id": loader_iter + 1,
+        "training_batch_id": loader_iter,
+        "solver_batch_id": loader_iter,
+    }
+
+
+def _format_adacpsp_prefix(step_ctx, phase, rank_scope=None):
+    parts = ["[AdaCPSP]", f"[phase={phase}]"]
+    loader_iter = step_ctx.get("loader_iter")
+    if loader_iter is not None:
+        parts.append(f"[loader_iter={loader_iter}]")
+
+    train_step_id = step_ctx.get("train_step_id")
+    if train_step_id is None:
+        parts.append("[train_step=warmup]")
+    else:
+        parts.append(f"[train_step={train_step_id}]")
+
+    training_batch_id = step_ctx.get("training_batch_id")
+    if training_batch_id is not None:
+        parts.append(f"[training_batch={training_batch_id}]")
+
+    solver_batch_id = step_ctx.get("solver_batch_id")
+    if solver_batch_id is not None:
+        parts.append(f"[solver_batch={solver_batch_id}]")
+
+    if rank_scope is not None:
+        parts.append(f"[rank_scope={rank_scope}]")
+
+    return "".join(parts)
+
+
+def _sequence_lengths_from_cu(cu_seqlens):
+    num_seqs = cu_seqlens.shape[0] - 1
+    return [(cu_seqlens[i + 1] - cu_seqlens[i]).item() for i in range(num_seqs)]
+
+
+def _normalize_micro_res_tuple(res_tuple):
+    if len(res_tuple) == 5:
+        attn_type, parallel_size, sp_size, cp_size, seq_ids = res_tuple
+        return attn_type, parallel_size, sp_size, cp_size, "context_first", seq_ids
+    return res_tuple
+
+
+def _log_global_batch_layout(prefix, cu_seqlens, batch_meta):
+    seq_lens = _sequence_lengths_from_cu(cu_seqlens)
+    print(f"{prefix} Global batch summary: num_seqs={len(seq_lens)}, total_tokens={sum(seq_lens)}")
+    for batch_seq_id, seq_len in enumerate(seq_lens):
+        start = cu_seqlens[batch_seq_id].item()
+        end = cu_seqlens[batch_seq_id + 1].item()
+        if batch_meta is None:
+            print(
+                f"{prefix}   batch_seq={batch_seq_id}, sample_id={batch_seq_id}, "
+                f"packed_len={seq_len}, packed_span=({start}, {end})"
+            )
+            continue
+
+        meta = batch_meta[batch_seq_id]
+        print(
+            f"{prefix}   batch_seq={batch_seq_id}, sample_id={meta['sample_id']}, "
+            f"raw_len={meta['raw_length']}, padded_len={meta['padded_length']}, "
+            f"packed_len={seq_len}, packed_span=({start}, {end})"
+        )
+
+
+def _describe_microbatch_groups(micro_res, cu_seqlens, batch_meta, world_size):
+    group_descs = []
+    rank_cursor = 0
+
+    for group_idx, res_tuple in enumerate(micro_res):
+        attn_type, parallel_size, sp_size, cp_size, placement, seq_ids = _normalize_micro_res_tuple(res_tuple)
+        ranks = list(range(rank_cursor, rank_cursor + parallel_size))
+        seq_lens = []
+        sample_ids = []
+        raw_lengths = []
+        padded_lengths = []
+        source_spans = []
+        offsets = [0]
+
+        for sid in seq_ids:
+            start = cu_seqlens[sid].item()
+            end = cu_seqlens[sid + 1].item()
+            seq_len = end - start
+            seq_lens.append(seq_len)
+            source_spans.append((start, end))
+            offsets.append(offsets[-1] + seq_len)
+
+            if batch_meta is not None:
+                sample_ids.append(batch_meta[sid]["sample_id"])
+                raw_lengths.append(batch_meta[sid]["raw_length"])
+                padded_lengths.append(batch_meta[sid]["padded_length"])
+            else:
+                sample_ids.append(sid)
+                raw_lengths.append(seq_len)
+                padded_lengths.append(seq_len)
+
+        group_descs.append({
+            "group_idx": group_idx,
+            "ranks": ranks,
+            "attn_type": attn_type,
+            "sp_size": sp_size,
+            "cp_size": cp_size,
+            "placement": placement,
+            "batch_seq_ids": list(seq_ids),
+            "sample_ids": sample_ids,
+            "raw_lengths": raw_lengths,
+            "padded_lengths": padded_lengths,
+            "seqlens": seq_lens,
+            "source_spans": source_spans,
+            "mb_cu": offsets,
+        })
+        rank_cursor += parallel_size
+
+    while rank_cursor < world_size:
+        group_descs.append({
+            "group_idx": len(group_descs),
+            "ranks": [rank_cursor],
+            "attn_type": "idle",
+            "sp_size": 1,
+            "cp_size": 1,
+            "placement": "context_first",
+            "batch_seq_ids": [],
+            "sample_ids": [],
+            "raw_lengths": [],
+            "padded_lengths": [],
+            "seqlens": [],
+            "source_spans": [],
+            "mb_cu": [0],
+        })
+        rank_cursor += 1
+
+    return group_descs
+
+
+def _log_microbatch_layout(prefix, mb_idx, group_descs):
+    total_tokens = sum(sum(group["seqlens"]) for group in group_descs)
+    print(f"{prefix} MB{mb_idx} summary: groups={len(group_descs)}, total_tokens={total_tokens}")
+    for group in group_descs:
+        placement_suffix = f", placement={group['placement']}" if group["attn_type"] == "usp" else ""
+        print(
+            f"{prefix}   MB{mb_idx}/Group{group['group_idx']}: ranks={group['ranks']}, "
+            f"attn={group['attn_type']}, sp={group['sp_size']}, cp={group['cp_size']}{placement_suffix}"
+        )
+        print(
+            f"{prefix}   MB{mb_idx}/Group{group['group_idx']}: "
+            f"batch_seq_ids={group['batch_seq_ids']}, sample_ids={group['sample_ids']}"
+        )
+        print(
+            f"{prefix}   MB{mb_idx}/Group{group['group_idx']}: "
+            f"raw_lengths={group['raw_lengths']}, padded_lengths={group['padded_lengths']}, "
+            f"seqlens={group['seqlens']}"
+        )
+        print(
+            f"{prefix}   MB{mb_idx}/Group{group['group_idx']}: "
+            f"source_spans={group['source_spans']}, mb_cu={group['mb_cu']}"
+        )
+
+
 def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
-                              args, rank, world_size, device):
+                              args, rank, world_size, device, step_ctx):
     """
     Rank 0 runs the solver, broadcasts the result, then ALL ranks
     collectively create communication groups and build per-group microbatches.
@@ -130,38 +316,31 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
     )
     from galvatron.models.varlen_llama_hf.adacpsp_group_manager import convert_microbatch_res
 
-    packed_tokens, cu_seqlens = batch
-    num_seqs = cu_seqlens.shape[0] - 1
-
-    # Reconstruct per-sequence lengths (needed by solver)
-    seq_lens = [(cu_seqlens[i + 1] - cu_seqlens[i]).item() for i in range(num_seqs)]
+    packed_tokens, cu_seqlens, batch_meta = _unpack_packed_batch(batch)
+    seq_lens = _sequence_lengths_from_cu(cu_seqlens)
+    solve_prefix = _format_adacpsp_prefix(step_ctx, "solve", "rank0")
+    dispatch_prefix = _format_adacpsp_prefix(step_ctx, "dispatch", "rank0")
 
     # ─── Rank 0 solves ───
     all_micro_res = None
     if rank == 0:
+        _log_global_batch_layout(solve_prefix, cu_seqlens, batch_meta)
         seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
 
         if forced_strategy is not None:
             all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
         else:
-            all_groups, _ = adacpsp_optimizer.solve_globalbatch(seqs)
+            all_groups, _ = adacpsp_optimizer.solve_globalbatch(seqs, log_context=solve_prefix)
 
         if len(all_groups) == 0:
-            print("[AdaCPSP] Solver failed, fallback to Ulysses×" + str(world_size))
+            print(f"{solve_prefix} Solver failed, fallback to Ulysses×{world_size}")
             fallback = ParallelStrategy("ulysses", world_size)
             all_groups = [[(fallback, seqs)]]
 
-        all_micro_res = []
-        for micro_groups in all_groups:
-            micro_res = []
-            for strat, group_seqs in micro_groups:
-                seq_ids = [s.id for s in group_seqs]
-                micro_res.append((
-                    strat.attn_type, strat.parallel_size,
-                    strat.sp_size, strat.cp_size,
-                    strat.placement, seq_ids,
-                ))
-            all_micro_res.append(micro_res)
+        all_micro_res = _groups_to_micro_res(all_groups)
+        for mb_idx, micro_res in enumerate(all_micro_res):
+            group_descs = _describe_microbatch_groups(micro_res, cu_seqlens, batch_meta, world_size)
+            _log_microbatch_layout(dispatch_prefix, mb_idx, group_descs)
 
     # ─── Broadcast solver result to all ranks ───
     bcast_buf = [all_micro_res]
@@ -207,8 +386,12 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
     if rank == 0:
         for mb_idx, strat in enumerate(args.adacpsp_strategies):
             pl_str = f", placement={strat['placement']}" if strat['attn_type'] == 'usp' else ""
-            print(f"  [AdaCPSP] MB{mb_idx}: type={strat['attn_type']}, "
-                  f"sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}")
+            mb_tokens, mb_cu = microbatches[mb_idx][0]
+            print(
+                f"{dispatch_prefix} Local rank assignment MB{mb_idx}: "
+                f"type={strat['attn_type']}, sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}, "
+                f"tokens={int(mb_tokens.numel())}, mb_cu={mb_cu.tolist()}"
+            )
 
     return microbatches
 
@@ -248,7 +431,7 @@ def _groups_to_micro_res(all_groups):
     return all_micro_res
 
 
-def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size):
+def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size, log_context=None):
     """
     Solver subprocess entry point (runs on CPU only).
     Uses fork-inherited module-level _async_optimizer.
@@ -263,7 +446,7 @@ def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size):
     if forced_strategy is not None:
         all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
     else:
-        all_groups, _ = _async_optimizer.solve_globalbatch(seqs)
+        all_groups, _ = _async_optimizer.solve_globalbatch(seqs, log_context=log_context)
 
     if len(all_groups) == 0:
         fallback = ParallelStrategy("ulysses", world_size)
@@ -271,7 +454,10 @@ def _async_solver_worker(seq_lens, result_queue, forced_strategy, world_size):
 
     result_queue.put(_groups_to_micro_res(all_groups))
     elapsed = time_module.time() - start
-    print(f"[AdaCPSP] Async solver completed in {elapsed:.3f}s")
+    if log_context is None:
+        print(f"[AdaCPSP] Async solver completed in {elapsed:.3f}s")
+    else:
+        print(f"{log_context} Async solver completed in {elapsed:.3f}s")
 
 
 class _AsyncSolverState:
@@ -292,6 +478,7 @@ class _AsyncSolverState:
         self._process = None
         self._result_queue = None
         self._prev_batch = None
+        self._buffered_step_ctx = None
         self._is_first = True
 
     @property
@@ -300,23 +487,26 @@ class _AsyncSolverState:
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def warmup(self, batch):
+    def warmup(self, batch, step_ctx):
         """Iter 0: launch solver for this batch, buffer data, no training."""
-        self._launch_solver(batch)
+        self._launch_solver(batch, step_ctx)
         self._prev_batch = batch
+        self._buffered_step_ctx = step_ctx
         self._is_first = False
         if self._rank == 0:
-            print("[AdaCPSP] Warmup iter: solver launched, training skipped")
+            warmup_prefix = _format_adacpsp_prefix(step_ctx, "warmup", "rank0")
+            print(f"{warmup_prefix} Solver launched, training skipped")
 
-    def step(self, current_batch, args, device):
+    def step(self, current_batch, args, device, step_ctx):
         """
         Iter >= 1.  Returns microbatches built from *prev_batch*.
         Meanwhile solver(current_batch) starts running in background.
         """
-        all_micro_res = self._collect_result()
-        self._launch_solver(current_batch)
-        microbatches = self._build_microbatches(all_micro_res, args, device)
+        all_micro_res = self._collect_result(self._buffered_step_ctx)
+        self._launch_solver(current_batch, step_ctx)
+        microbatches = self._build_microbatches(all_micro_res, args, device, step_ctx)
         self._prev_batch = current_batch
+        self._buffered_step_ctx = step_ctx
         return microbatches
 
     def cleanup(self):
@@ -330,64 +520,63 @@ class _AsyncSolverState:
 
     # ── private helpers ───────────────────────────────────────────────────
 
-    def _launch_solver(self, batch):
+    def _launch_solver(self, batch, step_ctx):
         """Extract seq_lens and fork solver subprocess (rank 0 only)."""
-        packed_tokens, cu_seqlens = batch
-        num_seqs = cu_seqlens.shape[0] - 1
-        seq_lens = [(cu_seqlens[i + 1] - cu_seqlens[i]).item()
-                     for i in range(num_seqs)]
+        _, cu_seqlens, batch_meta = _unpack_packed_batch(batch)
+        seq_lens = _sequence_lengths_from_cu(cu_seqlens)
 
         if self._rank == 0:
+            solve_prefix = _format_adacpsp_prefix(step_ctx, "solve", "rank0")
+            _log_global_batch_layout(solve_prefix, cu_seqlens, batch_meta)
             self._result_queue = mp.Queue(maxsize=1)
             self._process = mp.Process(
                 target=_async_solver_worker,
                 args=(seq_lens, self._result_queue,
-                      self._forced_strategy, self._world_size),
+                      self._forced_strategy, self._world_size, solve_prefix),
             )
             self._process.start()
 
-    def _collect_result(self):
+    def _collect_result(self, buffered_step_ctx):
         """Join solver subprocess (rank 0), broadcast result to all ranks."""
         all_micro_res = None
         if self._rank == 0:
+            collect_prefix = _format_adacpsp_prefix(buffered_step_ctx, "collect", "rank0")
             self._process.join(timeout=600)
             if self._process.is_alive():
-                print("[AdaCPSP] WARNING: solver timed out (600s), killing")
+                print(f"{collect_prefix} WARNING: solver timed out (600s), killing")
                 self._process.kill()
                 self._process.join()
 
             if self._process.exitcode != 0:
-                print(f"[AdaCPSP] WARNING: solver exited with code "
+                print(f"{collect_prefix} WARNING: solver exited with code "
                       f"{self._process.exitcode}, falling back to sync")
-                all_micro_res = self._sync_fallback()
+                all_micro_res = self._sync_fallback(buffered_step_ctx)
             else:
                 try:
                     all_micro_res = self._result_queue.get_nowait()
                 except Exception:
-                    print("[AdaCPSP] WARNING: result queue empty, "
-                          "falling back to sync")
-                    all_micro_res = self._sync_fallback()
+                    print(f"{collect_prefix} WARNING: result queue empty, falling back to sync")
+                    all_micro_res = self._sync_fallback(buffered_step_ctx)
 
         bcast_buf = [all_micro_res]
         torch.distributed.broadcast_object_list(bcast_buf, src=0)
         return bcast_buf[0]
 
-    def _sync_fallback(self):
+    def _sync_fallback(self, buffered_step_ctx):
         """Synchronous solve on rank 0 when the async subprocess fails."""
         from galvatron.models.varlen_llama_hf.adacpsp_solver import (
             Sequence, ParallelStrategy,
         )
-        packed_tokens, cu_seqlens = self._prev_batch
-        num_seqs = cu_seqlens.shape[0] - 1
-        seq_lens = [(cu_seqlens[i + 1] - cu_seqlens[i]).item()
-                     for i in range(num_seqs)]
+        _, cu_seqlens, _ = _unpack_packed_batch(self._prev_batch)
+        seq_lens = _sequence_lengths_from_cu(cu_seqlens)
         seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
+        solve_prefix = _format_adacpsp_prefix(buffered_step_ctx, "solve", "rank0")
 
         if self._forced_strategy is not None:
             all_groups = _build_forced_groups(
                 seqs, self._world_size, self._forced_strategy)
         else:
-            all_groups, _ = self._optimizer.solve_globalbatch(seqs)
+            all_groups, _ = self._optimizer.solve_globalbatch(seqs, log_context=solve_prefix)
 
         if len(all_groups) == 0:
             fallback = ParallelStrategy("ulysses", self._world_size)
@@ -395,13 +584,14 @@ class _AsyncSolverState:
 
         return _groups_to_micro_res(all_groups)
 
-    def _build_microbatches(self, all_micro_res, args, device):
+    def _build_microbatches(self, all_micro_res, args, device, step_ctx):
         """Build microbatch tensors from prev_batch + solver result."""
         from galvatron.models.varlen_llama_hf.adacpsp_group_manager import (
             convert_microbatch_res,
         )
 
-        packed_tokens, cu_seqlens = self._prev_batch
+        packed_tokens, cu_seqlens, batch_meta = _unpack_packed_batch(self._prev_batch)
+        dispatch_prefix = _format_adacpsp_prefix(step_ctx, "dispatch", "rank0")
 
         args.adacpsp_strategies = []
         args.adacpsp_sp_groups = []
@@ -409,6 +599,10 @@ class _AsyncSolverState:
 
         microbatches = []
         for mb_idx, micro_res in enumerate(all_micro_res):
+            if self._rank == 0:
+                group_descs = _describe_microbatch_groups(micro_res, cu_seqlens, batch_meta, self._world_size)
+                _log_microbatch_layout(dispatch_prefix, mb_idx, group_descs)
+
             (my_seq_ids, my_sp_group, my_cp_group,
              my_attn_type, my_sp_size, my_cp_size,
              my_placement) = convert_microbatch_res(micro_res)
@@ -443,8 +637,12 @@ class _AsyncSolverState:
             for mb_idx, strat in enumerate(args.adacpsp_strategies):
                 pl_str = (f", placement={strat['placement']}"
                           if strat['attn_type'] == 'usp' else "")
-                print(f"  [AdaCPSP] MB{mb_idx}: type={strat['attn_type']}, "
-                      f"sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}")
+                mb_tokens, mb_cu = microbatches[mb_idx][0]
+                print(
+                    f"{dispatch_prefix} Local rank assignment MB{mb_idx}: "
+                    f"type={strat['attn_type']}, sp={strat['sp_size']}, cp={strat['cp_size']}{pl_str}, "
+                    f"tokens={int(mb_tokens.numel())}, mb_cu={mb_cu.tolist()}"
+                )
 
         return microbatches
 
@@ -630,6 +828,22 @@ def train(args):
         start_iter=getattr(args, "profile_start_iter", 0),
         end_iter=getattr(args, "profile_end_iter", 20),
     )
+    if args.use_adaCPSP:
+        profiler.set_time_log_rank(0)
+        profiler.set_memory_profiler(
+            rank,
+            profiler.profile_ranks,
+            max_profile_iter=max(1, getattr(args, "profile_end_iter", 20) - 1),
+        )
+        args.profile_data_batch_size = args.global_train_batch_size
+        args.profile_scheduler_batch_size = args.global_batch_size
+        if rank == 0:
+            batch_prefix = "[AdaCPSP][phase=batch_size][rank_scope=rank0]"
+            print(
+                f"{batch_prefix} Batch size semantics: "
+                f"data_batch_size={args.profile_data_batch_size}, "
+                f"scheduler_batch_size={args.profile_scheduler_batch_size}"
+            )
     profiler.profile_memory(0, "After creating model")
 
     # Create dataset and dataloader
@@ -694,10 +908,11 @@ def train(args):
             trainloader = tqdm(trainloader) if rank == 0 else trainloader
 
         for iter, batch in enumerate(trainloader):
+            step_ctx = _build_step_context(iter, use_async)
 
             # ── Async double-buffer: warmup iter (launch solver, skip train) ──
             if async_state is not None and async_state.is_warmup:
-                async_state.warmup(batch)
+                async_state.warmup(batch, step_ctx)
                 continue
 
             # ── Prepare microbatches ──
@@ -705,13 +920,14 @@ def train(args):
                 batch = [batch]
             elif args.use_adaCPSP:
                 if async_state is not None:
-                    batch = async_state.step(batch, args, device)
+                    batch = async_state.step(batch, args, device, step_ctx)
                 else:
                     batch = _adacpsp_solve_and_assign(
                         batch, adacpsp_optimizer, forced_strategy,
-                        args, rank, world_size, device,
+                        args, rank, world_size, device, step_ctx,
                     )
 
+            profiler.set_step_context(**step_ctx)
             profiler.profile_time_start(iter)
             profiler.profile_memory(iter, "Before Forward")
 
@@ -732,7 +948,7 @@ def train(args):
             profiler.profile_time_end(iter, loss, learning_rate, total_norm)
 
             if local_rank == 0:
-                print_loss(args, loss, ep, iter)
+                print_loss(args, loss, ep, step_ctx["train_step_id"] if step_ctx["train_step_id"] is not None else iter)
             torch.distributed.barrier()
 
     # Clean up lingering solver subprocess

@@ -1668,10 +1668,24 @@ class AdaCPSPOptimizer:
         self._cache: Dict[tuple, Tuple[List, List]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
+        self._log_context: Optional[str] = None
 
     def _log(self, msg):
         if not self.hide_output:
-            print(msg)
+            print(self._format_log_message(msg))
+
+    def _format_log_message(self, msg: str) -> str:
+        if not self._log_context:
+            return msg
+
+        lines = msg.split("\n")
+        formatted = []
+        for line in lines:
+            if line:
+                formatted.append(f"{self._log_context} {line}")
+            else:
+                formatted.append("")
+        return "\n".join(formatted)
 
     # ---- Strategy pool generation ----
 
@@ -2827,6 +2841,7 @@ class AdaCPSPOptimizer:
         method: str = "adaptive_bfd",
         bucket_num: int = 16,
         _max_mb_retries: int = 20,
+        log_context: Optional[str] = None,
     ) -> Tuple[List, List]:
         """
         Solve for a global batch:
@@ -2842,80 +2857,94 @@ class AdaCPSPOptimizer:
           - "ilp": ILP per-sequence (exact, slow for large K)
           - "bucket_ilp": ILP with sequence bucketing (exact, faster for large K)
         """
-        # --- Solver cache lookup ---
-        cache_key = (method, tuple(sorted(s.seq for s in seqs_gb)))
-        if cache_key in self._cache:
-            self._cache_hits += 1
-            self._log(f"[AdaCPSP] Cache HIT ({self._cache_hits}/{self._cache_hits+self._cache_misses})")
-            cached_groups, cached_results = self._cache[cache_key]
-            # Deep copy and remap IDs to current seqs
-            from copy import deepcopy
-            return deepcopy(cached_groups), deepcopy(cached_results)
-        self._cache_misses += 1
+        old_log_context = self._log_context
+        if log_context is not None:
+            self._log_context = log_context
 
-        mb_num = self.get_min_valid_microbatch_num(seqs_gb, chunk_alg)
+        try:
+            # --- Solver cache lookup ---
+            cache_key = (method, tuple(sorted(s.seq for s in seqs_gb)))
+            if cache_key in self._cache:
+                self._cache_hits += 1
+                self._log(f"[AdaCPSP] Cache HIT ({self._cache_hits}/{self._cache_hits+self._cache_misses})")
+                cached_groups, cached_results = self._cache[cache_key]
+                # Deep copy and remap IDs to current seqs
+                from copy import deepcopy
+                return deepcopy(cached_groups), deepcopy(cached_results)
+            self._cache_misses += 1
 
-        self._log(f"[AdaCPSP] Using {mb_num} microbatch(es)")
+            mb_num = self.get_min_valid_microbatch_num(seqs_gb, chunk_alg)
 
-        all_groups = []
-        all_results = []
+            self._log(f"[AdaCPSP] Using {mb_num} microbatch(es)")
 
-        while True:
-            self._log(f"\n=========== Trying microbatch size = {mb_num} ===========")
-            seqs_mb_all = chunk_globalbatch(seqs_gb, mb_num, chunk_alg)
-            feasible = True
-            all_groups, all_results = [], []
+            all_groups = []
+            all_results = []
 
-            for i, seqs_mb in enumerate(seqs_mb_all):
-                # Save original IDs before re-indexing
-                orig_ids = [s.id for s in seqs_mb]
-                seqs_mb_reindexed = [Sequence(seq=s.seq, id=j) for j, s in enumerate(seqs_mb)]
+            while True:
+                self._log(f"\n=========== Trying microbatch size = {mb_num} ===========")
+                seqs_mb_all = chunk_globalbatch(seqs_gb, mb_num, chunk_alg)
+                feasible = True
+                all_groups, all_results = [], []
 
-                self._log(f"\n--- Microbatch {i} ({len(seqs_mb_reindexed)} seqs, "
-                          f"{sum(get_lens(seqs_mb_reindexed))} tokens) ---")
+                for i, seqs_mb in enumerate(seqs_mb_all):
+                    # Save original IDs before re-indexing
+                    orig_ids = [s.id for s in seqs_mb]
+                    orig_lens = get_lens(seqs_mb)
+                    seqs_mb_reindexed = [Sequence(seq=s.seq, id=j) for j, s in enumerate(seqs_mb)]
 
-                result = self._solve_microbatch(seqs_mb_reindexed, method, bucket_num)
+                    self._log(f"\n--- Microbatch {i} ({len(seqs_mb_reindexed)} seqs, "
+                              f"{sum(orig_lens)} tokens) ---")
+                    self._log(f"  Batch-local seq ids: {orig_ids}")
+                    self._log(f"  Sequence lengths: {orig_lens}")
 
-                if result is None:
-                    feasible = False
-                    all_groups, all_results = [], []
+                    result = self._solve_microbatch(seqs_mb_reindexed, method, bucket_num)
+
+                    if result is None:
+                        feasible = False
+                        all_groups, all_results = [], []
+                        break
+
+                    # Extract groups (handle bucketed vs non-bucketed results)
+                    if "buckets" in result:
+                        groups = self._extract_groups_bucketed(result)
+                    else:
+                        groups = self._extract_groups(result)
+
+                    # Restore original IDs
+                    for strat, group_seqs in groups:
+                        for seq in group_seqs:
+                            seq.id = orig_ids[seq.id]
+
+                    all_groups.append(groups)
+                    all_results.append(result)
+
+                    if not self.hide_output:
+                        for strat, group_seqs in groups:
+                            seqlens = get_lens(group_seqs)
+                            seq_ids = [seq.id for seq in group_seqs]
+                            t = self.costmodel.total_time(seqlens, strat)
+                            self._log(
+                                f"  Group ({strat}): {len(group_seqs)} seqs, "
+                                f"tokens={sum(seqlens)}, time={t:.2f} ms, "
+                                f"batch_seq_ids={seq_ids}, seqlens={seqlens}"
+                            )
+
+                if feasible:
+                    self._log(f"\n=========== Success with microbatch size = {mb_num} ! ===========")
                     break
 
-                # Extract groups (handle bucketed vs non-bucketed results)
-                if "buckets" in result:
-                    groups = self._extract_groups_bucketed(result)
-                else:
-                    groups = self._extract_groups(result)
+                self._log(f"\n=========== Failed microbatch size = {mb_num} ! ===========")
+                mb_num += 1
+                if mb_num > _max_mb_retries + self.get_min_valid_microbatch_num(seqs_gb, chunk_alg):
+                    self._log(f"[AdaCPSP] Too many retries, giving up")
+                    return [], []
 
-                # Restore original IDs
-                for strat, group_seqs in groups:
-                    for seq in group_seqs:
-                        seq.id = orig_ids[seq.id]
+            # --- Store in cache ---
+            self._cache[cache_key] = (all_groups, all_results)
 
-                all_groups.append(groups)
-                all_results.append(result)
-
-                if not self.hide_output:
-                    for strat, group_seqs in groups:
-                        seqlens = get_lens(group_seqs)
-                        t = self.costmodel.total_time(seqlens, strat)
-                        print(f"  Group ({strat}): {len(group_seqs)} seqs, "
-                              f"tokens={sum(seqlens)}, time={t:.2f} ms")
-
-            if feasible:
-                self._log(f"\n=========== Success with microbatch size = {mb_num} ! ===========")
-                break
-
-            self._log(f"\n=========== Failed microbatch size = {mb_num} ! ===========")
-            mb_num += 1
-            if mb_num > _max_mb_retries + self.get_min_valid_microbatch_num(seqs_gb, chunk_alg):
-                self._log(f"[AdaCPSP] Too many retries, giving up")
-                return [], []
-
-        # --- Store in cache ---
-        self._cache[cache_key] = (all_groups, all_results)
-
-        return all_groups, all_results
+            return all_groups, all_results
+        finally:
+            self._log_context = old_log_context
 
     def _solve_microbatch(
         self,

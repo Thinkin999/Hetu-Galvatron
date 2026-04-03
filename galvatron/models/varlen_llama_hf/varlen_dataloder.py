@@ -14,16 +14,20 @@ class DataLoaderForVarlenLlama(Dataset):
         self.device = device
         world_size = torch.distributed.get_world_size()#他这里就是就求了觉得很奇怪
         self.input_ids = []
+        self.raw_length = None
         if args.dataset == "fix_length":
+            self.raw_length = np.full((self.dataset_size,), self.sentence_length)
             self.data_length = np.full((self.dataset_size,), self.sentence_length)
         elif args.dataset == "random":
             raw_lengths = np.random.randint(2,self.sentence_length,(self.dataset_size,))
+            self.raw_length = raw_lengths.copy()
             # Pad lengths to be multiples of 2*world_size for CP/SP compatibility
             align = 2 * world_size
             self.data_length = ((raw_lengths - 1) // align + 1) * align
             self.data_length = np.minimum(self.data_length, self.sentence_length)
         else:
             text_length = []
+            raw_text_length = []
             tmp = 0
             # Search for dataset in multiple locations
             _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -51,7 +55,9 @@ class DataLoaderForVarlenLlama(Dataset):
                     if pad_len > (args.seq_length - 2 * torch.distributed.get_world_size()):
                         tmp += 1
                         continue
+                    raw_text_length.append(sentence_len)
                     text_length.append(min(pad_len, args.seq_length - 2 * torch.distributed.get_world_size()))
+            self.raw_length = np.array(raw_text_length)
             self.data_length = np.array(text_length)#data length是重要的
         
         for i in range(self.dataset_size):
@@ -67,4 +73,9 @@ class DataLoaderForVarlenLlama(Dataset):
         if idx >= self.dataset_size:
             raise IndexError
         input_ids = torch.LongTensor(self.input_ids[idx]).to(self.device)
-        return input_ids
+        return {
+            "sample_id": idx,
+            "input_ids": input_ids,
+            "raw_length": int(self.raw_length[idx]),
+            "padded_length": int(self.data_length[idx]),
+        }

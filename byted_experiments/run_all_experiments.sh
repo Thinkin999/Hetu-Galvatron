@@ -12,6 +12,7 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "${PROJECT_DIR}/../.." && pwd)}"
 TRAIN_SCRIPT="${PROJECT_DIR}/galvatron/models/varlen_llama_hf/train_dist_adacpsp.py"
 
 # Platform-provided distributed settings.
@@ -34,12 +35,14 @@ NUM_ITERS="${NUM_ITERS:-20}"
 WARMUP_ITERS="${WARMUP_ITERS:-5}"
 EPOCHS="${EPOCHS:-1}"
 LR="${LR:-1e-4}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:--1}"
 MEMORY_LIMIT_GB="${MEMORY_LIMIT_GB:-90}"
 DEFAULT_DP_TYPE="${DEFAULT_DP_TYPE:-zero3}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 DATASET="${DATASET:-wikipedia}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+# Keep NCCL logging at warning level by default to avoid noisy INFO logs.
+export NCCL_DEBUG="WARN"
 # Whether to mirror rank-0 experiment logs to terminal in real time.
 # 1 = print to terminal + file, 0 = file only.
 LIVE_LOG_TO_STDOUT="${LIVE_LOG_TO_STDOUT:-1}"
@@ -50,58 +53,15 @@ AUTO_MEMORY_LIMIT="${AUTO_MEMORY_LIMIT:-1}"
 MEMORY_LIMIT_HEADROOM_GB="${MEMORY_LIMIT_HEADROOM_GB:-4}"
 
 # Paths.
-LOCAL_RESULT_ROOT="${LOCAL_RESULT_ROOT:-${SCRIPT_DIR}/results}"
-RESULT_ROOT="${RESULT_ROOT:-${LOCAL_RESULT_ROOT}}"
-HDFS_RESULT_ROOT="${HDFS_RESULT_ROOT:-hdfs://harunawl/home/byte_data_seed_wl/user/liuqingshuo}"
-HDFS_EXPERIMENT_DIR="${HDFS_EXPERIMENT_DIR:-byted_experiments}"
+DEFAULT_RESULT_ROOT="${WORKSPACE_ROOT}/logs/Hetu-Galvatron/byted_experiments"
+RESULT_ROOT="${RESULT_ROOT:-${DEFAULT_RESULT_ROOT}}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-RESULT_DIR="${RESULT_ROOT}/${TIMESTAMP}"
-HDFS_RESULT_DIR="${HDFS_RESULT_ROOT%/}/${HDFS_EXPERIMENT_DIR}/${TIMESTAMP}"
+RESULT_DIR="${RESULT_ROOT%/}/${TIMESTAMP}"
 DATASET_MOUNT_DIR="${DATASET_MOUNT_DIR:-}"
 ANALYSIS_TXT="${RESULT_DIR}/analysis.txt"
-HDFS_CMD=""
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-}
-
-detect_hdfs_cmd() {
-    if command -v hdfs >/dev/null 2>&1; then
-        HDFS_CMD="hdfs"
-    elif command -v /opt/tiger/yarn_deploy/hadoop/bin/hdfs >/dev/null 2>&1; then
-        HDFS_CMD="/opt/tiger/yarn_deploy/hadoop/bin/hdfs"
-    else
-        HDFS_CMD=""
-    fi
-}
-
-run_hdfs() {
-    if [ -z "${HDFS_CMD}" ]; then
-        return 1
-    fi
-    "${HDFS_CMD}" dfs "$@"
-}
-
-sync_results_to_hdfs() {
-    if [ "${PLATFORM_NODE_RANK}" -ne 0 ]; then
-        return 0
-    fi
-
-    if [ -z "${HDFS_CMD}" ]; then
-        log "WARNING: HDFS client not found. Skip syncing results to ${HDFS_RESULT_DIR}"
-        return 0
-    fi
-
-    log "Syncing results to HDFS: ${HDFS_RESULT_DIR}"
-    if ! run_hdfs -mkdir -p "${HDFS_RESULT_DIR}"; then
-        log "WARNING: failed to create HDFS directory ${HDFS_RESULT_DIR}"
-        return 0
-    fi
-
-    if ! run_hdfs -put -f "${RESULT_DIR}"/* "${HDFS_RESULT_DIR}/"; then
-        log "WARNING: failed to upload one or more result files to ${HDFS_RESULT_DIR}"
-        return 0
-    fi
 }
 
 run_analysis() {
@@ -302,7 +262,7 @@ resolve_torchrun_shape() {
     return 1
 }
 
-mkdir -p "${RESULT_DIR}"
+mkdir -p "${RESULT_ROOT}" "${RESULT_DIR}"
 
 GPU_CONFIG_COUNT=$(printf "%s\n" "${GPU_CONFIGS}" | awk '{print NF}')
 if [ "${GPU_CONFIG_COUNT}" -ne 1 ]; then
@@ -317,11 +277,9 @@ TARGET_GPUS="${GPU_CONFIGS}"
 cat > "${RESULT_DIR}/experiment_config.txt" <<EOF
 === AdaCPSP ByteDance Experiment Configuration ===
 Timestamp:           ${TIMESTAMP}
-Local Result Root:   ${RESULT_ROOT}
-Local Result Dir:    ${RESULT_DIR}
-HDFS Result Root:    ${HDFS_RESULT_ROOT}
-HDFS Experiment Dir: ${HDFS_EXPERIMENT_DIR}
-HDFS Result Dir:     ${HDFS_RESULT_DIR}
+Workspace Root:      ${WORKSPACE_ROOT}
+Result Root:         ${RESULT_ROOT}
+Result Dir:          ${RESULT_DIR}
 Models:              ${MODELS}
 Seq Lengths (K):     ${SEQ_LENGTHS_K}
 GBS:                 ${GBS_LIST}
@@ -348,8 +306,8 @@ EOF
 log "=========================================="
 log "AdaCPSP ByteDance experiment runner"
 log "=========================================="
+log "Workspace root: ${WORKSPACE_ROOT}"
 log "Result dir: ${RESULT_DIR}"
-log "HDFS result dir: ${HDFS_RESULT_DIR}"
 log "Allocated nodes: ${PLATFORM_NNODES}"
 log "Allocated gpus/node: ${PLATFORM_NPROC_PER_NODE}"
 log "Allocated gpus total: ${ALLOCATED_GPUS}"
@@ -360,7 +318,6 @@ log "=========================================="
 
 setup_cuda_runtime_env
 setup_dataset_mount || exit 1
-detect_hdfs_cmd
 if [ "${AUTO_MEMORY_LIMIT}" = "1" ]; then
     auto_detect_memory_limit_gb
 fi
@@ -475,12 +432,22 @@ for model in ${MODELS}; do
                 fi
 
                 START_TIME=$(date +%s)
-                if [ "${LIVE_LOG_TO_STDOUT}" = "1" ] && should_stream_logs; then
-                    timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" 2>&1 | tee -a "${NODE_LOG}"
-                    EXIT_CODE=${PIPESTATUS[0]}
+                if [ "${TIMEOUT_SECONDS}" = "-1" ]; then
+                    if [ "${LIVE_LOG_TO_STDOUT}" = "1" ] && should_stream_logs; then
+                        bash -c "${CMD}" 2>&1 | tee -a "${NODE_LOG}"
+                        EXIT_CODE=${PIPESTATUS[0]}
+                    else
+                        bash -c "${CMD}" >> "${NODE_LOG}" 2>&1
+                        EXIT_CODE=$?
+                    fi
                 else
-                    timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" >> "${NODE_LOG}" 2>&1
-                    EXIT_CODE=$?
+                    if [ "${LIVE_LOG_TO_STDOUT}" = "1" ] && should_stream_logs; then
+                        timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" 2>&1 | tee -a "${NODE_LOG}"
+                        EXIT_CODE=${PIPESTATUS[0]}
+                    else
+                        timeout "${TIMEOUT_SECONDS}" bash -c "${CMD}" >> "${NODE_LOG}" 2>&1
+                        EXIT_CODE=$?
+                    fi
                 fi
                 END_TIME=$(date +%s)
                 WALL_TIME=$((END_TIME - START_TIME))
@@ -497,7 +464,7 @@ for model in ${MODELS}; do
                         STATUS="PASS"
                         PASSED=$((PASSED + 1))
                         log "  PASS (${WALL_TIME}s)"
-                    elif [ ${EXIT_CODE} -eq 124 ]; then
+                    elif [ "${TIMEOUT_SECONDS}" != "-1" ] && [ ${EXIT_CODE} -eq 124 ]; then
                         STATUS="TIMEOUT"
                         TIMEOUT_COUNT=$((TIMEOUT_COUNT + 1))
                         log "  TIMEOUT after ${TIMEOUT_SECONDS}s"
@@ -516,7 +483,33 @@ for model in ${MODELS}; do
                         fi
                     fi
 
-                    AVG_ITER_S=$(grep -oP 'Average iteration time is:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
+                    AVG_ITER_S=$(python3 - "${EXP_LOG}" <<'PY'
+import re
+import sys
+
+log_path = sys.argv[1]
+avg_iter = "0"
+
+try:
+    with open(log_path, "r") as f:
+        lines = f.readlines()
+except OSError:
+    print(avg_iter)
+    raise SystemExit(0)
+
+for idx, line in enumerate(lines):
+    if "[Profile Summary]" in line and idx + 1 < len(lines):
+        match = re.search(r"Average iteration time is:\s*([0-9.]+)", lines[idx + 1])
+        if match:
+            avg_iter = match.group(1)
+    else:
+        match = re.search(r"Average iteration time is:\s*([0-9.]+)", line)
+        if match:
+            avg_iter = match.group(1)
+
+print(avg_iter)
+PY
+)
                     AVG_ITER_MS=$(awk -v s="${AVG_ITER_S}" 'BEGIN { printf "%.3f", s * 1000 }')
                     THROUGHPUT=$(grep -oP '[Tt]hroughput.*?:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
                     PEAK_MEM=$(grep -oP 'peak_activation:\s*\K[\d.]+' "${EXP_LOG}" 2>/dev/null | tail -1 || echo "0")
@@ -532,7 +525,6 @@ done
 
 if [ "${PLATFORM_NODE_RANK}" -eq 0 ]; then
     run_analysis
-    sync_results_to_hdfs
     log ""
     log "=========================================="
     log "Experiment sweep finished"
@@ -546,7 +538,6 @@ if [ "${PLATFORM_NODE_RANK}" -eq 0 ]; then
     log "Summary CSV: ${SUMMARY_CSV}"
     log "Analysis TXT: ${ANALYSIS_TXT}"
     log "Analyze command: python byted_experiments/analyze_results.py ${RESULT_DIR} --detailed"
-    log "HDFS result dir: ${HDFS_RESULT_DIR}"
     log "=========================================="
     column -t -s',' "${SUMMARY_CSV}" 2>/dev/null || cat "${SUMMARY_CSV}"
 fi
