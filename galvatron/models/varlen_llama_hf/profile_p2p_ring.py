@@ -107,6 +107,9 @@ def profile_p2p_ring(
         torch.cuda.synchronize()
 
         total_elapsed_ms = start_event.elapsed_time(end_event) / profile_iters
+        elapsed_tensor = torch.tensor([total_elapsed_ms], device=device, dtype=torch.float64)
+        dist.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX, group=cp_group)
+        total_elapsed_ms = float(elapsed_tensor.item())
         per_step_ms = total_elapsed_ms / num_steps if num_steps > 0 else 0
 
         # Bandwidth: data moved per step / time per step
@@ -190,6 +193,9 @@ def profile_p2p_raw(
         torch.cuda.synchronize()
 
         elapsed_ms = start_event.elapsed_time(end_event) / profile_iters
+        elapsed_tensor = torch.tensor([elapsed_ms], device=device, dtype=torch.float64)
+        dist.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX, group=cp_group)
+        elapsed_ms = float(elapsed_tensor.item())
         bandwidth_gbs = total_bytes / (elapsed_ms / 1000) / 1e9 if elapsed_ms > 0 else 0
 
         results.append({

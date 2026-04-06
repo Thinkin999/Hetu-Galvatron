@@ -94,6 +94,10 @@ def profile_alltoall(
         torch.cuda.synchronize()
 
         elapsed_ms = start_event.elapsed_time(end_event) / profile_iters
+        # Collective latency is gated by the slowest rank in the group.
+        elapsed_tensor = torch.tensor([elapsed_ms], device=device, dtype=torch.float64)
+        dist.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX, group=sp_group)
+        elapsed_ms = float(elapsed_tensor.item())
 
         # Calculate bandwidth
         # Total data moved: each rank sends (sp_size-1)/sp_size of its data
@@ -166,6 +170,9 @@ def profile_alltoall_single_tensor(
         torch.cuda.synchronize()
 
         elapsed_ms = start_event.elapsed_time(end_event) / profile_iters
+        elapsed_tensor = torch.tensor([elapsed_ms], device=device, dtype=torch.float64)
+        dist.all_reduce(elapsed_tensor, op=dist.ReduceOp.MAX, group=sp_group)
+        elapsed_ms = float(elapsed_tensor.item())
 
         total_bytes = num_elements * bytes_per_element
         data_moved = total_bytes * (sp_size - 1) / sp_size

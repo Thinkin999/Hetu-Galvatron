@@ -277,6 +277,78 @@ def test_from_profile_files_topo():
         print("  [PASS] from_profile_files loads topology-aware data")
 
 
+def test_from_attention_and_comm_profiles():
+    """from_attention_and_comm_profiles loads unified comm profile correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        attn_json = os.path.join(tmpdir, "attn.json")
+        comm_json = os.path.join(tmpdir, "comm.json")
+
+        with open(attn_json, "w") as f:
+            json.dump({
+                "num_layers": 2,
+                "attention": {
+                    "segments": [{"range": [0, 1e9], "a": 1e-8, "b": 1e-5, "c": 0.1}],
+                    "config": {"hidden_size": 4096, "n_heads": 32, "n_kv_heads": 8, "head_dim": 128},
+                },
+            }, f)
+
+        with open(comm_json, "w") as f:
+            json.dump({
+                "alltoall": {
+                    "bandwidth_dict_GBs": {"1": 1e10, "2": 100, "4": 150},
+                    "bandwidth_dict_consec_GBs": {"1": 1e10, "2": 200, "4": 300},
+                    "bandwidth_dict_strided_GBs": {"1": 1e10, "2": 50, "4": 75},
+                    "linear_fits": {
+                        "gs2_consecutive": {"alpha": 0.001, "beta": 0.01},
+                        "gs2_strided": {"alpha": 0.01, "beta": 0.1},
+                    },
+                    "interp_tables": {
+                        "gs2_consecutive": [[4.0, 0.02], [8.0, 0.03]],
+                        "gs2_strided": [[4.0, 0.12], [8.0, 0.18]],
+                    },
+                },
+                "p2p_ring": {
+                    "bandwidth_dict_GBs": {"1": 1e10, "2": 80, "4": 120},
+                    "bandwidth_dict_consec_GBs": {"1": 1e10, "2": 160, "4": 240},
+                    "bandwidth_dict_strided_GBs": {"1": 1e10, "2": 40, "4": 60},
+                    "linear_fits": {
+                        "gs2_consecutive": {"alpha": 0.002, "beta": 0.02},
+                        "gs4_strided": {"alpha": 0.02, "beta": 0.2},
+                    },
+                    "ring_step_fits": {
+                        "gs2_consecutive": {"alpha": 0.003, "beta": 0.03},
+                        "gs4_strided": {"alpha": 0.03, "beta": 0.3},
+                    },
+                    "interp_tables": {
+                        "gs2_consecutive": [[8.0, 0.04], [16.0, 0.07]],
+                        "gs4_strided": [[8.0, 0.4], [16.0, 0.7]],
+                    },
+                },
+            }, f)
+
+        cm = AdaCPSPCostModel.from_attention_and_comm_profiles(
+            attn_json, comm_json, gpus_per_node=8
+        )
+
+        assert cm.alltoall_bw_consec[2] == 200
+        assert cm.alltoall_bw_strided[2] == 50
+        assert cm.p2p_bw_consec[2] == 160
+        assert cm.p2p_bw_strided[2] == 40
+
+        assert cm.alltoall_linear_consec[2]["alpha"] == 0.001
+        assert cm.alltoall_linear_strided[2]["alpha"] == 0.01
+        assert cm.p2p_linear_consec[2]["alpha"] == 0.002
+        assert cm.p2p_linear_strided[4]["alpha"] == 0.02
+
+        assert cm.p2p_ring_step_consec[2]["alpha"] == 0.003
+        assert cm.p2p_ring_step_strided[4]["alpha"] == 0.03
+        assert cm.a2a_interp_consec[2][0] == (4.0, 0.02)
+        assert cm.a2a_interp_strided[2][1] == (8.0, 0.18)
+        assert cm.p2p_ring_interp_consec[2][0] == (8.0, 0.04)
+        assert cm.p2p_ring_interp_strided[4][1] == (16.0, 0.7)
+        print("  [PASS] from_attention_and_comm_profiles loads unified comm profile")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Placement-Aware USP Unit Tests")
@@ -296,6 +368,7 @@ if __name__ == "__main__":
     test_topo_key_roundtrip()
     test_strategy_pool_placement()
     test_from_profile_files_topo()
+    test_from_attention_and_comm_profiles()
 
     print("\n" + "=" * 60)
     print("  ALL TESTS PASSED")

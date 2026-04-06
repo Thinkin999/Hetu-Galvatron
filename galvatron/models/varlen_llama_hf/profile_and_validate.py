@@ -1504,6 +1504,8 @@ def main():
                         help="Existing attention profile JSON (skip re-profiling)")
     parser.add_argument("--alltoall_json", type=str, default=None)
     parser.add_argument("--p2p_json", type=str, default=None)
+    parser.add_argument("--comm_profile_json", type=str, default=None,
+                        help="Unified topology-aware communication profile JSON")
     parser.add_argument("--profile_json", type=str, default=None,
                         help="Unified profile JSON from previous run (loads attn segments + comm linear fits)")
     # Dataset
@@ -1563,17 +1565,22 @@ def main():
     head_scaling_val = None
 
     # ── Auto-detect best profile JSONs from configs dir if not specified ──
-    if args.mode in ["validate_cost_model", "all"] and not args.profile_json:
+    if args.mode in ["validate_cost_model", "all"] and (not args.profile_json or not args.comm_profile_json):
         import glob as _glob
         profile_files = sorted(_glob.glob(os.path.join(args.save_dir, "profile_validate_*.json")))
+        comm_profile_files = sorted(_glob.glob(os.path.join(args.save_dir, "comm_profile_*.json")))
         best_attn_json = None
         best_comm_json = None
+        best_validation_json = None
+        best_comm_profile_json = comm_profile_files[-1] if comm_profile_files else None
         for pf in reversed(profile_files):  # newest first
             try:
                 with open(pf) as _f:
                     _d = json.load(_f)
                 if best_attn_json is None and "attention" in _d and "segments" in _d.get("attention", {}):
                     best_attn_json = pf
+                if best_validation_json is None and "comm_validation" in _d:
+                    best_validation_json = pf
                 if best_comm_json is None and "communication" in _d and "linear_fits" in _d.get("communication", {}):
                     best_comm_json = pf
             except Exception:
@@ -1581,11 +1588,15 @@ def main():
         if rank == 0:
             if best_attn_json:
                 print(f"  Auto-detected attention profile: {best_attn_json}")
+            if best_comm_profile_json:
+                print(f"  Auto-detected topology-aware comm profile: {best_comm_profile_json}")
             if best_comm_json:
                 print(f"  Auto-detected comm profile: {best_comm_json}")
         # Store for later use (will be loaded in Part 3)
         args._auto_attn_json = best_attn_json
         args._auto_comm_json = best_comm_json
+        args._auto_validation_json = best_validation_json
+        args._auto_comm_profile_json = best_comm_profile_json
 
     # ═══ PART 1: Attention Profiling ═══
     if args.mode in ["attention", "all"]:
@@ -1688,6 +1699,8 @@ def main():
             print(f"\n{'='*80}")
             print(" PART 2: Communication Profiling with Linear Fitting")
             print(f"{'='*80}")
+            print("  [Legacy] This simplified comm path is kept for compatibility.")
+            print("  [Legacy] Prefer profile_comm.py for topology-aware cross-node profiling.")
 
         for gs in [2, 4, 8]:
             if gs > world_size:
@@ -1737,25 +1750,112 @@ def main():
         # Build cost model from existing or fresh profile data
         sys.path.insert(0, os.path.dirname(__file__))
         from adacpsp_solver import AdaCPSPCostModel, ParallelStrategy
+        def _json_has(path: Optional[str], key: str) -> bool:
+            if not path or not os.path.exists(path):
+                return False
+            try:
+                with open(path) as f:
+                    return key in json.load(f)
+            except Exception:
+                return False
 
-        # ── Load profiling data (from this run, saved JSON, or defaults) ──
-        piecewise = None
-        alltoall_linear = {}
-        p2p_linear = {}
-        a2a_bw = None
-        p2p_bw = None
+        attention_source_json = None
+        if args.attn_json and os.path.exists(args.attn_json):
+            attention_source_json = args.attn_json
+        elif args.profile_json and _json_has(args.profile_json, "attention"):
+            attention_source_json = args.profile_json
+        elif hasattr(args, "_auto_attn_json") and args._auto_attn_json:
+            attention_source_json = args._auto_attn_json
 
-        # Helper to load from a profile JSON
-        def _load_from_json(path, label=""):
-            nonlocal piecewise, alltoall_linear, p2p_linear
-            with open(path) as f:
-                prev_data = json.load(f)
+        comm_profile_json = None
+        if args.comm_profile_json and os.path.exists(args.comm_profile_json):
+            comm_profile_json = args.comm_profile_json
+        elif hasattr(args, "_auto_comm_profile_json") and args._auto_comm_profile_json:
+            comm_profile_json = args._auto_comm_profile_json
+
+        validation_json = None
+        if args.profile_json and _json_has(args.profile_json, "comm_validation"):
+            validation_json = args.profile_json
+        elif hasattr(args, "_auto_validation_json") and args._auto_validation_json:
+            validation_json = args._auto_validation_json
+
+        if attention_source_json and comm_profile_json:
+            costmodel = AdaCPSPCostModel.from_attention_and_comm_profiles(
+                attention_json=attention_source_json,
+                comm_profile_json=comm_profile_json,
+                cluster_size=world_size,
+                param_size_B=args.param_size_B,
+                gpus_per_node=torch.cuda.device_count(),
+                validation_json=validation_json,
+            )
             if rank == 0:
-                print(f"  Loading {label} from: {path}")
-            if piecewise is None and "attention" in prev_data and "segments" in prev_data["attention"]:
-                piecewise = prev_data["attention"]["segments"]
-            if not alltoall_linear and "communication" in prev_data and "linear_fits" in prev_data["communication"]:
-                for key, fit in prev_data["communication"]["linear_fits"].items():
+                print(
+                    f"  Using topology-aware comm profile: "
+                    f"attn={attention_source_json}, comm={comm_profile_json}, validation={validation_json}"
+                )
+        else:
+            # ── Load profiling data (from this run, saved JSON, or defaults) ──
+            piecewise = None
+            alltoall_linear = {}
+            p2p_linear = {}
+            a2a_bw = None
+            p2p_bw = None
+
+            # Helper to load from a profile JSON
+            def _load_from_json(path, label=""):
+                nonlocal piecewise, alltoall_linear, p2p_linear
+                with open(path) as f:
+                    prev_data = json.load(f)
+                if rank == 0:
+                    print(f"  Loading {label} from: {path}")
+                if piecewise is None and "attention" in prev_data and "segments" in prev_data["attention"]:
+                    piecewise = prev_data["attention"]["segments"]
+                if not alltoall_linear and "communication" in prev_data and "linear_fits" in prev_data["communication"]:
+                    for key, fit in prev_data["communication"]["linear_fits"].items():
+                        gs = int(key.split("gs")[1])
+                        entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
+                        if key.startswith("alltoall"):
+                            alltoall_linear[gs] = entry
+                        elif key.startswith("p2p"):
+                            p2p_linear[gs] = entry
+
+            # Source 1: explicitly specified unified profile JSON
+            if args.profile_json and os.path.exists(args.profile_json):
+                _load_from_json(args.profile_json, "unified profile")
+
+            # Source 1b: auto-detected profile JSONs (separate attn + comm)
+            if piecewise is None and hasattr(args, '_auto_attn_json') and args._auto_attn_json:
+                _load_from_json(args._auto_attn_json, "auto-detected attention")
+            if not alltoall_linear and hasattr(args, '_auto_comm_json') and args._auto_comm_json:
+                _load_from_json(args._auto_comm_json, "auto-detected comm")
+
+            # Source 2: separate JSON files
+            if piecewise is None and args.attn_json and os.path.exists(args.attn_json):
+                with open(args.attn_json) as f:
+                    attn_prof = json.load(f)
+                piecewise = []
+                if "attention" in attn_prof and "segments" in attn_prof["attention"]:
+                    piecewise = attn_prof["attention"]["segments"]
+                else:
+                    for seg_name, coeff in attn_prof.get("coefficients", {}).items():
+                        if coeff:
+                            piecewise.append({"range": coeff["seq_range"], "a": coeff["a"],
+                                              "b": coeff["b"], "c": coeff["c"]})
+
+            if not alltoall_linear and args.alltoall_json and os.path.exists(args.alltoall_json):
+                with open(args.alltoall_json) as f:
+                    a2a_bw = {int(k): v for k, v in json.load(f)["bandwidth_dict_GBs"].items()}
+
+            if not p2p_linear and args.p2p_json and os.path.exists(args.p2p_json):
+                with open(args.p2p_json) as f:
+                    p2p_bw = {int(k): v for k, v in json.load(f)["bandwidth_dict_GBs"].items()}
+
+            # Source 3: from this run's Part 1/2
+            if piecewise is None and attn_segments:
+                piecewise = attn_segments
+
+            if not alltoall_linear and comm_fits_all:
+                for key, fit in comm_fits_all.items():
                     gs = int(key.split("gs")[1])
                     entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
                     if key.startswith("alltoall"):
@@ -1763,71 +1863,27 @@ def main():
                     elif key.startswith("p2p"):
                         p2p_linear[gs] = entry
 
-        # Source 1: explicitly specified unified profile JSON
-        if args.profile_json and os.path.exists(args.profile_json):
-            _load_from_json(args.profile_json, "unified profile")
+            if rank == 0:
+                if alltoall_linear:
+                    print(f"  Using linear fit for alltoall: {sorted(alltoall_linear.keys())}")
+                else:
+                    print(f"  Using bandwidth model for alltoall (no linear fit)")
+                if p2p_linear:
+                    print(f"  Using linear fit for p2p: {sorted(p2p_linear.keys())}")
+                else:
+                    print(f"  Using bandwidth model for p2p (no linear fit)")
 
-        # Source 1b: auto-detected profile JSONs (separate attn + comm)
-        if piecewise is None and hasattr(args, '_auto_attn_json') and args._auto_attn_json:
-            _load_from_json(args._auto_attn_json, "auto-detected attention")
-        if not alltoall_linear and hasattr(args, '_auto_comm_json') and args._auto_comm_json:
-            _load_from_json(args._auto_comm_json, "auto-detected comm")
-
-        # Source 2: separate JSON files
-        if piecewise is None and args.attn_json and os.path.exists(args.attn_json):
-            with open(args.attn_json) as f:
-                attn_prof = json.load(f)
-            piecewise = []
-            if "attention" in attn_prof and "segments" in attn_prof["attention"]:
-                piecewise = attn_prof["attention"]["segments"]
-            else:
-                for seg_name, coeff in attn_prof.get("coefficients", {}).items():
-                    if coeff:
-                        piecewise.append({"range": coeff["seq_range"], "a": coeff["a"],
-                                          "b": coeff["b"], "c": coeff["c"]})
-
-        if not alltoall_linear and args.alltoall_json and os.path.exists(args.alltoall_json):
-            with open(args.alltoall_json) as f:
-                a2a_bw = {int(k): v for k, v in json.load(f)["bandwidth_dict_GBs"].items()}
-
-        if not p2p_linear and args.p2p_json and os.path.exists(args.p2p_json):
-            with open(args.p2p_json) as f:
-                p2p_bw = {int(k): v for k, v in json.load(f)["bandwidth_dict_GBs"].items()}
-
-        # Source 3: from this run's Part 1/2
-        if piecewise is None and attn_segments:
-            piecewise = attn_segments
-
-        if not alltoall_linear and comm_fits_all:
-            for key, fit in comm_fits_all.items():
-                gs = int(key.split("gs")[1])
-                entry = {"alpha": fit["alpha_ms_per_MB"], "beta": fit["beta_ms"]}
-                if key.startswith("alltoall"):
-                    alltoall_linear[gs] = entry
-                elif key.startswith("p2p"):
-                    p2p_linear[gs] = entry
-
-        if rank == 0:
-            if alltoall_linear:
-                print(f"  Using linear fit for alltoall: {sorted(alltoall_linear.keys())}")
-            else:
-                print(f"  Using bandwidth model for alltoall (no linear fit)")
-            if p2p_linear:
-                print(f"  Using linear fit for p2p: {sorted(p2p_linear.keys())}")
-            else:
-                print(f"  Using bandwidth model for p2p (no linear fit)")
-
-        costmodel = AdaCPSPCostModel(
-            cluster_size=world_size,
-            hidden_size=args.hidden_size,
-            layer_num=args.num_layers,
-            param_size_B=args.param_size_B,
-            piecewise_compute_coeffs=piecewise,
-            alltoall_bandwidth_dict_gbs=a2a_bw,
-            p2p_bandwidth_dict_gbs=p2p_bw,
-            alltoall_linear_fit=alltoall_linear if alltoall_linear else None,
-            p2p_linear_fit=p2p_linear if p2p_linear else None,
-        )
+            costmodel = AdaCPSPCostModel(
+                cluster_size=world_size,
+                hidden_size=args.hidden_size,
+                layer_num=args.num_layers,
+                param_size_B=args.param_size_B,
+                piecewise_compute_coeffs=piecewise,
+                alltoall_bandwidth_dict_gbs=a2a_bw,
+                p2p_bandwidth_dict_gbs=p2p_bw,
+                alltoall_linear_fit=alltoall_linear if alltoall_linear else None,
+                p2p_linear_fit=p2p_linear if p2p_linear else None,
+            )
 
         # 3a: Compute validation
         if rank == 0:

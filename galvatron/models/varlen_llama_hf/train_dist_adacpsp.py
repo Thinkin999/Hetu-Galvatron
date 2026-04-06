@@ -773,26 +773,53 @@ def train(args):
         # Try unified profile JSON from configs dir (newest first)
         if os.path.isdir(configs_dir):
             import glob as _glob, json as _json
-            # Find best profile with attention segments
+            # Find best profile with attention segments / unified comm profile / validation data
             attn_json = None
-            comm_json = None
+            legacy_comm_json = None
+            comm_profile_json = None
+            validation_json = None
+            for pf in sorted(_glob.glob(os.path.join(configs_dir, "comm_profile_*.json")), reverse=True):
+                try:
+                    with open(pf) as _f:
+                        _d = _json.load(_f)
+                    if "alltoall" in _d and "p2p_ring" in _d:
+                        comm_profile_json = pf
+                        break
+                except Exception:
+                    pass
             for pf in sorted(_glob.glob(os.path.join(configs_dir, "profile_validate_*.json")), reverse=True):
                 try:
                     with open(pf) as _f:
                         _d = _json.load(_f)
                     if attn_json is None and "attention" in _d and "segments" in _d.get("attention", {}):
                         attn_json = pf
-                    if comm_json is None and "communication" in _d and "linear_fits" in _d.get("communication", {}):
-                        comm_json = pf
+                    if validation_json is None and "comm_validation" in _d:
+                        validation_json = pf
+                    if legacy_comm_json is None and "communication" in _d and "linear_fits" in _d.get("communication", {}):
+                        legacy_comm_json = pf
                 except Exception:
                     pass
-            
-            if attn_json or comm_json:
+
+            if attn_json and comm_profile_json:
+                costmodel = AdaCPSPCostModel.from_attention_and_comm_profiles(
+                    attention_json=attn_json,
+                    comm_profile_json=comm_profile_json,
+                    cluster_size=world_size,
+                    validation_json=validation_json,
+                    gpus_per_node=torch.cuda.device_count(),
+                )
+                if rank == 0:
+                    print(
+                        f"[AdaCPSP] Loaded topology-aware comm profile: "
+                        f"attn={attn_json}, comm={comm_profile_json}, validation={validation_json}"
+                    )
+
+            elif attn_json or legacy_comm_json:
                 piecewise = None
                 alltoall_linear = {}
                 p2p_linear = {}
                 
-                for pf in [attn_json, comm_json]:
+                for pf in [attn_json, legacy_comm_json]:
                     if pf is None:
                         continue
                     with open(pf) as _f:
@@ -817,7 +844,7 @@ def train(args):
                     p2p_linear_fit=p2p_linear if p2p_linear else None,
                 )
                 if rank == 0:
-                    print(f"[AdaCPSP] Loaded profiling data: attn={attn_json}, comm={comm_json}")
+                    print(f"[AdaCPSP] Loaded legacy profiling data: attn={attn_json}, comm={legacy_comm_json}")
         
         # Fallback: try legacy profiling files
         if costmodel is None:

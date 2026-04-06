@@ -284,6 +284,12 @@ class AdaCPSPCostModel:
         p2p_ring_step_fit: Optional[Dict[int, Dict[str, float]]] = None,
         p2p_ring_interp: Optional[Dict[int, List[Tuple[float, float]]]] = None,
         a2a_interp: Optional[Dict[int, List[Tuple[float, float]]]] = None,
+        p2p_ring_step_consec: Optional[Dict[int, Dict[str, float]]] = None,
+        p2p_ring_step_strided: Optional[Dict[int, Dict[str, float]]] = None,
+        p2p_ring_interp_consec: Optional[Dict[int, List[Tuple[float, float]]]] = None,
+        p2p_ring_interp_strided: Optional[Dict[int, List[Tuple[float, float]]]] = None,
+        a2a_interp_consec: Optional[Dict[int, List[Tuple[float, float]]]] = None,
+        a2a_interp_strided: Optional[Dict[int, List[Tuple[float, float]]]] = None,
         # ── Overlap-aware modeling parameters ──
         bwd_fwd_ratio: float = 2.0,
         ring_bwd_comm_ratio: float = 2.0,
@@ -344,6 +350,12 @@ class AdaCPSPCostModel:
         self.p2p_ring_step = p2p_ring_step_fit
         self.p2p_ring_interp = p2p_ring_interp
         self.a2a_interp = a2a_interp
+        self.p2p_ring_step_consec = p2p_ring_step_consec
+        self.p2p_ring_step_strided = p2p_ring_step_strided
+        self.p2p_ring_interp_consec = p2p_ring_interp_consec
+        self.p2p_ring_interp_strided = p2p_ring_interp_strided
+        self.a2a_interp_consec = a2a_interp_consec
+        self.a2a_interp_strided = a2a_interp_strided
 
         # Placement-aware topology data
         self.gpus_per_node = gpus_per_node
@@ -399,6 +411,27 @@ class AdaCPSPCostModel:
             return self.p2p_linear_consec
         if topo == "strided" and self.p2p_linear_strided:
             return self.p2p_linear_strided
+        return None
+
+    def _select_a2a_interp(self, topo: str) -> Optional[Dict[int, List[Tuple[float, float]]]]:
+        if topo == "consecutive" and self.a2a_interp_consec:
+            return self.a2a_interp_consec
+        if topo == "strided" and self.a2a_interp_strided:
+            return self.a2a_interp_strided
+        return None
+
+    def _select_p2p_ring_step(self, topo: str) -> Optional[Dict[int, Dict[str, float]]]:
+        if topo == "consecutive" and self.p2p_ring_step_consec:
+            return self.p2p_ring_step_consec
+        if topo == "strided" and self.p2p_ring_step_strided:
+            return self.p2p_ring_step_strided
+        return None
+
+    def _select_p2p_ring_interp(self, topo: str) -> Optional[Dict[int, List[Tuple[float, float]]]]:
+        if topo == "consecutive" and self.p2p_ring_interp_consec:
+            return self.p2p_ring_interp_consec
+        if topo == "strided" and self.p2p_ring_interp_strided:
+            return self.p2p_ring_interp_strided
         return None
 
     # ---- GQA Head Padding Overhead ----
@@ -492,14 +525,22 @@ class AdaCPSPCostModel:
 
         return pts[-1][1]
 
-    def _interp_ring_per_step(self, kv_per_step_mb: float, cp_size: int) -> Optional[float]:
+    def _interp_ring_per_step(self, kv_per_step_mb: float, cp_size: int,
+                              topo: str = "consecutive") -> Optional[float]:
         """Interpolate ring per-step time from profiled data."""
+        topo_interp = self._select_p2p_ring_interp(topo)
+        if topo_interp and cp_size in topo_interp:
+            return self._interp_lookup(kv_per_step_mb, topo_interp[cp_size])
         if not self.p2p_ring_interp or cp_size not in self.p2p_ring_interp:
             return None
         return self._interp_lookup(kv_per_step_mb, self.p2p_ring_interp[cp_size])
 
-    def _interp_a2a(self, msg_mb: float, sp_size: int) -> Optional[float]:
+    def _interp_a2a(self, msg_mb: float, sp_size: int,
+                    topo: str = "consecutive") -> Optional[float]:
         """Interpolate A2A per-op time from profiled data."""
+        topo_interp = self._select_a2a_interp(topo)
+        if topo_interp and sp_size in topo_interp:
+            return self._interp_lookup(msg_mb, topo_interp[sp_size])
         if not self.a2a_interp or sp_size not in self.a2a_interp:
             return None
         return self._interp_lookup(msg_mb, self.a2a_interp[sp_size])
@@ -629,7 +670,7 @@ class AdaCPSPCostModel:
             return max(0.0, fit["alpha"] * msg_mb + fit["beta"])
 
         # Priority 2: Generic interpolation from actual A2A profiling
-        interp_val = self._interp_a2a(msg_mb, sp_size)
+        interp_val = self._interp_a2a(msg_mb, sp_size, topo)
         if interp_val is not None:
             return interp_val
 
@@ -689,28 +730,34 @@ class AdaCPSPCostModel:
             return max(0.0, fit["alpha"] * kv_per_step_mb + fit["beta"])
 
         # Priority 2: Generic interpolation from actual ring profiling
-        interp_val = self._interp_ring_per_step(kv_per_step_mb, cp_size)
+        interp_val = self._interp_ring_per_step(kv_per_step_mb, cp_size, topo)
         if interp_val is not None:
             return interp_val
 
         # Priority 3: Ring per-step linear fit
+        topo_ring_step = self._select_p2p_ring_step(topo)
+        if topo_ring_step and cp_size in topo_ring_step:
+            fit = topo_ring_step[cp_size]
+            return max(0.0, fit["alpha"] * kv_per_step_mb + fit["beta"])
+
+        # Priority 4: Generic ring-step fit
         if self.p2p_ring_step and cp_size in self.p2p_ring_step:
             fit = self.p2p_ring_step[cp_size]
             return max(0.0, fit["alpha"] * kv_per_step_mb + fit["beta"])
 
-        # Priority 4: Generic raw P2P linear fit
+        # Priority 5: Generic raw P2P linear fit
         if self.p2p_linear and cp_size in self.p2p_linear:
             fit = self.p2p_linear[cp_size]
             single_kv_mb = kv_per_step_mb / 2
             per_kv_time = fit["alpha"] * single_kv_mb + fit["beta"]
             return max(0.0, 2 * per_kv_time)
 
-        # Priority 5: Topology-aware BW model
+        # Priority 6: Topology-aware BW model
         topo_bw = self._select_p2p_bw(topo)
         if topo_bw and cp_size in topo_bw:
             return kv_per_step_mb / topo_bw[cp_size]
 
-        # Priority 6: Generic BW model
+        # Priority 7: Generic BW model
         bw = self.p2p_bw.get(cp_size, self.p2p_bw.get(max(self.p2p_bw.keys()), 100))
         return kv_per_step_mb / bw
 
@@ -1118,6 +1165,141 @@ class AdaCPSPCostModel:
                 gs = int(tk.split("_")[0].replace("gs", ""))
                 strided[gs] = {"alpha": fit["alpha"], "beta": fit["beta"]}
         return consec if consec else None, strided if strided else None
+
+    @staticmethod
+    def _load_named_topo_fits(data: Dict, key: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """Extract consecutive/strided fits from a named topo-keyed dict."""
+        if key not in data:
+            return None, None
+        consec, strided = {}, {}
+        for tk, fit in data[key].items():
+            if "_consecutive" in tk:
+                gs = int(tk.split("_")[0].replace("gs", ""))
+                consec[gs] = {"alpha": fit["alpha"], "beta": fit["beta"]}
+            elif "_strided" in tk:
+                gs = int(tk.split("_")[0].replace("gs", ""))
+                strided[gs] = {"alpha": fit["alpha"], "beta": fit["beta"]}
+        return consec if consec else None, strided if strided else None
+
+    @staticmethod
+    def _load_topo_interp_tables(data: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """Extract consecutive/strided interpolation tables from topo-keyed points."""
+        if "interp_tables" not in data:
+            return None, None
+        consec, strided = {}, {}
+        for tk, pts in data["interp_tables"].items():
+            if "_consecutive" in tk:
+                gs = int(tk.split("_")[0].replace("gs", ""))
+                consec[gs] = [(float(x), float(y)) for x, y in pts]
+            elif "_strided" in tk:
+                gs = int(tk.split("_")[0].replace("gs", ""))
+                strided[gs] = [(float(x), float(y)) for x, y in pts]
+        return consec if consec else None, strided if strided else None
+
+    @classmethod
+    def from_attention_and_comm_profiles(
+        cls,
+        attention_json: str,
+        comm_profile_json: str,
+        cluster_size: int = 8,
+        param_size_B: float = 7.0,
+        zero_stage: int = 3,
+        act_per_token: float = 3.96,
+        overlap_json: Optional[str] = None,
+        validation_json: Optional[str] = None,
+        gpus_per_node: int = 8,
+    ) -> "AdaCPSPCostModel":
+        """Construct from standalone attention profile + unified communication profile."""
+        with open(attention_json, "r") as f:
+            attn_data = json.load(f)
+        with open(comm_profile_json, "r") as f:
+            comm_data = json.load(f)
+
+        if "alltoall" not in comm_data or "p2p_ring" not in comm_data:
+            raise ValueError(f"{comm_profile_json} is not a unified communication profile")
+
+        piecewise = []
+        if "coefficients" in attn_data:
+            for seg_name, coeff in attn_data["coefficients"].items():
+                if coeff is not None:
+                    piecewise.append({
+                        "range": coeff["seq_range"],
+                        "a": coeff["a"],
+                        "b": coeff["b"],
+                        "c": coeff["c"],
+                    })
+        elif "attention" in attn_data and "segments" in attn_data["attention"]:
+            piecewise = attn_data["attention"]["segments"]
+
+        config = attn_data.get("config", attn_data.get("attention", {}).get("config", {}))
+        a2a_data = comm_data["alltoall"]
+        p2p_data = comm_data["p2p_ring"]
+
+        alltoall_bw = {int(k): v for k, v in a2a_data["bandwidth_dict_GBs"].items()}
+        p2p_bw = {int(k): v for k, v in p2p_data["bandwidth_dict_GBs"].items()}
+
+        alltoall_bw_consec = cls._load_topo_bw(a2a_data, "bandwidth_dict_consec_GBs")
+        alltoall_bw_strided = cls._load_topo_bw(a2a_data, "bandwidth_dict_strided_GBs")
+        p2p_bw_consec = cls._load_topo_bw(p2p_data, "bandwidth_dict_consec_GBs")
+        p2p_bw_strided = cls._load_topo_bw(p2p_data, "bandwidth_dict_strided_GBs")
+        alltoall_lin_c, alltoall_lin_s = cls._load_topo_linear_fits(a2a_data)
+        p2p_lin_c, p2p_lin_s = cls._load_topo_linear_fits(p2p_data)
+        p2p_ring_step_c, p2p_ring_step_s = cls._load_named_topo_fits(p2p_data, "ring_step_fits")
+        a2a_interp_c, a2a_interp_s = cls._load_topo_interp_tables(a2a_data)
+        p2p_interp_c, p2p_interp_s = cls._load_topo_interp_tables(p2p_data)
+
+        bwd_fwd_ratio = 2.0
+        ring_bwd_comm_ratio = 2.0
+        if overlap_json is not None:
+            with open(overlap_json, "r") as f:
+                ovlp_data = json.load(f)
+            if "fwd_bwd" in ovlp_data:
+                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 2.0)
+            if "ring_bwd_comm" in ovlp_data and "summary" in ovlp_data["ring_bwd_comm"]:
+                ratios = [s["avg_bwd_fwd_comm_ratio"]
+                          for s in ovlp_data["ring_bwd_comm"]["summary"].values()]
+                if ratios:
+                    ring_bwd_comm_ratio = sum(ratios) / len(ratios)
+
+        cm = cls(
+            cluster_size=cluster_size,
+            hidden_size=config.get("hidden_size", 4096),
+            layer_num=attn_data.get("num_layers", 32),
+            param_size_B=param_size_B,
+            zero_stage=zero_stage,
+            act_per_token=act_per_token,
+            num_attention_heads=config.get("n_heads", None),
+            num_kv_heads=config.get("n_kv_heads", None),
+            head_dim=config.get("head_dim", 128),
+            piecewise_compute_coeffs=piecewise,
+            alltoall_bandwidth_dict_gbs=alltoall_bw,
+            p2p_bandwidth_dict_gbs=p2p_bw,
+            alltoall_linear_fit=alltoall_lin_c or alltoall_lin_s,
+            p2p_linear_fit=p2p_lin_c or p2p_lin_s,
+            p2p_ring_step_fit=p2p_ring_step_c or p2p_ring_step_s,
+            p2p_ring_interp=p2p_interp_c or p2p_interp_s,
+            a2a_interp=a2a_interp_c or a2a_interp_s,
+            bwd_fwd_ratio=bwd_fwd_ratio,
+            ring_bwd_comm_ratio=ring_bwd_comm_ratio,
+            gpus_per_node=gpus_per_node,
+            alltoall_bw_consec=alltoall_bw_consec,
+            alltoall_bw_strided=alltoall_bw_strided,
+            p2p_bw_consec=p2p_bw_consec,
+            p2p_bw_strided=p2p_bw_strided,
+            alltoall_linear_consec=alltoall_lin_c,
+            alltoall_linear_strided=alltoall_lin_s,
+            p2p_linear_consec=p2p_lin_c,
+            p2p_linear_strided=p2p_lin_s,
+            p2p_ring_step_consec=p2p_ring_step_c,
+            p2p_ring_step_strided=p2p_ring_step_s,
+            p2p_ring_interp_consec=p2p_interp_c,
+            p2p_ring_interp_strided=p2p_interp_s,
+            a2a_interp_consec=a2a_interp_c,
+            a2a_interp_strided=a2a_interp_s,
+        )
+        if validation_json is not None and os.path.exists(validation_json):
+            cm.calibrate_from_validation(validation_json)
+        return cm
 
     @classmethod
     def from_unified_profile(
