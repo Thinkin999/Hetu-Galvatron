@@ -1,0 +1,96 @@
+{
+  "models": {
+    "qwen2.5-3b": {
+      "config": {
+        "n_heads": 16,
+        "n_kv_heads": 2,
+        "head_dim": 128
+      },
+      "old": {
+        "source_json": "galvatron/models/varlen_llama_hf/configs/profile_compare/qwen25_3b_old/profile_validate_qwen2.5-3b-old_20260403_175617.json",
+        "segment_count": 6,
+        "min_r_squared": 0.4464039435092976,
+        "mean_r_squared": 0.6496642340757807,
+        "mean_relative_error_pct": 29.115059589628245,
+        "max_relative_error_pct": 243.40881637663722,
+        "max_boundary_jump_pct": 59.091347693654484,
+        "mean_boundary_jump_pct": 24.682138796327717,
+        "selection_score": null,
+        "timing_std_summary": null
+      },
+      "new": {
+        "source_json": "galvatron/models/varlen_llama_hf/configs/profile_compare/qwen25_3b_new/profile_validate_qwen2.5-3b-new-v2_20260403_180122.json",
+        "segment_count": 2,
+        "min_r_squared": 0.6676264722321839,
+        "mean_r_squared": 0.7644741972107217,
+        "mean_relative_error_pct": 27.828154734206937,
+        "max_relative_error_pct": 81.67162201058242,
+        "max_boundary_jump_pct": 18.223959881350726,
+        "mean_boundary_jump_pct": 18.223959881350726,
+        "selection_score": {
+          "min_r_squared": 0.6676264722321839,
+          "max_boundary_rel_jump_pct": 18.223959881350726,
+          "mean_boundary_rel_jump_pct": 18.223959881350726
+        },
+        "timing_std_summary": {
+          "mean_std_ms": 0.25711506638133547,
+          "max_std_ms": 2.9998999517924525,
+          "median_std_ms": 0.011203255390342039
+        }
+      },
+      "deltas": {
+        "min_r_squared_delta": 0.22122252872288628,
+        "mean_r_squared_delta": 0.11480996313494107,
+        "mean_relative_error_pct_delta": -1.2869048554213087,
+        "max_boundary_jump_pct_delta": -40.86738781230376,
+        "segment_count_delta": -4
+      }
+    },
+    "qwen2.5-7b": {
+      "config": {
+        "n_heads": 28,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "old": {
+        "source_json": "galvatron/models/varlen_llama_hf/configs/profile_compare/qwen25_7b_old/profile_validate_qwen2.5-7b-old_20260403_175620.json",
+        "segment_count": 5,
+        "min_r_squared": 0.37725485451027263,
+        "mean_r_squared": 0.7103579848733493,
+        "mean_relative_error_pct": 27.182577826370398,
+        "max_relative_error_pct": 91.18988595281628,
+        "max_boundary_jump_pct": 60.63644519167205,
+        "mean_boundary_jump_pct": 33.97884116919743,
+        "selection_score": null,
+        "timing_std_summary": null
+      },
+      "new": {
+        "source_json": "galvatron/models/varlen_llama_hf/configs/profile_compare/qwen25_7b_new/profile_validate_qwen2.5-7b-new-v2_20260403_180117.json",
+        "segment_count": 3,
+        "min_r_squared": 0.6670833088214347,
+        "mean_r_squared": 0.8209141264105492,
+        "mean_relative_error_pct": 25.410205428646385,
+        "max_relative_error_pct": 91.19345075264751,
+        "max_boundary_jump_pct": 59.29996480843028,
+        "mean_boundary_jump_pct": 56.52016848290666,
+        "selection_score": {
+          "min_r_squared": 0.6670833088214347,
+          "max_boundary_rel_jump_pct": 59.29996480843054,
+          "mean_boundary_rel_jump_pct": 56.52016848290679
+        },
+        "timing_std_summary": {
+          "mean_std_ms": 0.6144460655500865,
+          "max_std_ms": 4.986182093799203,
+          "median_std_ms": 0.0142035136169315
+        }
+      },
+      "deltas": {
+        "min_r_squared_delta": 0.2898284543111621,
+        "mean_r_squared_delta": 0.11055614153719984,
+        "mean_relative_error_pct_delta": -1.7723723977240127,
+        "max_boundary_jump_pct_delta": -1.3364803832417707,
+        "segment_count_delta": -2
+      }
+    }
+  }
+}

@@ -1,0 +1,2 @@
+model,ngpus,seqlen_k,gbs,strategy,status,wall_time_s,avg_iter_time_ms,throughput_tokens_per_s,peak_activation_mb,log_file
+qwen2.5-7b,8,16,4,adacpsp,FAIL(1),29,0.000,0,0,/mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/byted_experiments/results/20260402_135409/qwen2.5-7b_gpu8_seq16k_gbs4_adacpsp.log

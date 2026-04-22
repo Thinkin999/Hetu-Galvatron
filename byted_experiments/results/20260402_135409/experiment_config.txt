@@ -1,0 +1,28 @@
+=== AdaCPSP ByteDance Experiment Configuration ===
+Timestamp:           20260402_135409
+Local Result Root:   /mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/byted_experiments/results
+Local Result Dir:    /mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/byted_experiments/results/20260402_135409
+HDFS Result Root:    hdfs://harunawl/home/byte_data_seed_wl/user/liuqingshuo
+HDFS Experiment Dir: byted_experiments
+HDFS Result Dir:     hdfs://harunawl/home/byte_data_seed_wl/user/liuqingshuo/byted_experiments/20260402_135409
+Models:              qwen2.5-7b
+Seq Lengths (K):     16
+GBS:                 4
+GPU Configs:         8
+Strategies:          adacpsp
+Learning Rate:       1e-4
+Default DP Type:     zero3
+Num Workers:         0
+Num Iters:           5
+Warmup Iters:        2
+Timeout (s):         300
+Memory Limit:        80 GB
+Dataset:             wikipedia
+Dataset Mount Dir:   <unset>
+Allocated Nodes:     1
+Allocated GPUs/node: 8
+Allocated GPUs:      8
+Node Rank:           0
+Master:              127.0.0.1:29531
+Train Script:        /mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/galvatron/models/varlen_llama_hf/train_dist_adacpsp.py
+Extra Train Args:    
