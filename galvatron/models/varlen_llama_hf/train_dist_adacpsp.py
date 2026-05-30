@@ -1140,7 +1140,22 @@ def train(args):
             profiler.profile_time_start(iter)
             profiler.profile_memory(iter, "Before Forward")
 
+            # Minimal forward_backward-only timer (CUDA events). Isolates the
+            # fwd+bwd wall time from optimizer/clip/zero_grad so we can compare
+            # multi-GPU measured fwd_bwd against the clean single-GPU compute
+            # prediction. Printed only on rank 0 for the profiled iter window.
+            _fb_t0 = torch.cuda.Event(enable_timing=True)
+            _fb_t1 = torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize()
+            _fb_t0.record()
+
             loss = model.forward_backward(batch, iter, profiler)
+
+            _fb_t1.record()
+            torch.cuda.synchronize()
+            if rank == 0:
+                _fb_ms = _fb_t0.elapsed_time(_fb_t1)
+                print(f"[FBPROF] iter={iter} fb_ms={_fb_ms:.3f}", flush=True)
             profiler.profile_memory(iter, "After Backward")
 
             total_norm = clip_grad_norm(model, args.clip_grad)
