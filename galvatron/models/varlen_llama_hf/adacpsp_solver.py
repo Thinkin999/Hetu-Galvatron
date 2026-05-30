@@ -2300,7 +2300,7 @@ class AdaCPSPOptimizer:
     # ---- Strategy pool generation ----
 
     def get_strategy_pool(self, seqs: Optional[List[Sequence]] = None,
-                           max_head_padding_factor: float = 2.0) -> List[ParallelStrategy]:
+                           max_head_padding_factor: float = float("inf")) -> List[ParallelStrategy]:
         """Generate all valid strategies: ulysses, ring, AND usp combinations.
 
         GQA Head-Padding Aware:
