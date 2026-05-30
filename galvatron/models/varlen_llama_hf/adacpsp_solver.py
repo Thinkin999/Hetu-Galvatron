@@ -296,6 +296,19 @@ class AdaCPSPCostModel:
         enable_overlap_model: bool = True,
         ring_causal_correction: bool = False,
         overlap_leakage: float = 0.1,
+        # ── CPU-exposed wrapper overheads (calibrated; see align_costmodel) ──
+        # Per-ring-step CPU/launch gap for pure Ring Attention (ms/visible step).
+        ring_step_overhead_ms: float = 0.5,
+        # Per-a2a-op CPU work in _SeqAllToAll (reshape/contiguous/autograd) that
+        # the alltoall_single primitive (pure dist.all_to_all_single) misses.
+        ulysses_a2a_overhead_ms: float = 0.20,
+        # USP-specific EXTRA per-a2a-op overhead on top of ulysses_a2a_overhead_ms
+        # (inner ZigzagRing reshapes/sync not present in pure Ulysses).
+        usp_a2a_overhead_extra_ms: float = 0.20,
+        # USP per-layer overhead modeled as base + per_sp * sp_size (absorbs
+        # un-modeled reshape/contiguous kernels that grow with sp).
+        usp_layer_overhead_base_ms: float = 1.0,
+        usp_layer_overhead_per_sp_ms: float = 0.80,
         # ── Placement-aware topology bandwidth data ──
         gpus_per_node: int = 8,
         # Topology-split bandwidth dicts: {group_size: bandwidth_GBs}
@@ -308,6 +321,12 @@ class AdaCPSPCostModel:
         alltoall_linear_strided: Optional[Dict[int, Dict[str, float]]] = None,
         p2p_linear_consec: Optional[Dict[int, Dict[str, float]]] = None,
         p2p_linear_strided: Optional[Dict[int, Dict[str, float]]] = None,
+        # Primitive communication profile v2:
+        #   {primitive: {"gs<N>_<topo>": {"points": [(msg_MB, time_ms)],
+        #                                 "linear_fit": {"alpha","beta"}}}}
+        # Used by _comm_v2_time as the priority-0 lookup with small-message
+        # latency-floor semantics (see _comm_v2_time docstring).
+        comm_v2: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
                  ):
         self.N = cluster_size
         self.h = hidden_size
@@ -320,6 +339,34 @@ class AdaCPSPCostModel:
         self.enable_overlap_model = enable_overlap_model
         self.ring_causal_correction = ring_causal_correction
         self.overlap_leakage = overlap_leakage
+        # CPU-exposed wrapper overheads (calibrated defaults).
+        self.ring_step_overhead_ms = ring_step_overhead_ms
+        self.ulysses_a2a_overhead_ms = ulysses_a2a_overhead_ms
+        self.usp_a2a_overhead_extra_ms = usp_a2a_overhead_extra_ms
+        self.usp_layer_overhead_base_ms = usp_layer_overhead_base_ms
+        self.usp_layer_overhead_per_sp_ms = usp_layer_overhead_per_sp_ms
+        # Primitive comm profile v2 lookup table (empty = fall back to v1 paths).
+        self.comm_v2 = comm_v2 or {}
+
+        # ── Non-attention residual + per-step constants ──
+        # Safe defaults so the model is usable before apply_residual_profile /
+        # apply_b_decomp_profile are called (those methods override these).
+        # residual_ms(group) = a(sp) * tokens_per_GPU + b(sp); 0 → disabled.
+        if not hasattr(self, "residual_a_default_per_token"):
+            self.residual_a_default_per_token = 0.0
+        if not hasattr(self, "residual_a_per_sp"):
+            self.residual_a_per_sp = {}
+        if not hasattr(self, "residual_b_default_ms"):
+            self.residual_b_default_ms = 0.0
+        if not hasattr(self, "residual_b_per_sp"):
+            self.residual_b_per_sp = {}
+        # Per-step forward_backward constant K(sp) and external (optimizer etc.).
+        if not hasattr(self, "b_step_fb_per_sp"):
+            self.b_step_fb_per_sp = {}
+        if not hasattr(self, "b_step_fb_default_ms"):
+            self.b_step_fb_default_ms = 0.0
+        if not hasattr(self, "b_step_external_ms"):
+            self.b_step_external_ms = 0.0
 
         # GQA: KV hidden dim for communication sizing
         self.head_dim = head_dim
@@ -656,13 +703,122 @@ class AdaCPSPCostModel:
 
     # ---- Communication ----
 
+    def _comm_v2_time(self, primitive: str, group_size: int, topo: str,
+                      msg_mb: float) -> Optional[float]:
+        """Lookup primitive communication time from comm_profile_v2.
+
+        v2 keeps profile semantics simple:
+          primitive + group_size + topology + message_MB -> time_ms
+
+        The cost model is responsible for translating Ulysses/Ring/USP tensor
+        shapes, GQA padding, and K/V pairing into message_MB before calling this
+        function.
+
+        Lookup policy (priority):
+          1. Interpolate within the measured range [min(xs), max(xs)].
+          2. BELOW the measured range: return the *latency floor* (pts[0][1]).
+             Rationale: below ~0.25 MB the NCCL P2P/AlltoAll cost is dominated
+             by a flat per-op latency (kernel launch + sync + RDMA latency).
+             A linear fit derived from large-message points has an inflated
+             intercept (e.g. beta=0.50 ms for p2p_kv_pair gs8, vs. measured
+             0.18 ms at 0.25 MB → 2.8x overestimate). Using the floor matches
+             observed behaviour at small ring/USP messages.
+          3. ABOVE the measured range: extrapolate with the linear fit (the
+             bandwidth-bound regime is well captured by the slope).
+        """
+        primitive_data = self.comm_v2.get(primitive)
+        if not primitive_data:
+            return None
+        key = f"gs{group_size}_{topo}"
+        entry = primitive_data.get(key)
+        if not entry:
+            return None
+
+        points = entry.get("points") or []
+        pts = [(float(x), float(y)) for x, y in points] if points else []
+
+        if pts:
+            xs = [x for x, _ in pts]
+            min_x, max_x = min(xs), max(xs)
+            if min_x <= msg_mb <= max_x:
+                return self._interp_lookup(msg_mb, pts)
+            # Below measured range → use the latency floor.
+            if msg_mb < min_x:
+                # Return the time observed at the smallest measured point. This
+                # is an upper bound on the true cost at smaller messages (which
+                # are launch-latency bound) and is far closer to reality than
+                # extrapolating a fit dominated by larger messages.
+                return pts[0][1]
+            # Above measured range → fall through to linear fit if available.
+
+        fit = entry.get("linear_fit")
+        if fit is not None:
+            alpha = fit.get("alpha", fit.get("alpha_ms_per_MB"))
+            beta = fit.get("beta", fit.get("beta_ms", 0.0))
+            if alpha is not None:
+                return max(0.0, float(alpha) * msg_mb + float(beta))
+
+        if pts:
+            return self._interp_lookup(msg_mb, pts)
+        return None
+
+    @staticmethod
+    def _load_comm_v2(comm_data: dict) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Parse a comm_profile_v2 JSON into the nested lookup table consumed by
+        ``_comm_v2_time``:
+
+            {primitive: {"gs<N>_<topo>": {"points": [(msg_MB, time_ms), ...],
+                                          "linear_fit": {"alpha","beta"}}}}
+
+        The v2 JSON layout is::
+
+            { "type": "comm_profile_v2",
+              "primitives": {
+                 "alltoall_single": {"results": {"gs2_consecutive": {
+                     "points": [{"message_MB":.., "time_ms":..}, ...],
+                     "linear_fit": {"alpha":.., "beta":..}    # optional
+                 }, ...}},
+                 "p2p_kv_pair": {...}, "p2p_sendrecv": {...} } }
+        """
+        out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        primitives = comm_data.get("primitives", {}) or {}
+        for prim_name, prim_body in primitives.items():
+            if not isinstance(prim_body, dict):
+                continue
+            results = prim_body.get("results", {}) or {}
+            entry_map: Dict[str, Dict[str, Any]] = {}
+            for key, rec in results.items():
+                if not isinstance(rec, dict):
+                    continue
+                pts = []
+                for p in rec.get("points", []) or []:
+                    mb = p.get("message_MB", p.get("requested_message_MB"))
+                    ms = p.get("time_ms")
+                    if mb is not None and ms is not None:
+                        pts.append((float(mb), float(ms)))
+                pts.sort()
+                entry: Dict[str, Any] = {"points": pts}
+                lf = rec.get("linear_fit")
+                if isinstance(lf, dict):
+                    entry["linear_fit"] = lf
+                entry_map[key] = entry
+            if entry_map:
+                out[prim_name] = entry_map
+        return out
+
     def _a2a_per_op_time(self, msg_mb: float, sp_size: int,
                           topo: str = "consecutive") -> float:
         """Get per-op A2A time (ms) with cascading fallback.
         
-        Priority: topology-aware linear fit → generic interpolation →
-                  generic linear fit → topology-aware BW → generic BW.
+        Priority: comm_v2 primitive lookup (latency-floor aware) → topology-aware
+                  linear fit → generic interpolation → generic linear fit →
+                  topology-aware BW → generic BW.
         """
+        # Priority 0: comm_profile_v2 primitive lookup (alltoall_single).
+        v2 = self._comm_v2_time("alltoall_single", sp_size, topo, msg_mb)
+        if v2 is not None:
+            return v2
+
         # Priority 1: Topology-aware linear fit
         topo_lin = self._select_a2a_linear(topo)
         if topo_lin and sp_size in topo_lin:
@@ -729,9 +885,17 @@ class AdaCPSPCostModel:
                              topo: str = "consecutive") -> float:
         """Get per-step ring comm time (ms) with cascading fallback.
         
-        Priority: topology-aware P2P linear fit → generic interpolation →
+        Priority: comm_v2 p2p_kv_pair lookup (latency-floor aware) →
+                  topology-aware P2P linear fit → generic interpolation →
                   ring-step fit → generic P2P fit → topology-aware BW → generic BW.
         """
+        # Priority 0: comm_profile_v2 primitive lookup (p2p_kv_pair). One ring
+        # step exchanges a K/V pair, which is exactly what this primitive
+        # measured; kv_per_step_mb is the (2× single-KV) message volume.
+        v2 = self._comm_v2_time("p2p_kv_pair", cp_size, topo, kv_per_step_mb)
+        if v2 is not None:
+            return v2
+
         # Priority 1: Topology-aware P2P linear fit
         topo_lin = self._select_p2p_linear(topo)
         if topo_lin and cp_size in topo_lin:
@@ -1449,8 +1613,10 @@ class AdaCPSPCostModel:
         with open(comm_profile_json, "r") as f:
             comm_data = json.load(f)
 
-        if "alltoall" not in comm_data or "p2p_ring" not in comm_data:
-            raise ValueError(f"{comm_profile_json} is not a unified communication profile")
+        # Detect comm profile format: v2 (primitive-based, latency-floor aware)
+        # vs. legacy "unified" (alltoall/p2p_ring bandwidth dicts).
+        is_comm_v2 = (comm_data.get("type") == "comm_profile_v2"
+                      or "primitives" in comm_data)
 
         piecewise = []
         if "coefficients" in attn_data:
@@ -1466,21 +1632,42 @@ class AdaCPSPCostModel:
             piecewise = attn_data["attention"]["segments"]
 
         config = attn_data.get("config", attn_data.get("attention", {}).get("config", {}))
-        a2a_data = comm_data["alltoall"]
-        p2p_data = comm_data["p2p_ring"]
 
-        alltoall_bw = {int(k): v for k, v in a2a_data["bandwidth_dict_GBs"].items()}
-        p2p_bw = {int(k): v for k, v in p2p_data["bandwidth_dict_GBs"].items()}
+        # v1/v2 comm data. For v2 we populate `comm_v2` (priority-0 lookup with
+        # small-message latency floor) and leave the legacy bandwidth/linear
+        # dicts as defaults; for legacy unified profiles we extract the
+        # bandwidth/linear/interp tables as before.
+        comm_v2: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        alltoall_bw = None
+        p2p_bw = None
+        alltoall_bw_consec = alltoall_bw_strided = None
+        p2p_bw_consec = p2p_bw_strided = None
+        alltoall_lin_c = alltoall_lin_s = None
+        p2p_lin_c = p2p_lin_s = None
+        p2p_ring_step_c = p2p_ring_step_s = None
+        a2a_interp_c = a2a_interp_s = None
+        p2p_interp_c = p2p_interp_s = None
 
-        alltoall_bw_consec = cls._load_topo_bw(a2a_data, "bandwidth_dict_consec_GBs")
-        alltoall_bw_strided = cls._load_topo_bw(a2a_data, "bandwidth_dict_strided_GBs")
-        p2p_bw_consec = cls._load_topo_bw(p2p_data, "bandwidth_dict_consec_GBs")
-        p2p_bw_strided = cls._load_topo_bw(p2p_data, "bandwidth_dict_strided_GBs")
-        alltoall_lin_c, alltoall_lin_s = cls._load_topo_linear_fits(a2a_data)
-        p2p_lin_c, p2p_lin_s = cls._load_topo_linear_fits(p2p_data)
-        p2p_ring_step_c, p2p_ring_step_s = cls._load_named_topo_fits(p2p_data, "ring_step_fits")
-        a2a_interp_c, a2a_interp_s = cls._load_topo_interp_tables(a2a_data)
-        p2p_interp_c, p2p_interp_s = cls._load_topo_interp_tables(p2p_data)
+        if is_comm_v2:
+            comm_v2 = cls._load_comm_v2(comm_data)
+        else:
+            if "alltoall" not in comm_data or "p2p_ring" not in comm_data:
+                raise ValueError(f"{comm_profile_json} is not a unified communication profile")
+            a2a_data = comm_data["alltoall"]
+            p2p_data = comm_data["p2p_ring"]
+
+            alltoall_bw = {int(k): v for k, v in a2a_data["bandwidth_dict_GBs"].items()}
+            p2p_bw = {int(k): v for k, v in p2p_data["bandwidth_dict_GBs"].items()}
+
+            alltoall_bw_consec = cls._load_topo_bw(a2a_data, "bandwidth_dict_consec_GBs")
+            alltoall_bw_strided = cls._load_topo_bw(a2a_data, "bandwidth_dict_strided_GBs")
+            p2p_bw_consec = cls._load_topo_bw(p2p_data, "bandwidth_dict_consec_GBs")
+            p2p_bw_strided = cls._load_topo_bw(p2p_data, "bandwidth_dict_strided_GBs")
+            alltoall_lin_c, alltoall_lin_s = cls._load_topo_linear_fits(a2a_data)
+            p2p_lin_c, p2p_lin_s = cls._load_topo_linear_fits(p2p_data)
+            p2p_ring_step_c, p2p_ring_step_s = cls._load_named_topo_fits(p2p_data, "ring_step_fits")
+            a2a_interp_c, a2a_interp_s = cls._load_topo_interp_tables(a2a_data)
+            p2p_interp_c, p2p_interp_s = cls._load_topo_interp_tables(p2p_data)
 
         bwd_fwd_ratio = 2.0
         ring_bwd_comm_ratio = 2.0
@@ -1536,6 +1723,7 @@ class AdaCPSPCostModel:
             p2p_ring_interp_strided=p2p_interp_s,
             a2a_interp_consec=a2a_interp_c,
             a2a_interp_strided=a2a_interp_s,
+            comm_v2=comm_v2,
         )
         if validation_json is not None and os.path.exists(validation_json):
             cm.calibrate_from_validation(validation_json)
