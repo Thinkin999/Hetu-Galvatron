@@ -1,0 +1,39 @@
+{
+  "schema": "adacpsp_b_decomp_v1",
+  "source_run": "zero2_estimated_20260528",
+  "notes": [
+    "Estimated b_decomp profile for ZeRO-2 mode.",
+    "Keeps a_per_token from ZeRO-3 (combined_20260526) - non-attention compute does not depend on FSDP mode.",
+    "Replaces b_step_fb_per_sp with b_step_external_ms (22ms) since ZeRO-2 has no per-microbatch all-gather overhead.",
+    "This is a quick estimate; refit with a ZeRO-2 b_decomp benchmark for production accuracy."
+  ],
+  "stripped_residual": "residual_profile_live_20260526_102004.json",
+  "fit_window": "chunks>=2 (chunks=1 outlier with FSDP fast-path); ZeRO-2 mode",
+  "residual_per_sp": {
+    "1": {
+      "a_per_token": 0.1972498861257191,
+      "b_microbatch_ms": 0.0,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "per_mb_residual_total_ms": 1615.8710671418908
+    },
+    "8": {
+      "a_per_token": 0.11564746997214942,
+      "b_microbatch_ms": 0.0,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "per_mb_residual_total_ms": 947.384074011848
+    }
+  },
+  "b_step_fb_per_sp_clean": {
+    "1": 22.3,
+    "8": 22.3
+  },
+  "b_step_fb_per_sp_steady": {
+    "1": 22.3,
+    "8": 22.3
+  },
+  "b_step_fb_ms_clean": 22.3,
+  "b_step_fb_ms_steady": 22.3,
+  "b_step_external_ms": 22.3136767745018
+}

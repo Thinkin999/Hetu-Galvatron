@@ -46,12 +46,12 @@ def test_parallel_strategy_placement():
 
 
 def test_ulysses_ring_placement_fixed():
-    """Ulysses and Ring strategies always use context_first."""
+    """Pure Ulysses uses head_first; pure Ring uses context_first."""
     s_u = ParallelStrategy("ulysses", 8)
     s_r = ParallelStrategy("ring", 8)
-    assert s_u.placement == "context_first"
+    assert s_u.placement == "head_first"
     assert s_r.placement == "context_first"
-    print("  [PASS] Ulysses/Ring placement fixed to context_first")
+    print("  [PASS] Ulysses/Ring placement fixed")
 
 
 def test_costmodel_topo_routing():

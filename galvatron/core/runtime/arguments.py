@@ -274,6 +274,14 @@ def galvatron_training_args(parser, use_megatron=True):
         help="Force heterogeneous groups for testing, e.g. 'ulysses:4,ring:4'",
     )
     group.add_argument(
+        "--adaCPSP-forced-chunks", type=int, default=1,
+        help="Number of sequential microbatches to emit when --adaCPSP-forced-strategy "
+             "is set. Sequences in the global batch are round-robin partitioned into "
+             "this many microbatches, each running the same forced group layout. Used "
+             "for b-term decomposition (per-microbatch vs per-step overhead) and "
+             "multi-microbatch validation. Ignored when forced-strategy is None.",
+    )
+    group.add_argument(
         "--adaCPSP-attn-types", type=str, nargs="+",
         default=["ulysses", "ring", "usp"],
         choices=["ulysses", "ring", "usp"],

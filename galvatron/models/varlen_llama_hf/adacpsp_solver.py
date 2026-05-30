@@ -690,19 +690,28 @@ class AdaCPSPCostModel:
 
     def alltoall_time(self, seqlens: List[int], sp_size: int,
                       topo: str = "consecutive") -> float:
-        """All-to-All communication time (ms) for Ulysses SP."""
+        """All-to-All communication time (ms) for Ulysses SP.
+
+        Adds ``ulysses_a2a_overhead_ms`` (default 0.30 ms) per a2a op to
+        account for the Python/autograd/reshape CPU work in
+        ``_SeqAllToAll.apply`` that the v2 ``alltoall_single`` primitive
+        (pure ``dist.all_to_all_single``) does not capture.
+        """
         if sp_size <= 1:
             return 0.0
         total_tokens = sum(seqlens)
         q_factor, kv_factor = self.head_padding_overhead(sp_size)
         qo_msg_mb = self.h * q_factor * total_tokens * 2 / 1024 / 1024 / sp_size
         kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / sp_size
+        # 4 QO ops per layer × 2 (fwd+bwd): Q a2a + O a2a fwd, dQ + dO bwd.
+        # Same for KV (4 ops/layer × 2 directions).
         num_qo_ops = 2 * 2 * self.l
         num_kv_ops = 2 * 2 * self.l
 
         qo_time = self._a2a_per_op_time(qo_msg_mb, sp_size, topo)
         kv_time = self._a2a_per_op_time(kv_msg_mb, sp_size, topo)
-        return qo_time * num_qo_ops + kv_time * num_kv_ops
+        overhead_ms = self.ulysses_a2a_overhead_ms * (num_qo_ops + num_kv_ops)
+        return qo_time * num_qo_ops + kv_time * num_kv_ops + overhead_ms
 
     def p2p_ring_time(self, seqlens: List[int], cp_size: int,
                       topo: str = "consecutive") -> float:
@@ -767,6 +776,12 @@ class AdaCPSPCostModel:
 
         Placement determines which communication primitive gets the faster
         (consecutive/intra-node) topology and which gets the slower (strided).
+
+        Includes:
+          * ``ulysses_a2a_overhead_ms`` per a2a op (CPU work in _SeqAllToAll
+            that v2 alltoall_single profile does not capture).
+          * ``ring_step_overhead_ms`` per ring step (CPU launch / autograd /
+            stream-sync gap between consecutive ring p2p steps).
         """
         a2a_topo = self._get_topo(placement, "alltoall")
         ring_topo = self._get_topo(placement, "ring")
@@ -788,15 +803,26 @@ class AdaCPSPCostModel:
         qo_per_op = self._a2a_per_op_time(qo_msg_mb, sp_size, a2a_topo)
         kv_per_op = self._a2a_per_op_time(kv_msg_mb, sp_size, a2a_topo)
         a2a_time = qo_per_op * num_qo_ops + kv_per_op * num_kv_ops
+        # Pure Ulysses CPU + USP-specific extra (extra reshape/bookkeeping)
+        a2a_time += (self.ulysses_a2a_overhead_ms + self.usp_a2a_overhead_extra_ms) \
+                     * (num_qo_ops + num_kv_ops)
 
         padded_kv_hidden = self.kv_hidden * kv_factor
         kv_hidden_after_uly = padded_kv_hidden / sp_size
         single_kv_mb = (total_tokens / cp_size) * kv_hidden_after_uly * 2 / 1024 / 1024
         kv_per_step_mb = 2 * single_kv_mb
         per_step_time = self._ring_per_step_time(kv_per_step_mb, cp_size, ring_topo)
-        p2p_time = per_step_time * (cp_size - 1) * self.l
+        # fwd has (cp-1) steps, bwd has (cp-1) steps with ring_bwd_comm_ratio scale.
+        # Same per-step CPU overhead applies to both directions.
+        steps_fwd = (cp_size - 1) * self.l
+        steps_bwd = (cp_size - 1) * self.l
+        p2p_time = (per_step_time + self.ring_step_overhead_ms) * steps_fwd \
+                    + (per_step_time * self.ring_bwd_comm_ratio
+                        + self.ring_step_overhead_ms) * steps_bwd
 
-        return a2a_time + p2p_time
+        layer_extra = (self.usp_layer_overhead_base_ms
+                       + self.usp_layer_overhead_per_sp_ms * sp_size) * self.l
+        return a2a_time + p2p_time + layer_extra
 
     def comm_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
         """Communication time for a strategy."""
@@ -910,13 +936,48 @@ class AdaCPSPCostModel:
         fwd_per_layer = a2a_fwd_per_layer + ring_fwd_per_layer
         bwd_per_layer = a2a_bwd_per_layer + ring_bwd_per_layer
 
-        return (fwd_per_layer + bwd_per_layer) * self.l
+        layer_extra = (self.usp_layer_overhead_base_ms
+                       + self.usp_layer_overhead_per_sp_ms * sp_size) * self.l
+        return (fwd_per_layer + bwd_per_layer) * self.l + layer_extra
 
     # ---- Total time ----
 
+    def residual_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
+        """Non-attention residual time for a group (ms).
+
+        Models MLP + LN + embedding + LM head + per-step FSDP comm tail using
+            residual = a(sp) * tokens_per_GPU + b(sp)
+        Defaults to 0 if calibration coefficients were not provided.
+        """
+        if (self.residual_a_default_per_token == 0.0 and not self.residual_a_per_sp
+                and self.residual_b_default_ms == 0.0 and not self.residual_b_per_sp):
+            return 0.0
+        total_tokens = sum(seqlens) if seqlens else 0
+        parallel_size = max(1, int(strategy.parallel_size))
+        tokens_per_gpu = total_tokens / parallel_size
+        sp = int(strategy.sp_size) if strategy.attn_type in ("ulysses", "usp") else 1
+        a = self.residual_a_per_sp.get(sp, self.residual_a_default_per_token)
+        b = self.residual_b_per_sp.get(sp, self.residual_b_default_ms)
+        return a * tokens_per_gpu + b
+
+    def _residual_b(self, strategy: ParallelStrategy) -> float:
+        sp = int(strategy.sp_size) if strategy.attn_type in ("ulysses", "usp") else 1
+        return self.residual_b_per_sp.get(sp, self.residual_b_default_ms)
+
     def total_time_single(self, seqlen: int, strategy: ParallelStrategy) -> float:
-        """Total time for a single sequence (fwd + bwd, all layers)."""
-        return self.total_time([seqlen], strategy)
+        """Total time for a single sequence (fwd + bwd, all layers).
+
+        Used by ILP to score per-sequence cost when summing across sequences in
+        a candidate group; the per-group residual constant `b(sp)` is therefore
+        excluded here (it would otherwise be summed N times). Only the linear
+        per-token component of the residual is charged. The final group cost
+        always uses `total_time(...)` which restores the full residual.
+        """
+        base = self.total_time([seqlen], strategy)
+        if (self.residual_a_default_per_token == 0.0 and not self.residual_a_per_sp
+                and self.residual_b_default_ms == 0.0 and not self.residual_b_per_sp):
+            return base
+        return base - self._residual_b(strategy)
 
     def total_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
         """Total time for a set of sequences in one group (fwd + bwd, all layers).
@@ -930,9 +991,9 @@ class AdaCPSPCostModel:
         Note: Ring additive model still correctly accounts for cp ring steps.
         """
         if self.enable_overlap_model and strategy.attn_type == "ring":
-            return self._total_time_ring_overlap(seqlens, strategy)
+            return self._total_time_ring_overlap(seqlens, strategy) + self.residual_time(seqlens, strategy)
         elif self.enable_overlap_model and strategy.attn_type == "usp":
-            return self._total_time_usp_overlap(seqlens, strategy)
+            return self._total_time_usp_overlap(seqlens, strategy) + self.residual_time(seqlens, strategy)
         elif strategy.attn_type == "ring":
             cp = strategy.cp_size
             ring_topo = self._get_topo(strategy.placement, "ring")
@@ -941,7 +1002,7 @@ class AdaCPSPCostModel:
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
             fwd_ring_comm = self.p2p_ring_time(seqlens, cp, ring_topo)
             total_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
-            return total_compute + total_comm
+            return total_compute + total_comm + self.residual_time(seqlens, strategy)
         elif strategy.attn_type == "usp":
             sp, cp = strategy.sp_size, strategy.cp_size
             placement = strategy.placement
@@ -958,19 +1019,28 @@ class AdaCPSPCostModel:
             kv_msg_mb = self.kv_hidden * kv_factor * total_tokens * 2 / 1024 / 1024 / parallel_size
             qo_a2a = self._a2a_per_op_time(qo_msg_mb, sp, a2a_topo)
             kv_a2a = self._a2a_per_op_time(kv_msg_mb, sp, a2a_topo)
-            a2a_comm = (2 * qo_a2a + 2 * kv_a2a) * 2 * self.l
+            # 4 QO + 4 KV ops per layer (fwd+bwd) plus per-op Ulysses + USP extras.
+            num_qo_ops = 2 * 2 * self.l
+            num_kv_ops = 2 * 2 * self.l
+            per_op_cpu = self.ulysses_a2a_overhead_ms + self.usp_a2a_overhead_extra_ms
+            a2a_comm = (qo_a2a * num_qo_ops + kv_a2a * num_kv_ops
+                        + per_op_cpu * (num_qo_ops + num_kv_ops))
 
             kv_h = self.kv_hidden * kv_factor / sp
             fwd_comm = self._p2p_fwd_comm_per_step(total_tokens, cp, kv_h, ring_topo)
             fwd_ring_comm = fwd_comm * (cp - 1) * self.l
             total_ring_comm = fwd_ring_comm * (1 + self.ring_bwd_comm_ratio)
-            return total_compute + a2a_comm + total_ring_comm
+            # Per-step ring overhead: (cp-1) steps for fwd, (cp-1) for bwd.
+            total_ring_comm += self.ring_step_overhead_ms * (cp - 1) * 2 * self.l
+            layer_extra = (self.usp_layer_overhead_base_ms
+                           + self.usp_layer_overhead_per_sp_ms * sp) * self.l
+            return total_compute + a2a_comm + total_ring_comm + layer_extra + self.residual_time(seqlens, strategy)
         else:
             # Ulysses or legacy additive model
             # compute_time is fwd-only (1 call per layer); multiply by (1+bwd_fwd_ratio)
             fwd_compute = self.compute_time(seqlens, strategy)
             total_compute = fwd_compute * (1 + self.bwd_fwd_ratio)
-            return total_compute + self.comm_time(seqlens, strategy)
+            return total_compute + self.comm_time(seqlens, strategy) + self.residual_time(seqlens, strategy)
 
     # ---- Memory ----
 
@@ -1054,6 +1124,160 @@ class AdaCPSPCostModel:
                       f"{'compute-bound' if step_compute * self.bwd_fwd_ratio > bwd_comm_step else 'comm-bound'}")
         print(f"  Mem (MB):      {mem:.1f}")
     
+    def apply_residual_profile(self, residual_profile: Dict[str, Any]) -> None:
+        """Load residual coefficients from a `residual_profile_*.json` dict.
+
+        Schema (`adacpsp_residual_v1`):
+            {
+              "residual_a_default_per_token": float,
+              "residual_b_default_ms": float,
+              "residual_per_sp": {"<sp>": {"a_per_token": float, "b_ms": float}}
+            }
+        Existing in-memory values are overwritten.
+        """
+        if not isinstance(residual_profile, dict):
+            return
+        self.residual_a_default_per_token = float(
+            residual_profile.get("residual_a_default_per_token", 0.0))
+        self.residual_b_default_ms = float(
+            residual_profile.get("residual_b_default_ms", 0.0))
+        per_sp = residual_profile.get("residual_per_sp", {}) or {}
+        self.residual_a_per_sp = {int(k): float(v["a_per_token"])
+                                  for k, v in per_sp.items()
+                                  if "a_per_token" in v}
+        self.residual_b_per_sp = {int(k): float(v["b_ms"])
+                                  for k, v in per_sp.items()
+                                  if "b_ms" in v}
+
+    def apply_b_decomp_profile(
+        self,
+        b_decomp_profile: Dict[str, Any],
+        prefer: str = "clean",
+    ) -> None:
+        """Load b-decomposition coefficients from a `b_decomp.json` dict.
+
+        Schema (`adacpsp_b_decomp_v1`):
+            {
+              "b_step_fb_per_sp_clean":  {"<sp>": float},  # primary: per-sp fb step constant
+              "b_step_fb_per_sp_steady": {"<sp>": float},
+              "b_step_fb_ms_clean":   float,  # fallback default (median across sps)
+              "b_step_fb_ms_steady":  float,
+              "b_step_external_ms":   float,  # optimizer/grad_clip/zero_grad medians
+              "residual_per_sp": {
+                  "<sp>": {
+                      "a_per_token":     float,  # optional override of residual a
+                      "b_microbatch_ms": float,  # optional override of residual b
+                      "per_mb_residual_total_ms": float,  # combined a*tokens+b_mb
+                      "calibrated_at_tokens_per_gpu": float,
+                  }
+              }
+            }
+
+        We charge b_step_fb at the end of `predicted_total_ms`; the per-mb
+        residual (a*tokens + b_microbatch) is still applied inside `total_time`
+        as before.
+
+        Args:
+            prefer: 'clean' or 'steady' — which b_step_fb estimator to use.
+        """
+        if not isinstance(b_decomp_profile, dict):
+            return
+        per_sp_key = ("b_step_fb_per_sp_clean" if prefer == "clean"
+                      else "b_step_fb_per_sp_steady")
+        default_key = ("b_step_fb_ms_clean" if prefer == "clean"
+                       else "b_step_fb_ms_steady")
+        per_sp_b_step = b_decomp_profile.get(per_sp_key, {}) or {}
+        self.b_step_fb_per_sp = {int(k): float(v) for k, v in per_sp_b_step.items()}
+        self.b_step_fb_default_ms = float(b_decomp_profile.get(default_key, 0.0))
+        self.b_step_external_ms = float(b_decomp_profile.get("b_step_external_ms", 0.0))
+
+        # Optional per-sp residual overrides: when b_decomp was re-fit with
+        # the new training environment (e.g. forward_prefetch=True), the
+        # implied a_per_token / b_microbatch may differ from
+        # `residual_profile_*.json`. The b_decomp profile takes precedence
+        # for entries it provides; other sps keep their existing values.
+        per_sp = b_decomp_profile.get("residual_per_sp", {}) or {}
+        for sp_str, entry in per_sp.items():
+            sp = int(sp_str)
+            if "a_per_token" in entry:
+                self.residual_a_per_sp[sp] = float(entry["a_per_token"])
+            if "b_microbatch_ms" in entry:
+                self.residual_b_per_sp[sp] = float(entry["b_microbatch_ms"])
+
+    def b_step_fb_ms_for_strategies(self, sp_values: List[int]) -> float:
+        """Return the per-step FB constant for a step running given sp values.
+
+        Heuristic split between homogeneous and heterogeneous steps:
+
+        * Homogeneous step (every microbatch uses the SAME sp): the per-step
+          overhead K(sp) calibrated against the forced single-strategy
+          benchmark cells (ulysses8/ring8/usp2x4) is added in full.  These
+          calibration values absorb things that we cannot otherwise predict
+          for a *uniform* step: CPU-exposed launch overhead for the repeated
+          A2A pattern, FSDP step bookkeeping that scales with sp, etc.
+
+        * Heterogeneous step (mix of sps -- AdaCPSP's solver-chosen
+          microbatches typically include sp=1 + a few higher-sp groups): the
+          full per-sp K(sp) does NOT apply -- different groups run in
+          parallel on disjoint rank-subsets, so the CPU pipeline is much
+          better hidden than in homogeneous steps.  Empirically (see
+          ghmb_zero2_precreate_full 14-iter median: K_eff = 22 ms for cauto
+          vs 441-745 ms for forced cells), the effective K_step in mixed
+          steps is essentially the default per-step external overhead and
+          NOT the per-sp calibration.
+
+        For homogeneous steps where target sp is between calibration points
+        (e.g. sp=4 with table at {1, 2, 8}), interpolate linearly in sp.
+        """
+        if not self.b_step_fb_per_sp or not sp_values:
+            return float(self.b_step_fb_default_ms)
+
+        unique_sps = sorted({int(sp) for sp in sp_values})
+        # Heterogeneous step: forced per-sp K does not apply, fall back to
+        # the default per-step external overhead. This preserves the strong
+        # accuracy on AdaCPSP-auto (which is the production scenario the
+        # solver actually drives) while keeping per-sp K active for the
+        # forced single-strategy validation cells.
+        if len(unique_sps) > 1:
+            return float(self.b_step_fb_default_ms)
+
+        target_sp = unique_sps[0]
+        if target_sp in self.b_step_fb_per_sp:
+            return float(self.b_step_fb_per_sp[target_sp])
+        items = sorted(self.b_step_fb_per_sp.items())
+        if len(items) == 1:
+            return float(items[0][1])
+        if target_sp <= items[0][0]:
+            return float(items[0][1])
+        if target_sp >= items[-1][0]:
+            return float(items[-1][1])
+        for (lo_sp, lo_v), (hi_sp, hi_v) in zip(items[:-1], items[1:]):
+            if lo_sp <= target_sp <= hi_sp:
+                t = (target_sp - lo_sp) / (hi_sp - lo_sp)
+                return float(lo_v + t * (hi_v - lo_v))
+        return float(self.b_step_fb_default_ms)
+
+    def step_total_time_ms(
+        self,
+        per_microbatch_ms: List[float],
+        sp_values: List[int] = None,
+        include_external: bool = False,
+    ) -> float:
+        """Compose per-microbatch costs into a per-step prediction.
+
+        T_step = sum(per_microbatch_ms) + b_step_fb(sp)
+                 (+ b_step_external_ms if include_external)
+
+        `per_microbatch_ms` should be the max-over-groups cost for each
+        microbatch. `sp_values` is the list of sp sizes used across the step,
+        from which we pick the appropriate b_step_fb entry.
+        """
+        total = float(sum(per_microbatch_ms))
+        total += self.b_step_fb_ms_for_strategies(sp_values or [])
+        if include_external:
+            total += float(self.b_step_external_ms)
+        return total
+
     @classmethod
     def from_profile_files(
         cls,
@@ -1113,10 +1337,20 @@ class AdaCPSPCostModel:
                 if ratios:
                     ring_bwd_comm_ratio = sum(ratios) / len(ratios)
 
+        # num_layers: prefer config (newer profile schema), fall back to
+        # top-level (legacy), then to 32. Older profiles missing this field
+        # silently defaulted to LLaMA-7B's L=32, which caused systematic
+        # over-prediction for Qwen 2.5-7B (L=28). Train scripts can also
+        # pass layer_num explicitly to override.
+        config_num_layers = config.get("num_layers")
+        toplevel_num_layers = attn_data.get("num_layers")
+        layer_num_resolved = (config_num_layers if config_num_layers
+                              else toplevel_num_layers if toplevel_num_layers
+                              else 32)
         return cls(
             cluster_size=cluster_size,
             hidden_size=config.get("hidden_size", 4096),
-            layer_num=attn_data.get("num_layers", 32),
+            layer_num=layer_num_resolved,
             param_size_B=param_size_B,
             zero_stage=zero_stage,
             act_per_token=act_per_token,
@@ -1261,10 +1495,16 @@ class AdaCPSPCostModel:
                 if ratios:
                     ring_bwd_comm_ratio = sum(ratios) / len(ratios)
 
+        # See same-named helper above for layer_num resolution rationale.
+        config_num_layers = config.get("num_layers")
+        toplevel_num_layers = attn_data.get("num_layers")
+        layer_num_resolved = (config_num_layers if config_num_layers
+                              else toplevel_num_layers if toplevel_num_layers
+                              else 32)
         cm = cls(
             cluster_size=cluster_size,
             hidden_size=config.get("hidden_size", 4096),
-            layer_num=attn_data.get("num_layers", 32),
+            layer_num=layer_num_resolved,
             param_size_B=param_size_B,
             zero_stage=zero_stage,
             act_per_token=act_per_token,
@@ -3168,6 +3408,11 @@ class AdaCPSPOptimizer:
         """
         mb_num = self.get_min_valid_microbatch_num(seqs_gb, chunk_alg)
 
+        # Pickle the fully calibrated optimizer ONCE so every worker
+        # receives the identical, complete cost model used by the parent.
+        # (See _reconstruct_optimizer_from_pickle for the rationale.)
+        optimizer_bytes = _pickle_optimizer_for_workers(self)
+
         while True:
             self._log(f"\n=========== Trying microbatch size = {mb_num} (MP) ===========")
             seqs_mb_all = chunk_globalbatch(seqs_gb, mb_num, chunk_alg)
@@ -3182,22 +3427,9 @@ class AdaCPSPOptimizer:
 
             async_results = [
                 pool.apply_async(_mp_worker, args=(
-                    seqs_mb_ser, stop_flag, self.hide_output,
+                    seqs_mb_ser, stop_flag,
+                    optimizer_bytes,
                     method, bucket_num,
-                    self.N, self.mem_limit_gb,
-                    self.min_parallel_size, self.max_parallel_size,
-                    self.allowed_attn_types,
-                    self.scip_param_dict,
-                    self.costmodel.N, self.costmodel.h, self.costmodel.l,
-                    self.costmodel.p, self.costmodel.zero_stage,
-                    self.costmodel.act_per_token,
-                    self.costmodel.piecewise,
-                    self.costmodel.alltoall_bw, self.costmodel.p2p_bw,
-                    self.costmodel.gpus_per_node,
-                    self.costmodel.alltoall_bw_consec, self.costmodel.alltoall_bw_strided,
-                    self.costmodel.p2p_bw_consec, self.costmodel.p2p_bw_strided,
-                    self.costmodel.alltoall_linear_consec, self.costmodel.alltoall_linear_strided,
-                    self.costmodel.p2p_linear_consec, self.costmodel.p2p_linear_strided,
                 ))
                 for seqs_mb_ser in seqs_mb_serialized
             ]
@@ -3272,6 +3504,11 @@ class AdaCPSPOptimizer:
 
         seqs_gb_ser = _serialize_seqs(seqs_gb)
 
+        # Pickle the fully calibrated optimizer ONCE so every worker
+        # receives the identical, complete cost model used by the parent.
+        # See _reconstruct_optimizer_from_pickle for the rationale.
+        optimizer_bytes = _pickle_optimizer_for_workers(self)
+
         manager = mp.Manager()
         result_dict = manager.dict()
         processes = []
@@ -3280,23 +3517,10 @@ class AdaCPSPOptimizer:
             p = mp.Process(
                 target=_mp_gbmb_worker,
                 args=(
-                    seqs_gb_ser, mb_num, self.hide_output,
+                    seqs_gb_ser, mb_num,
+                    optimizer_bytes,
                     method, bucket_num, chunk_alg,
-                    self.N, self.mem_limit_gb,
-                    self.min_parallel_size, self.max_parallel_size,
-                    self.allowed_attn_types,
-                    self.scip_param_dict,
-                    self.costmodel.N, self.costmodel.h, self.costmodel.l,
-                    self.costmodel.p, self.costmodel.zero_stage,
-                    self.costmodel.act_per_token,
-                    self.costmodel.piecewise,
-                    self.costmodel.alltoall_bw, self.costmodel.p2p_bw,
                     result_dict,
-                    self.costmodel.gpus_per_node,
-                    self.costmodel.alltoall_bw_consec, self.costmodel.alltoall_bw_strided,
-                    self.costmodel.p2p_bw_consec, self.costmodel.p2p_bw_strided,
-                    self.costmodel.alltoall_linear_consec, self.costmodel.alltoall_linear_strided,
-                    self.costmodel.p2p_linear_consec, self.costmodel.p2p_linear_strided,
                 )
             )
             p.start()
@@ -3387,74 +3611,69 @@ def _deserialize_strategy_groups(groups_ser):
         result.append((strat, _deserialize_seqs(seqs_ser)))
     return result
 
-def _reconstruct_optimizer(
-    cluster_size, mem_limit_gb, min_parallel_size, max_parallel_size,
-    allowed_attn_types, scip_param_dict, hide_output,
-    cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
-    cm_gpus_per_node=8,
-    cm_a2a_bw_consec=None, cm_a2a_bw_strided=None,
-    cm_p2p_bw_consec=None, cm_p2p_bw_strided=None,
-    cm_a2a_lin_consec=None, cm_a2a_lin_strided=None,
-    cm_p2p_lin_consec=None, cm_p2p_lin_strided=None,
-):
-    """Reconstruct AdaCPSPOptimizer in a worker process."""
-    costmodel = AdaCPSPCostModel(
-        cluster_size=cm_N, hidden_size=cm_h, layer_num=cm_l,
-        param_size_B=cm_p, zero_stage=cm_zero, act_per_token=cm_act,
-        piecewise_compute_coeffs=cm_piecewise,
-        alltoall_bandwidth_dict_gbs=cm_a2a_bw,
-        p2p_bandwidth_dict_gbs=cm_p2p_bw,
-        gpus_per_node=cm_gpus_per_node,
-        alltoall_bw_consec=cm_a2a_bw_consec,
-        alltoall_bw_strided=cm_a2a_bw_strided,
-        p2p_bw_consec=cm_p2p_bw_consec,
-        p2p_bw_strided=cm_p2p_bw_strided,
-        alltoall_linear_consec=cm_a2a_lin_consec,
-        alltoall_linear_strided=cm_a2a_lin_strided,
-        p2p_linear_consec=cm_p2p_lin_consec,
-        p2p_linear_strided=cm_p2p_lin_strided,
-    )
-    return AdaCPSPOptimizer(
-        cluster_size=cluster_size,
-        memory_limit_gb=mem_limit_gb,
-        costmodel=costmodel,
-        hide_output=hide_output,
-        scip_param_dict=scip_param_dict,
-        allowed_attn_types=allowed_attn_types,
-        max_parallel_size=max_parallel_size,
-        min_parallel_size=min_parallel_size,
-    )
+def _reconstruct_optimizer_from_pickle(optimizer_bytes: bytes):
+    """Restore AdaCPSPOptimizer from a pickled blob created in the parent.
+
+    Why pickle the whole optimizer instead of passing a long argument list?
+    ---------------------------------------------------------------------
+    The cost model has 50+ tuneable fields that affect solver decisions
+    (residual_b_per_sp, head padding, ulysses_a2a_overhead_ms, calibration
+    factors, etc.).  The previous implementation manually forwarded a tiny
+    subset of fields through ``_reconstruct_optimizer`` and rebuilt the cost
+    model in the worker, silently DROPPING every field not on the list (in
+    particular `residual_*_per_sp`, `n_kv_heads`, `bwd_fwd_ratio`,
+    `enable_overlap_model`, the *_overhead_ms knobs, calibration factors,
+    and `b_step_fb_per_sp`).  The worker therefore solved with a vanilla,
+    uncalibrated cost model while the parent reported predictions from the
+    calibrated one — causing solver decisions to diverge from the cost
+    model's own optimum (e.g. picking ulysses sp=16 instead of usp sp=2 cp=8
+    for long sequences because residual_b_per_sp[16] silently defaulted to
+    0 in the worker while sp=2 carried its measured 33 ms penalty).
+
+    Pickling the optimizer object end-to-end fixes this once and for all:
+    every field — including future ones — is automatically carried.
+    """
+    import pickle
+    return pickle.loads(optimizer_bytes)
+
+
+def _pickle_optimizer_for_workers(optimizer) -> bytes:
+    """Serialize the optimizer for use by worker processes.
+
+    Clears the per-iteration cache before pickling so workers receive only
+    the configuration/state needed for solving, not stale lookup data.
+    """
+    import pickle
+    cache_backup = optimizer._cache
+    log_ctx_backup = optimizer._log_context
+    try:
+        optimizer._cache = {}
+        optimizer._log_context = None
+        return pickle.dumps(optimizer, protocol=pickle.HIGHEST_PROTOCOL)
+    finally:
+        optimizer._cache = cache_backup
+        optimizer._log_context = log_ctx_backup
 
 
 def _mp_worker(
-    seqs_mb_ser, stop_flag, hide_output,
+    seqs_mb_ser, stop_flag,
+    optimizer_bytes,
     method, bucket_num,
-    cluster_size, mem_limit_gb,
-    min_parallel_size, max_parallel_size,
-    allowed_attn_types, scip_param_dict,
-    cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
-    cm_gpus_per_node=8,
-    cm_a2a_bw_consec=None, cm_a2a_bw_strided=None,
-    cm_p2p_bw_consec=None, cm_p2p_bw_strided=None,
-    cm_a2a_lin_consec=None, cm_a2a_lin_strided=None,
-    cm_p2p_lin_consec=None, cm_p2p_lin_strided=None,
 ):
-    """Worker function for solve_globalbatch_mp."""
+    """Worker function for solve_globalbatch_mp.
+
+    Receives the parent's calibrated optimizer as a pickled blob (rather than
+    a flat list of cost-model fields) so the full cost model — including
+    residual_*_per_sp, head padding, all *_overhead_ms knobs and calibration
+    factors — is faithfully carried across the process boundary.
+    """
     if stop_flag.value == 1:
         return None
 
     seqs_mb = _deserialize_seqs(seqs_mb_ser)
     seqs_mb = [Sequence(seq=s.seq, id=j) for j, s in enumerate(seqs_mb)]
 
-    optimizer = _reconstruct_optimizer(
-        cluster_size, mem_limit_gb, min_parallel_size, max_parallel_size,
-        allowed_attn_types, scip_param_dict, hide_output,
-        cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
-        cm_gpus_per_node, cm_a2a_bw_consec, cm_a2a_bw_strided,
-        cm_p2p_bw_consec, cm_p2p_bw_strided,
-        cm_a2a_lin_consec, cm_a2a_lin_strided,
-        cm_p2p_lin_consec, cm_p2p_lin_strided,
-    )
+    optimizer = _reconstruct_optimizer_from_pickle(optimizer_bytes)
 
     result = optimizer._solve_microbatch(seqs_mb, method, bucket_num)
     if result is None:
@@ -3471,32 +3690,21 @@ def _mp_worker(
 
 
 def _mp_gbmb_worker(
-    seqs_gb_ser, mb_num, hide_output,
+    seqs_gb_ser, mb_num,
+    optimizer_bytes,
     method, bucket_num, chunk_alg,
-    cluster_size, mem_limit_gb,
-    min_parallel_size, max_parallel_size,
-    allowed_attn_types, scip_param_dict,
-    cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
     result_dict,
-    cm_gpus_per_node=8,
-    cm_a2a_bw_consec=None, cm_a2a_bw_strided=None,
-    cm_p2p_bw_consec=None, cm_p2p_bw_strided=None,
-    cm_a2a_lin_consec=None, cm_a2a_lin_strided=None,
-    cm_p2p_lin_consec=None, cm_p2p_lin_strided=None,
 ):
-    """Worker function for solve_globalbatch_mp_gbmb."""
+    """Worker function for solve_globalbatch_mp_gbmb.
+
+    Receives the parent's calibrated optimizer as a pickled blob so every
+    cost-model field (residual_*_per_sp, head padding, calibration knobs,
+    b_step_fb_per_sp, etc.) is preserved.  See _reconstruct_optimizer_from_pickle.
+    """
     seqs_gb = _deserialize_seqs(seqs_gb_ser)
     seqs_mb_all = chunk_globalbatch(seqs_gb, mb_num, chunk_alg)
 
-    optimizer = _reconstruct_optimizer(
-        cluster_size, mem_limit_gb, min_parallel_size, max_parallel_size,
-        allowed_attn_types, scip_param_dict, hide_output,
-        cm_N, cm_h, cm_l, cm_p, cm_zero, cm_act, cm_piecewise, cm_a2a_bw, cm_p2p_bw,
-        cm_gpus_per_node, cm_a2a_bw_consec, cm_a2a_bw_strided,
-        cm_p2p_bw_consec, cm_p2p_bw_strided,
-        cm_a2a_lin_consec, cm_a2a_lin_strided,
-        cm_p2p_lin_consec, cm_p2p_lin_strided,
-    )
+    optimizer = _reconstruct_optimizer_from_pickle(optimizer_bytes)
 
     gb_groups, gb_results = [], []
     feasible = True

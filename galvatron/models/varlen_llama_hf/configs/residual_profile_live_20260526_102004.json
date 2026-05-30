@@ -1,0 +1,25 @@
+{
+  "schema": "adacpsp_residual_v1",
+  "source_run": "resid_20260525_214652",
+  "estimator": "steady",
+  "residual_a_default_per_token": 0.25072808427181986,
+  "residual_b_default_ms": 869.7316927050937,
+  "residual_per_sp": {
+    "1": {
+      "a_per_token": 0.18217419242408572,
+      "b_ms": 354.5623912047937
+    },
+    "2": {
+      "a_per_token": 0.18361739191853874,
+      "b_ms": 312.61148764148743
+    },
+    "4": {
+      "a_per_token": 0.25072808427181986,
+      "b_ms": 946.1038371845624
+    },
+    "8": {
+      "a_per_token": 0.2913727229714636,
+      "b_ms": 869.7316927050937
+    }
+  }
+}

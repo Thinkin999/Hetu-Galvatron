@@ -832,10 +832,10 @@ class Attention(MegatronModule, ABC):
         else:
             # No CP: position_ids are simple per-sequence indices
             num_seqs = len(cu_seqlens) - 1
-        position_ids_list = []
-        for i in range(num_seqs):
-            seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
-            position_ids_list.append(torch.arange(seq_len, device=query.device))
+            position_ids_list = []
+            for i in range(num_seqs):
+                seq_len = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+                position_ids_list.append(torch.arange(seq_len, device=query.device))
             cp_local_position_ids = torch.cat(position_ids_list, dim=0)  # (cp_local_total_seq,)
         
         # Step 2: Extract SP-local slice of position_ids

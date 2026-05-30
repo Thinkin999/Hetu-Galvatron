@@ -1675,6 +1675,7 @@ def main():
                         "n_kv_heads": args.n_kv_heads,
                         "head_dim": args.head_dim,
                         "hidden_size": args.hidden_size,
+                        "num_layers": args.num_layers,
                         "step": args.attn_step,
                         "use_varlen": args.use_varlen,
                         "timing_groups": args.attn_timing_groups,

@@ -1,0 +1,42 @@
+{
+  "schema": "adacpsp_b_decomp_v1",
+  "source_run": "saturation_hypothesis_20260526",
+  "rationale": [
+    "Production training uses long sequences (≥65k) + ckpt=0 + ZeRO-3. In that",
+    "regime FFN compute per layer (~15 ms) > FSDP AllGather per layer (~5 ms),",
+    "so with forward_prefetch=True the AllGather is fully hidden by compute.",
+    "The b_step_fb (per-step FSDP re-shard / re-gather penalty) calibrated at",
+    "the b-decomp short-seq (8192) experiment is therefore NOT applicable in",
+    "production — that experiment was the worst case where compute << AllGather.",
+    "Re-analysing the github multi-mb run (results/ghmb_20260526_140123) shows:",
+    "  • predictions with b_step_fb get 18/21 pairs ranked correctly, MAPE 121%",
+    "  • predictions WITHOUT b_step_fb (saturation):  19/21 pairs correct, MAPE 81%",
+    "  • for forced strategies alone (excluding solver), saturation gives 15/15.",
+    "So we zero out b_step_fb_per_sp here. residual_a_per_sp is kept (the per-mb",
+    "compute coefficient was re-fitted with forward_prefetch=True and remains",
+    "valid). b_step_external_ms is kept (optimizer + grad_clip overhead is real)."
+  ],
+  "stripped_residual": "residual_profile_live_20260526_102004.json",
+  "fit_window": "saturation_assumption",
+  "residual_per_sp": {
+    "1": {
+      "a_per_token": 0.1972498861257191,
+      "b_microbatch_ms": 0.0,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "per_mb_residual_total_ms": 1615.8710671418908
+    },
+    "8": {
+      "a_per_token": 0.11564746997214942,
+      "b_microbatch_ms": 0.0,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "per_mb_residual_total_ms": 947.384074011848
+    }
+  },
+  "b_step_fb_per_sp_clean": {},
+  "b_step_fb_per_sp_steady": {},
+  "b_step_fb_ms_clean": 0.0,
+  "b_step_fb_ms_steady": 0.0,
+  "b_step_external_ms": 22.3136767745018
+}

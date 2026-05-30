@@ -1,0 +1,2060 @@
+experiment:
+  model: qwen2.5-7b
+  cluster:
+    num_gpus: 16
+    gpus_per_node: 8
+    gpu_type: A100-80G
+  memory_limit_gb: 72
+  method: full_ilp
+  time_limit: null
+  note: Attention compute beyond profiled range is extrapolated from the last quadratic segment.
+batch:
+  batch_key: real_random_max131072_b4
+  sampling_mode: real_random
+  max_seq: 131072
+  batch_idx: 4
+  global_batch_size: 64
+  seq_sum: 115776
+  stats:
+    num_seqs: 64
+    tokens: 115776
+    min: 64
+    p50: 1072.0
+    p95: 5868.8
+    p99: 13472.32
+    max: 16960
+    mean: 1809.0
+    ge_128k: 0
+    ge_256k: 0
+    ge_384k: 0
+    ge_512k: 0
+  sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+  sequence_lengths: [64, 64, 1056, 864, 4032, 2112, 352, 544, 1856, 1504, 3904, 736, 160, 448, 1376, 1184, 160, 1376, 2528, 5888, 1088, 416, 288, 3040, 96, 1120, 1056, 1472, 96, 2144, 11424, 1888, 1280, 1408, 416, 160, 576, 2080, 224, 2304, 576, 320, 992, 416, 1248, 3360, 288, 16960, 5760, 384, 64, 512, 192, 2112, 1728, 2304, 1760, 192, 1664, 736, 544, 4192, 352, 6336]
+cases:
+  ulysses_only:
+    allowed_attn_types: [ulysses]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 579.173728
+    solver_wall_s: 2.859679
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 579.173728
+        seq_sum: 115776
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [64, 64, 1056, 864, 4032, 2112, 352, 544, 1856, 1504, 3904, 736, 160, 448, 1376, 1184, 160, 1376, 2528, 5888, 1088, 416, 288, 3040, 96, 1120, 1056, 1472, 96, 2144, 11424, 1888, 1280, 1408, 416, 160, 576, 2080, 224, 2304, 576, 320, 992, 416, 1248, 3360, 288, 16960, 5760, 384, 64, 512, 192, 2112, 1728, 2304, 1760, 192, 1664, 736, 544, 4192, 352, 6336]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 102.921696
+            time_breakdown:
+              total_estimated_ms: 102.921696
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 34.307232
+              compute_bwd_ms: 68.614464
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 47.59
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 40.59
+              activation_base: 40.59
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 10496
+            local_tokens: 10496.0
+            sequence_ids: [29, 53, 15, 25, 20, 3, 43, 49, 62, 41, 46, 16, 0]
+            sequence_lengths: [2144, 2112, 1184, 1120, 1088, 864, 416, 384, 352, 320, 288, 160, 64]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 165.727531
+            time_breakdown:
+              total_estimated_ms: 165.727531
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 55.24251
+              compute_bwd_ms: 110.485021
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 51.42625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 44.42625
+              activation_base: 44.42625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11488
+            local_tokens: 11488.0
+            sequence_ids: [4, 10, 37, 27]
+            sequence_lengths: [4032, 3904, 2080, 1472]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 75.12202
+            time_breakdown:
+              total_estimated_ms: 75.12202
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 25.040673
+              compute_bwd_ms: 50.081347
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 33.85375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 26.85375
+              activation_base: 26.85375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 6944
+            local_tokens: 6944.0
+            sequence_ids: [31, 8, 54, 22, 38, 52, 57, 12, 35, 24, 28, 1]
+            sequence_lengths: [1888, 1856, 1728, 288, 224, 192, 192, 160, 160, 96, 96, 64]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 12.694267
+            time_breakdown:
+              total_estimated_ms: 12.694267
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 4.231422
+              compute_bwd_ms: 8.462845
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 12.07375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 5.07375
+              activation_base: 5.07375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 1312
+            local_tokens: 1312.0
+            sequence_ids: [44, 50]
+            sequence_lengths: [1248, 64]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 38.901078
+            time_breakdown:
+              total_estimated_ms: 38.901078
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 12.967026
+              compute_bwd_ms: 25.934052
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 23.95375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 16.95375
+              activation_base: 16.95375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 4384
+            local_tokens: 4384.0
+            sequence_ids: [33, 17, 59, 51, 6]
+            sequence_lengths: [1408, 1376, 736, 512, 352]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 469.367495
+            time_breakdown:
+              total_estimated_ms: 469.367495
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 156.455832
+              compute_bwd_ms: 312.911663
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 60.58375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 53.58375
+              activation_base: 53.58375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 13856
+            local_tokens: 13856.0
+            sequence_ids: [30, 14, 2]
+            sequence_lengths: [11424, 1376, 1056]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 37.696668
+            time_breakdown:
+              total_estimated_ms: 37.696668
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 12.565556
+              compute_bwd_ms: 25.131112
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 21.85
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 14.85
+              activation_base: 14.85
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 3840
+            local_tokens: 3840.0
+            sequence_ids: [56, 58, 34]
+            sequence_lengths: [1760, 1664, 416]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 49.609189
+            time_breakdown:
+              total_estimated_ms: 49.609189
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 16.536396
+              compute_bwd_ms: 33.072793
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 29.39875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 22.39875
+              activation_base: 22.39875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 5792
+            local_tokens: 5792.0
+            sequence_ids: [9, 42, 11, 36, 40, 7, 13, 21]
+            sequence_lengths: [1504, 992, 736, 576, 576, 544, 448, 416]
+          -
+            group_id: 8
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 231.145686
+            time_breakdown:
+              total_estimated_ms: 231.145686
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 77.048562
+              compute_bwd_ms: 154.097124
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 55.7575
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 48.7575
+              activation_base: 48.7575
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12608
+            local_tokens: 12608.0
+            sequence_ids: [19, 61, 18]
+            sequence_lengths: [5888, 4192, 2528]
+          -
+            group_id: 9
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 124.344709
+            time_breakdown:
+              total_estimated_ms: 124.344709
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 41.448236
+              compute_bwd_ms: 82.896473
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 29.275
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 22.275
+              activation_base: 22.275
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 5760
+            local_tokens: 5760.0
+            sequence_ids: [48]
+            sequence_lengths: [5760]
+          -
+            group_id: 10
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 186.141733
+            time_breakdown:
+              total_estimated_ms: 186.141733
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 62.047244
+              compute_bwd_ms: 124.094489
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 45.3625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 38.3625
+              activation_base: 38.3625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 9920
+            local_tokens: 9920.0
+            sequence_ids: [63, 55, 32]
+            sequence_lengths: [6336, 2304, 1280]
+          -
+            group_id: 11
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 153.377772
+            time_breakdown:
+              total_estimated_ms: 153.377772
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 51.125924
+              compute_bwd_ms: 102.251848
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 55.015
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 48.015
+              activation_base: 48.015
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12416
+            local_tokens: 12416.0
+            sequence_ids: [45, 23, 39, 5, 26, 60]
+            sequence_lengths: [3360, 3040, 2304, 2112, 1056, 544]
+          -
+            group_id: 12
+            num_gpus: 4
+            strategy: ulysses
+            strategy_label: ulysses×4
+            sp_size: 4
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 579.173728
+            time_breakdown:
+              total_estimated_ms: 579.173728
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 79.746715
+              compute_bwd_ms: 159.49343
+              alltoall_comm_ms: 339.933583
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 23.396875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 16.396875
+              activation_base: 16.396875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16960
+            local_tokens: 4240.0
+            sequence_ids: [47]
+            sequence_lengths: [16960]
+  ring_only:
+    allowed_attn_types: [ring]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 310.20489
+    solver_wall_s: 1.624634
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 310.20489
+        seq_sum: 115776
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [64, 64, 1056, 864, 4032, 2112, 352, 544, 1856, 1504, 3904, 736, 160, 448, 1376, 1184, 160, 1376, 2528, 5888, 1088, 416, 288, 3040, 96, 1120, 1056, 1472, 96, 2144, 11424, 1888, 1280, 1408, 416, 160, 576, 2080, 224, 2304, 576, 320, 992, 416, 1248, 3360, 288, 16960, 5760, 384, 64, 512, 192, 2112, 1728, 2304, 1760, 192, 1664, 736, 544, 4192, 352, 6336]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 137.619553
+            time_breakdown:
+              total_estimated_ms: 137.619553
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 45.873184
+              compute_bwd_ms: 91.746369
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 64.29625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 57.29625
+              activation_base: 57.29625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 14816
+            local_tokens: 14816.0
+            sequence_ids: [39, 56, 32, 20, 26, 42, 11, 59, 36, 40, 51, 13, 34, 49, 6, 62, 41, 22, 46, 52, 12]
+            sequence_lengths: [2304, 1760, 1280, 1088, 1056, 992, 736, 736, 576, 576, 512, 448, 416, 384, 352, 352, 320, 288, 288, 192, 160]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 150.48918
+            time_breakdown:
+              total_estimated_ms: 150.48918
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 50.16306
+              compute_bwd_ms: 100.32612
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 63.925
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 56.925
+              activation_base: 56.925
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 14720
+            local_tokens: 14720.0
+            sequence_ids: [23, 37, 31, 17, 44, 15, 25, 3, 7, 60, 21, 43]
+            sequence_lengths: [3040, 2080, 1888, 1376, 1248, 1184, 1120, 864, 544, 544, 416, 416]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 205.921819
+            time_breakdown:
+              total_estimated_ms: 205.921819
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 68.640606
+              compute_bwd_ms: 137.281213
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 65.78125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 58.78125
+              activation_base: 58.78125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15200
+            local_tokens: 15200.0
+            sequence_ids: [4, 10, 18, 8, 9, 14]
+            sequence_lengths: [4032, 3904, 2528, 1856, 1504, 1376]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 297.882185
+            time_breakdown:
+              total_estimated_ms: 297.882185
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 99.294062
+              compute_bwd_ms: 198.588123
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 69.865
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 62.865
+              activation_base: 62.865
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16256
+            local_tokens: 16256.0
+            sequence_ids: [19, 48, 54, 27, 33]
+            sequence_lengths: [5888, 5760, 1728, 1472, 1408]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 213.275267
+            time_breakdown:
+              total_estimated_ms: 213.275267
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 71.091756
+              compute_bwd_ms: 142.183511
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 50.93125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 43.93125
+              activation_base: 43.93125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11360
+            local_tokens: 11360.0
+            sequence_ids: [63, 45, 58]
+            sequence_lengths: [6336, 3360, 1664]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 129.781825
+            time_breakdown:
+              total_estimated_ms: 129.781825
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 43.260608
+              compute_bwd_ms: 86.521217
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 44.3725
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 37.3725
+              activation_base: 37.3725
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 9664
+            local_tokens: 9664.0
+            sequence_ids: [61, 55, 53, 2]
+            sequence_lengths: [4192, 2304, 2112, 1056]
+          -
+            group_id: 6
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 248.150275
+            time_breakdown:
+              total_estimated_ms: 248.150275
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 1.275594
+              ring_fwd_comm_step_ms: 0.337111
+              ring_bwd_comm_step_ms: 0.674221
+              ring_fwd_per_layer_ms: 2.584899
+              ring_bwd_per_layer_ms: 5.169797
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 248.150275
+            estimated_memory_gb: 29.089375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 22.089375
+              activation_base: 22.089375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11424
+            local_tokens: 5712.0
+            sequence_ids: [30]
+            sequence_lengths: [11424]
+          -
+            group_id: 7
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 48.635254
+            time_breakdown:
+              total_estimated_ms: 48.635254
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.245092
+              ring_fwd_comm_step_ms: 0.164342
+              ring_bwd_comm_step_ms: 0.328685
+              ring_fwd_per_layer_ms: 0.506617
+              ring_bwd_per_layer_ms: 1.013234
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 48.635254
+            estimated_memory_gb: 13.249375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 6.249375
+              activation_base: 6.249375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 3232
+            local_tokens: 1616.0
+            sequence_ids: [5, 38, 57, 16, 35, 24, 28, 0, 1, 50]
+            sequence_lengths: [2112, 224, 192, 160, 160, 96, 96, 64, 64, 64]
+          -
+            group_id: 8
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 23.622827
+            time_breakdown:
+              total_estimated_ms: 23.622827
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.095159
+              ring_fwd_comm_step_ms: 0.141397
+              ring_bwd_comm_step_ms: 0.282793
+              ring_fwd_per_layer_ms: 0.246071
+              ring_bwd_per_layer_ms: 0.492142
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 23.622827
+            estimated_memory_gb: 11.145625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 4.145625
+              activation_base: 4.145625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 2144
+            local_tokens: 1072.0
+            sequence_ids: [29]
+            sequence_lengths: [2144]
+          -
+            group_id: 9
+            num_gpus: 4
+            strategy: ring
+            strategy_label: ring×4
+            sp_size: 1
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 310.20489
+            time_breakdown:
+              total_estimated_ms: 310.20489
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.753872
+              ring_fwd_comm_step_ms: 0.719381
+              ring_bwd_comm_step_ms: 1.438763
+              ring_fwd_per_layer_ms: 3.231301
+              ring_bwd_per_layer_ms: 6.462602
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 310.20489
+            estimated_memory_gb: 23.396875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 16.396875
+              activation_base: 16.396875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16960
+            local_tokens: 4240.0
+            sequence_ids: [47]
+            sequence_lengths: [16960]
+  ulysses_ring:
+    allowed_attn_types: [ulysses, ring]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 310.20489
+    solver_wall_s: 2.996267
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 310.20489
+        seq_sum: 115776
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [64, 64, 1056, 864, 4032, 2112, 352, 544, 1856, 1504, 3904, 736, 160, 448, 1376, 1184, 160, 1376, 2528, 5888, 1088, 416, 288, 3040, 96, 1120, 1056, 1472, 96, 2144, 11424, 1888, 1280, 1408, 416, 160, 576, 2080, 224, 2304, 576, 320, 992, 416, 1248, 3360, 288, 16960, 5760, 384, 64, 512, 192, 2112, 1728, 2304, 1760, 192, 1664, 736, 544, 4192, 352, 6336]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 183.075778
+            time_breakdown:
+              total_estimated_ms: 183.075778
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 61.025259
+              compute_bwd_ms: 122.050519
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 65.6575
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 58.6575
+              activation_base: 58.6575
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15168
+            local_tokens: 15168.0
+            sequence_ids: [4, 18, 53, 56, 54, 9, 7, 13, 6, 35]
+            sequence_lengths: [4032, 2528, 2112, 1760, 1728, 1504, 544, 448, 352, 160]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 147.400642
+            time_breakdown:
+              total_estimated_ms: 147.400642
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 49.133547
+              compute_bwd_ms: 98.267094
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 66.6475
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 59.6475
+              activation_base: 59.6475
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15424
+            local_tokens: 15424.0
+            sequence_ids: [39, 8, 58, 33, 17, 44, 20, 3, 11, 36, 40, 34, 43, 62, 46, 52, 50]
+            sequence_lengths: [2304, 1856, 1664, 1408, 1376, 1248, 1088, 864, 736, 576, 576, 416, 416, 352, 288, 192, 64]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 205.063373
+            time_breakdown:
+              total_estimated_ms: 205.063373
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 68.354458
+              compute_bwd_ms: 136.708916
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 69.74125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 62.74125
+              activation_base: 62.74125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16224
+            local_tokens: 16224.0
+            sequence_ids: [10, 45, 55, 37, 31, 32, 42, 41, 28]
+            sequence_lengths: [3904, 3360, 2304, 2080, 1888, 1280, 992, 320, 96]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 131.630037
+            time_breakdown:
+              total_estimated_ms: 131.630037
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 43.876679
+              compute_bwd_ms: 87.753358
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 53.15875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 46.15875
+              activation_base: 46.15875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11936
+            local_tokens: 11936.0
+            sequence_ids: [23, 29, 5, 2, 59, 60, 51, 21, 49, 22, 38, 57, 12, 0, 1]
+            sequence_lengths: [3040, 2144, 2112, 1056, 736, 544, 512, 416, 384, 288, 224, 192, 160, 64, 64]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 92.528879
+            time_breakdown:
+              total_estimated_ms: 92.528879
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 30.84296
+              compute_bwd_ms: 61.685919
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 32.61625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 25.61625
+              activation_base: 25.61625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 6624
+            local_tokens: 6624.0
+            sequence_ids: [61, 14, 26]
+            sequence_lengths: [4192, 1376, 1056]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 37.638158
+            time_breakdown:
+              total_estimated_ms: 37.638158
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 12.546053
+              compute_bwd_ms: 25.092105
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 22.5925
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 15.5925
+              activation_base: 15.5925
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 4032
+            local_tokens: 4032.0
+            sequence_ids: [27, 15, 25, 16, 24]
+            sequence_lengths: [1472, 1184, 1120, 160, 96]
+          -
+            group_id: 6
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 248.150275
+            time_breakdown:
+              total_estimated_ms: 248.150275
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 1.275594
+              ring_fwd_comm_step_ms: 0.337111
+              ring_bwd_comm_step_ms: 0.674221
+              ring_fwd_per_layer_ms: 2.584899
+              ring_bwd_per_layer_ms: 5.169797
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 248.150275
+            estimated_memory_gb: 29.089375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 22.089375
+              activation_base: 22.089375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11424
+            local_tokens: 5712.0
+            sequence_ids: [30]
+            sequence_lengths: [11424]
+          -
+            group_id: 7
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 90.692508
+            time_breakdown:
+              total_estimated_ms: 90.692508
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.460867
+              ring_fwd_comm_step_ms: 0.229805
+              ring_bwd_comm_step_ms: 0.459611
+              ring_fwd_per_layer_ms: 0.944714
+              ring_bwd_per_layer_ms: 1.889427
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 90.692508
+            estimated_memory_gb: 19.25125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 12.25125
+              activation_base: 12.25125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 6336
+            local_tokens: 3168.0
+            sequence_ids: [63]
+            sequence_lengths: [6336]
+          -
+            group_id: 8
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 157.470932
+            time_breakdown:
+              total_estimated_ms: 157.470932
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.803069
+              ring_fwd_comm_step_ms: 0.341835
+              ring_bwd_comm_step_ms: 0.683669
+              ring_fwd_per_layer_ms: 1.640322
+              ring_bwd_per_layer_ms: 3.280644
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 157.470932
+            estimated_memory_gb: 29.5225
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 22.5225
+              activation_base: 22.5225
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11648
+            local_tokens: 5824.0
+            sequence_ids: [19, 48]
+            sequence_lengths: [5888, 5760]
+          -
+            group_id: 9
+            num_gpus: 4
+            strategy: ring
+            strategy_label: ring×4
+            sp_size: 1
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 310.20489
+            time_breakdown:
+              total_estimated_ms: 310.20489
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.753872
+              ring_fwd_comm_step_ms: 0.719381
+              ring_bwd_comm_step_ms: 1.438763
+              ring_fwd_per_layer_ms: 3.231301
+              ring_bwd_per_layer_ms: 6.462602
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 310.20489
+            estimated_memory_gb: 23.396875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 16.396875
+              activation_base: 16.396875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16960
+            local_tokens: 4240.0
+            sequence_ids: [47]
+            sequence_lengths: [16960]
+  usp_only:
+    allowed_attn_types: [usp]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 545.106145
+    solver_wall_s: 1.363739
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 545.106145
+        seq_sum: 115776
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [64, 64, 1056, 864, 4032, 2112, 352, 544, 1856, 1504, 3904, 736, 160, 448, 1376, 1184, 160, 1376, 2528, 5888, 1088, 416, 288, 3040, 96, 1120, 1056, 1472, 96, 2144, 11424, 1888, 1280, 1408, 416, 160, 576, 2080, 224, 2304, 576, 320, 992, 416, 1248, 3360, 288, 16960, 5760, 384, 64, 512, 192, 2112, 1728, 2304, 1760, 192, 1664, 736, 544, 4192, 352, 6336]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 232.089662
+            time_breakdown:
+              total_estimated_ms: 232.089662
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 77.363221
+              compute_bwd_ms: 154.726441
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 69.6175
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 62.6175
+              activation_base: 62.6175
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16192
+            local_tokens: 16192.0
+            sequence_ids: [48, 39, 53, 8, 54, 44, 15]
+            sequence_lengths: [5760, 2304, 2112, 1856, 1728, 1248, 1184]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 156.935932
+            time_breakdown:
+              total_estimated_ms: 156.935932
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 52.311977
+              compute_bwd_ms: 104.623954
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 66.02875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 59.02875
+              activation_base: 59.02875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15264
+            local_tokens: 15264.0
+            sequence_ids: [23, 18, 20, 11, 59, 36, 40, 7, 60, 51, 13, 21, 34, 43, 49, 6, 62, 41, 22, 46, 52, 57, 12, 35]
+            sequence_lengths: [3040, 2528, 1088, 736, 736, 576, 576, 544, 544, 512, 448, 416, 416, 416, 384, 352, 352, 320, 288, 288, 192, 192, 160, 160]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 242.735977
+            time_breakdown:
+              total_estimated_ms: 242.735977
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 80.911992
+              compute_bwd_ms: 161.823984
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 71.5975
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.5975
+              activation_base: 64.5975
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16704
+            local_tokens: 16704.0
+            sequence_ids: [63, 58, 9, 27, 14, 17, 2, 26, 3]
+            sequence_lengths: [6336, 1664, 1504, 1472, 1376, 1376, 1056, 1056, 864]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 503.985685
+            time_breakdown:
+              total_estimated_ms: 503.985685
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 167.995228
+              compute_bwd_ms: 335.990457
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 71.845
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.845
+              activation_base: 64.845
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16768
+            local_tokens: 16768.0
+            sequence_ids: [30, 29, 37, 25]
+            sequence_lengths: [11424, 2144, 2080, 1120]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 103.837749
+            time_breakdown:
+              total_estimated_ms: 103.837749
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 34.612583
+              compute_bwd_ms: 69.225166
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 37.07125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 30.07125
+              activation_base: 30.07125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 7776
+            local_tokens: 7776.0
+            sequence_ids: [10, 5, 56]
+            sequence_lengths: [3904, 2112, 1760]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 46.257439
+            time_breakdown:
+              total_estimated_ms: 46.257439
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 15.419146
+              compute_bwd_ms: 30.838293
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 23.21125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 16.21125
+              activation_base: 16.21125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 4192
+            local_tokens: 4192.0
+            sequence_ids: [55, 31]
+            sequence_lengths: [2304, 1888]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 270.396953
+            time_breakdown:
+              total_estimated_ms: 270.396953
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 90.132318
+              compute_bwd_ms: 180.264635
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 65.78125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 58.78125
+              activation_base: 58.78125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15200
+            local_tokens: 15200.0
+            sequence_ids: [19, 61, 45, 42, 38, 16, 24, 28, 0, 1, 50]
+            sequence_lengths: [5888, 4192, 3360, 992, 224, 160, 96, 96, 64, 64, 64]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 90.810451
+            time_breakdown:
+              total_estimated_ms: 90.810451
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 30.27015
+              compute_bwd_ms: 60.540301
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 32.9875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 25.9875
+              activation_base: 25.9875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 6720
+            local_tokens: 6720.0
+            sequence_ids: [4, 33, 32]
+            sequence_lengths: [4032, 1408, 1280]
+          -
+            group_id: 8
+            num_gpus: 8
+            strategy: usp
+            strategy_label: "usp(sp2×cp4,cf)"
+            sp_size: 2
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 545.106145
+            time_breakdown:
+              total_estimated_ms: 545.106145
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              usp_compute_step_per_layer_ms: 0.376936
+              a2a_qo_msg_mb: 14.492188
+              a2a_kv_msg_mb: 2.070312
+              a2a_qo_per_op_ms: 1.938754
+              a2a_kv_per_op_ms: 0.590005
+              a2a_fwd_per_layer_ms: 5.057518
+              a2a_bwd_per_layer_ms: 5.057518
+              ring_fwd_comm_step_ms: 0.605498
+              ring_bwd_comm_step_ms: 1.210996
+              ring_fwd_per_layer_ms: 2.30651
+              ring_bwd_per_layer_ms: 4.613021
+              layers: 32
+              overlap_leakage: 0.1
+              formula: layers * (a2a_fwd + a2a_bwd + ring_fwd_overlap + ring_bwd_overlap)
+              total_recomputed_ms: 545.106145
+            estimated_memory_gb: 15.198438
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 8.198438
+              activation_base: 8.198438
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16960
+            local_tokens: 2120.0
+            sequence_ids: [47]
+            sequence_lengths: [16960]
+  ulysses_ring_usp:
+    allowed_attn_types: [ulysses, ring, usp]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 310.20489
+    solver_wall_s: 2.948005
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 310.20489
+        seq_sum: 115776
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [64, 64, 1056, 864, 4032, 2112, 352, 544, 1856, 1504, 3904, 736, 160, 448, 1376, 1184, 160, 1376, 2528, 5888, 1088, 416, 288, 3040, 96, 1120, 1056, 1472, 96, 2144, 11424, 1888, 1280, 1408, 416, 160, 576, 2080, 224, 2304, 576, 320, 992, 416, 1248, 3360, 288, 16960, 5760, 384, 64, 512, 192, 2112, 1728, 2304, 1760, 192, 1664, 736, 544, 4192, 352, 6336]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 151.69691
+            time_breakdown:
+              total_estimated_ms: 151.69691
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 50.565637
+              compute_bwd_ms: 101.131273
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 69.6175
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 62.6175
+              activation_base: 62.6175
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16192
+            local_tokens: 16192.0
+            sequence_ids: [53, 14, 20, 26, 42, 3, 11, 59, 36, 40, 7, 60, 13, 21, 34, 43, 49, 6, 62, 41, 22, 46, 38, 52, 57, 12, 35, 24, 28, 0, 1, 50]
+            sequence_lengths: [2112, 1376, 1088, 1056, 992, 864, 736, 736, 576, 576, 544, 544, 448, 416, 416, 416, 384, 352, 352, 320, 288, 288, 224, 192, 192, 160, 160, 96, 96, 64, 64, 64]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 203.506857
+            time_breakdown:
+              total_estimated_ms: 203.506857
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 67.835619
+              compute_bwd_ms: 135.671238
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 69.865
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 62.865
+              activation_base: 62.865
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16256
+            local_tokens: 16256.0
+            sequence_ids: [4, 23, 29, 5, 8, 58, 44, 16]
+            sequence_lengths: [4032, 3040, 2144, 2112, 1856, 1664, 1248, 160]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 200.413675
+            time_breakdown:
+              total_estimated_ms: 200.413675
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 66.804558
+              compute_bwd_ms: 133.609116
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 45.98125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 38.98125
+              activation_base: 38.98125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 10080
+            local_tokens: 10080.0
+            sequence_ids: [19, 61]
+            sequence_lengths: [5888, 4192]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 154.697775
+            time_breakdown:
+              total_estimated_ms: 154.697775
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 51.565925
+              compute_bwd_ms: 103.13185
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 41.4025
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 34.4025
+              activation_base: 34.4025
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 8896
+            local_tokens: 8896.0
+            sequence_ids: [48, 56, 17]
+            sequence_lengths: [5760, 1760, 1376]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 83.89763
+            time_breakdown:
+              total_estimated_ms: 83.89763
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 27.965877
+              compute_bwd_ms: 55.931753
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 34.59625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 27.59625
+              activation_base: 27.59625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 7136
+            local_tokens: 7136.0
+            sequence_ids: [18, 39, 55]
+            sequence_lengths: [2528, 2304, 2304]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 17.29369
+            time_breakdown:
+              total_estimated_ms: 17.29369
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 5.764563
+              compute_bwd_ms: 11.529127
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 13.6825
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 6.6825
+              activation_base: 6.6825
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 1728
+            local_tokens: 1728.0
+            sequence_ids: [54]
+            sequence_lengths: [1728]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 35.305748
+            time_breakdown:
+              total_estimated_ms: 35.305748
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 11.768583
+              compute_bwd_ms: 23.537165
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 22.0975
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 15.0975
+              activation_base: 15.0975
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 3904
+            local_tokens: 3904.0
+            sequence_ids: [9, 32, 25]
+            sequence_lengths: [1504, 1280, 1120]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 8.968457
+            time_breakdown:
+              total_estimated_ms: 8.968457
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 2.989486
+              compute_bwd_ms: 5.978971
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 11.08375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 4.08375
+              activation_base: 4.08375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 1056
+            local_tokens: 1056.0
+            sequence_ids: [2]
+            sequence_lengths: [1056]
+          -
+            group_id: 8
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 53.739694
+            time_breakdown:
+              total_estimated_ms: 53.739694
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 17.913231
+              compute_bwd_ms: 35.826463
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 28.16125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 21.16125
+              activation_base: 21.16125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 5472
+            local_tokens: 5472.0
+            sequence_ids: [37, 27, 33, 51]
+            sequence_lengths: [2080, 1472, 1408, 512]
+          -
+            group_id: 9
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 289.72583
+            time_breakdown:
+              total_estimated_ms: 289.72583
+              model: additive
+              topology:
+                alltoall: consecutive
+                ring: strided
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              compute_fwd_ms: 96.575277
+              compute_bwd_ms: 193.150554
+              alltoall_comm_ms: 0.0
+              p2p_ring_comm_ms: 0.0
+              overlap_leakage: null
+              formula: compute_fwd * (1 + bwd_fwd_ratio) + alltoall_comm
+            estimated_memory_gb: 71.47375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.47375
+              activation_base: 64.47375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16672
+            local_tokens: 16672.0
+            sequence_ids: [63, 10, 45, 31, 15]
+            sequence_lengths: [6336, 3904, 3360, 1888, 1184]
+          -
+            group_id: 10
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 248.150275
+            time_breakdown:
+              total_estimated_ms: 248.150275
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 1.275594
+              ring_fwd_comm_step_ms: 0.337111
+              ring_bwd_comm_step_ms: 0.674221
+              ring_fwd_per_layer_ms: 2.584899
+              ring_bwd_per_layer_ms: 5.169797
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 248.150275
+            estimated_memory_gb: 29.089375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 22.089375
+              activation_base: 22.089375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 11424
+            local_tokens: 5712.0
+            sequence_ids: [30]
+            sequence_lengths: [11424]
+          -
+            group_id: 11
+            num_gpus: 4
+            strategy: ring
+            strategy_label: ring×4
+            sp_size: 1
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 310.20489
+            time_breakdown:
+              total_estimated_ms: 310.20489
+              model: overlap
+              topology:
+                alltoall: strided
+                ring: consecutive
+              head_padding:
+                q_factor: 1.0
+                kv_factor: 1.0
+              ring_step_compute_per_layer_ms: 0.753872
+              ring_fwd_comm_step_ms: 0.719381
+              ring_bwd_comm_step_ms: 1.438763
+              ring_fwd_per_layer_ms: 3.231301
+              ring_bwd_per_layer_ms: 6.462602
+              ring_layers: 32
+              alltoall_comm_ms: 0.0
+              overlap_leakage: 0.1
+              formula: sum_layers(fwd/bwd leaky overlap across ring steps)
+              total_recomputed_ms: 310.20489
+            estimated_memory_gb: 23.396875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 16.396875
+              activation_base: 16.396875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16960
+            local_tokens: 4240.0
+            sequence_ids: [47]
+            sequence_lengths: [16960]
+comparison:
+  baseline: ulysses_only
+  speedup_vs_ulysses_only:
+    ulysses_only: 1.0
+    ring_only: 1.867068
+    ulysses_ring: 1.867068
+    usp_only: 1.062497
+    ulysses_ring_usp: 1.867068

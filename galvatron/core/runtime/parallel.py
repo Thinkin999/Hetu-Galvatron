@@ -132,7 +132,11 @@ def wrap_module_fsdp_manually(
         cast_forward_inputs=False,
         cast_root_forward_inputs=False,
     )
-    forward_prefetch = True if is_moe_model else False
+    # forward_prefetch=True allows FSDP to issue layer N+1 AllGather while layer N
+    # compute is running, which is required for compute to hide ZeRO3 comm. Was
+    # gated on MoE only, but Stage 0 saturation analysis shows ~75-92% of NCCL is
+    # exposed without it (see align_costmodel/NON_ATTENTION_STAGE0_REPORT.md).
+    forward_prefetch = True
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
     fsdp_args = dict(
         process_group=comm_group,
@@ -384,7 +388,8 @@ def wrap_modules_data_parallel(
         cast_forward_inputs=False,
         cast_root_forward_inputs=False, # For rotary embedding
     )
-    forward_prefetch = True if args.is_moe_model else False
+    # See comment above for the rationale on forward_prefetch=True.
+    forward_prefetch = True
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
     fsdp_args = dict(
         process_group=process_group,

@@ -41,14 +41,40 @@ def build_costmodel(args) -> Tuple[AdaCPSPCostModel, str, str, str]:
         os.path.join(args.configs_dir, "profile_validate_*.json"),
         predicate=lambda d: "attention" in d and "segments" in d.get("attention", {}),
     )
+    # Prefer comm_profile_v2 (primitive-only); fall back to legacy unified v1.
     comm_json = args.comm_json or latest_matching(
-        os.path.join(args.configs_dir, "comm_profile_*.json"),
-        predicate=lambda d: "alltoall" in d and "p2p_ring" in d,
+        os.path.join(args.configs_dir, "comm_profile_v2_*.json"),
+        predicate=lambda d: d.get("type") == "comm_profile_v2",
     )
-    validation_json = args.validation_json or latest_matching(
-        os.path.join(args.configs_dir, "profile_validate_*.json"),
-        predicate=lambda d: "comm_validation" in d,
-    )
+    if not comm_json:
+        comm_json = args.comm_json or latest_matching(
+            os.path.join(args.configs_dir, "comm_profile_*.json"),
+            predicate=lambda d: "alltoall" in d and "p2p_ring" in d,
+        )
+
+    # Validation JSON contains compute_correction + comm_validation, but it
+    # is model-specific (different attention head shapes give different
+    # correction factors).  If the attention profile is for model A, a
+    # validation JSON for model B will silently inflate or shrink the
+    # prediction by 30-50%.  Only auto-pick a validation JSON when its
+    # ``model_name`` matches the attention profile's ``model_name``.
+    validation_json = args.validation_json
+    if not validation_json:
+        attn_model = ""
+        try:
+            attn_model = load_json(attention_json).get("model_name", "")
+        except Exception:
+            pass
+        validation_json = latest_matching(
+            os.path.join(args.configs_dir, "profile_validate_*.json"),
+            predicate=lambda d: (
+                "comm_validation" in d
+                and (not attn_model or d.get("model_name") == attn_model)
+            ),
+        )
+        if not validation_json:
+            print(f"[04_align] no validation_json found that matches model "
+                  f"{attn_model!r}; skipping compute_correction/comm_validation")
 
     if not attention_json:
         raise FileNotFoundError("Could not find attention profile JSON")

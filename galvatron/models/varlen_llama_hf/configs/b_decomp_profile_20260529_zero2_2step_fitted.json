@@ -1,0 +1,68 @@
+{
+  "schema": "adacpsp_b_decomp_v1",
+  "source_run": "zero2_2step_fitted_20260529_precreate",
+  "notes": [
+    "Re-fit from ghmb_zero2_precreate_full_20260529_181618 (with precreate, clean steady-state).",
+    "Method: solve 2-parameter system per-sp from chunks=1 vs chunks=8:",
+    "  pred_c1_new = live_pred_c1 - delta_b + K_step ; pred_c8_new = live_pred_c8 - 8*delta_b + K_step",
+    "  Set both = meas → 7*delta_b = (meas-pred)_c1 - (meas-pred)_c8 ; K_step = (meas-pred)_c1 + delta_b",
+    "Live baseline (precreate run): MAPE 12.5%, sign accuracy 100% (21/21 pairs).",
+    "This profile targets per-sp zero-mean residual after applying both b_microbatch_ms and b_step_fb.",
+    "",
+    "sp=1 (ring8): meas_c1=2352 pred_c1=1947 (Δ=405), meas_c8=5688 pred_c8=5537 (Δ=151)",
+    "  → delta_b = 36 → b_microbatch 201→165, K_step = 441 → b_step_fb 22→441 (steady) / 463 (clean)",
+    "sp=2 (usp2x4): meas_c1=2118 pred_c1=1752 (Δ=366), meas_c8=4662 pred_c8=4866 (Δ=-204)",
+    "  → delta_b = 81 → b_microbatch 114→33, K_step = 447 → b_step_fb 22→447",
+    "sp=8 (ulysses8): meas_c1=2038 pred_c1=1464 (Δ=574), meas_c8=3640 pred_c8=4266 (Δ=-626)",
+    "  → delta_b = 171 → b_microbatch 303→132, K_step = 745 → b_step_fb 22→745",
+    "sp=4: no direct data, conservative average between sp=2 and sp=8: b_mb≈83, K_step≈596",
+    "Expected after fit (offline reprediction on this data): MAPE ~3-5%."
+  ],
+  "stripped_residual": "residual_profile_live_20260526_102004.json",
+  "fit_window": "chunks=1 vs chunks=8 on ZeRO-2 + precreate ghmb_zero2_precreate_full_20260529_181618",
+  "residual_per_sp": {
+    "1": {
+      "a_per_token": 0.1972498861257191,
+      "b_microbatch_ms": 164.78,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "ring8 c1=2352 c8=5688; live pred 1947/5537 → δb=36, K=441"
+    },
+    "2": {
+      "a_per_token": 0.18361739191853874,
+      "b_microbatch_ms": 32.45,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "usp2x4 c1=2118 c8=4662; live pred 1752/4866 → δb=81, K=447"
+    },
+    "4": {
+      "a_per_token": 0.25072808427181986,
+      "b_microbatch_ms": 82.6,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "sp=4 not tested; interpolated b_mb=(33+132)/2"
+    },
+    "8": {
+      "a_per_token": 0.11564746997214942,
+      "b_microbatch_ms": 132.32,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "ulysses8 c1=2038 c8=3640; live pred 1464/4266 → δb=171, K=745"
+    }
+  },
+  "b_step_fb_per_sp_clean": {
+    "1": 441.0,
+    "2": 447.0,
+    "4": 596.0,
+    "8": 745.0
+  },
+  "b_step_fb_per_sp_steady": {
+    "1": 441.0,
+    "2": 447.0,
+    "4": 596.0,
+    "8": 745.0
+  },
+  "b_step_fb_ms_clean": 547.0,
+  "b_step_fb_ms_steady": 547.0,
+  "b_step_external_ms": 22.3136767745018
+}

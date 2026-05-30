@@ -1,0 +1,50 @@
+{
+  "schema": "adacpsp_b_decomp_v1",
+  "source_run": "zero2_fitted_20260529",
+  "notes": [
+    "Fitted from ghmb_zero2_full_20260528_210925 by 39_fit_per_mb_overhead.py.",
+    "Method: solve b_microbatch_ms = ((meas-pred)_c8 - (meas-pred)_c1) / 7",
+    "i.e., the per-extra-mb missing cost from comparing chunks=1 vs chunks=8.",
+    "Fit reduces MAPE from 32.3% to 17.0%, ranking 13/21 -> 16/21 (76%) on ZeRO-2 data.",
+    "sp=1: b=201 (ring) - was 0 in zero2_estimated, fit needed +201 to match ring8_c8",
+    "sp=8: b=303 (ulysses) - was 0 in zero2_estimated, fit needed +303 to match ulysses8_c8",
+    "sp=2: b=114 (usp2x4) - was 313 (residual_profile_live ZeRO-3), reduced by 199 for ZeRO-2",
+    "sp=4: b=946 (usp4x2) - UNCHANGED from residual_profile_live; not validated by ZeRO-2 data"
+  ],
+  "stripped_residual": "residual_profile_live_20260526_102004.json",
+  "fit_window": "chunks=1 vs chunks=8 on ZeRO-2 ghmb benchmark",
+  "residual_per_sp": {
+    "1": {
+      "a_per_token": 0.1972498861257191,
+      "b_microbatch_ms": 200.7682767864297,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "ring8 c1=2838ms vs c8=5967ms; pred c1=2436 c8=4159"
+    },
+    "2": {
+      "a_per_token": 0.18361739191853874,
+      "b_microbatch_ms": 113.873372966098,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "usp2x4 c1=2586 vs c8=5063; pred c1=2836 c8=6704"
+    },
+    "8": {
+      "a_per_token": 0.11564746997214942,
+      "b_microbatch_ms": 303.04000158466744,
+      "calibrated_at_seq": 8192,
+      "calibrated_at_tokens_per_gpu": 8192.0,
+      "fit_basis": "ulysses8 c1=2728 vs c8=4166; pred c1=2881 c8=2198"
+    }
+  },
+  "b_step_fb_per_sp_clean": {
+    "1": 22.3,
+    "8": 22.3
+  },
+  "b_step_fb_per_sp_steady": {
+    "1": 22.3,
+    "8": 22.3
+  },
+  "b_step_fb_ms_clean": 22.3,
+  "b_step_fb_ms_steady": 22.3,
+  "b_step_external_ms": 22.3136767745018
+}

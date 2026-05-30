@@ -1,0 +1,1161 @@
+experiment:
+  model: qwen2.5-7b
+  cluster:
+    num_gpus: 16
+    gpus_per_node: 8
+    gpu_type: A100-80G
+  memory_limit_gb: 72
+  method: full_ilp
+  time_limit: null
+  note: Attention compute beyond profiled range is extrapolated from the last quadratic segment.
+batch:
+  batch_key: real_random_max131072_b3
+  sampling_mode: real_random
+  max_seq: 131072
+  batch_idx: 3
+  global_batch_size: 64
+  seq_sum: 182912
+  stats:
+    num_seqs: 64
+    tokens: 182912
+    min: 96
+    p50: 992.0
+    p95: 10419.2
+    p99: 23159.36
+    max: 29792
+    mean: 2858.0
+    ge_128k: 0
+    ge_256k: 0
+    ge_384k: 0
+    ge_512k: 0
+  sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+  sequence_lengths: [16544, 3840, 384, 480, 1344, 416, 992, 512, 608, 704, 8032, 3040, 160, 256, 1280, 96, 224, 1792, 384, 6240, 544, 224, 10592, 3712, 4128, 1184, 19264, 192, 640, 29792, 384, 4448, 800, 1376, 7168, 320, 1376, 544, 512, 96, 3904, 1888, 1568, 544, 1600, 1536, 2176, 3552, 224, 192, 6944, 3072, 3424, 800, 128, 992, 9440, 192, 3296, 256, 128, 160, 832, 1440]
+cases:
+  ulysses_only:
+    allowed_attn_types: [ulysses]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 1106.994897
+    solver_wall_s: 1.865449
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 1106.994897
+        seq_sum: 182912
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [16544, 3840, 384, 480, 1344, 416, 992, 512, 608, 704, 8032, 3040, 160, 256, 1280, 96, 224, 1792, 384, 6240, 544, 224, 10592, 3712, 4128, 1184, 19264, 192, 640, 29792, 384, 4448, 800, 1376, 7168, 320, 1376, 544, 512, 96, 3904, 1888, 1568, 544, 1600, 1536, 2176, 3552, 224, 192, 6944, 3072, 3424, 800, 128, 992, 9440, 192, 3296, 256, 128, 160, 832, 1440]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 169.62912
+            estimated_memory_gb: 70.36
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 63.36
+              activation_base: 63.36
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16384
+            local_tokens: 16384.0
+            sequence_ids: [58, 46, 41, 55, 62, 32, 53, 8, 20, 37, 43, 38, 5, 2, 18, 30, 35, 13, 48, 57, 61, 54]
+            sequence_lengths: [3296, 2176, 1888, 992, 832, 800, 800, 608, 544, 544, 544, 512, 416, 384, 384, 384, 320, 256, 224, 192, 160, 128]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 311.774162
+            estimated_memory_gb: 43.50625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 36.50625
+              activation_base: 36.50625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 9440
+            local_tokens: 9440.0
+            sequence_ids: [56]
+            sequence_lengths: [9440]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 352.585819
+            estimated_memory_gb: 68.1325
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 61.1325
+              activation_base: 61.1325
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15808
+            local_tokens: 15808.0
+            sequence_ids: [34, 19, 42, 28, 49]
+            sequence_lengths: [7168, 6240, 1568, 640, 192]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 175.448745
+            estimated_memory_gb: 33.85375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 26.85375
+              activation_base: 26.85375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 6944
+            local_tokens: 6944.0
+            sequence_ids: [50]
+            sequence_lengths: [6944]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 202.03571
+            estimated_memory_gb: 66.6475
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 59.6475
+              activation_base: 59.6475
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15424
+            local_tokens: 15424.0
+            sequence_ids: [23, 47, 51, 63, 33, 6, 7, 16, 21, 60, 15, 39]
+            sequence_lengths: [3712, 3552, 3072, 1440, 1376, 992, 512, 224, 224, 128, 96, 96]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 369.801774
+            estimated_memory_gb: 70.1125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 63.1125
+              activation_base: 63.1125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16320
+            local_tokens: 16320.0
+            sequence_ids: [10, 31, 1]
+            sequence_lengths: [8032, 4448, 3840]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 92.753495
+            estimated_memory_gb: 44.99125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 37.99125
+              activation_base: 37.99125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 9824
+            local_tokens: 9824.0
+            sequence_ids: [17, 44, 45, 36, 14, 25, 9, 27, 12]
+            sequence_lengths: [1792, 1600, 1536, 1376, 1280, 1184, 704, 192, 160]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 176.981091
+            estimated_memory_gb: 55.015
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 48.015
+              activation_base: 48.015
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12416
+            local_tokens: 12416.0
+            sequence_ids: [24, 52, 11, 4, 3]
+            sequence_lengths: [4128, 3424, 3040, 1344, 480]
+          -
+            group_id: 8
+            num_gpus: 2
+            strategy: ulysses
+            strategy_label: ulysses×2
+            sp_size: 2
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 664.791739
+            estimated_memory_gb: 47.033125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 40.033125
+              activation_base: 40.033125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 20704
+            local_tokens: 10352.0
+            sequence_ids: [0, 40, 59]
+            sequence_lengths: [16544, 3904, 256]
+          -
+            group_id: 9
+            num_gpus: 2
+            strategy: ulysses
+            strategy_label: ulysses×2
+            sp_size: 2
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 1037.951471
+            estimated_memory_gb: 64.729375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 57.729375
+              activation_base: 57.729375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 29856
+            local_tokens: 14928.0
+            sequence_ids: [26, 22]
+            sequence_lengths: [19264, 10592]
+          -
+            group_id: 10
+            num_gpus: 4
+            strategy: ulysses
+            strategy_label: ulysses×4
+            sp_size: 4
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 1106.994897
+            estimated_memory_gb: 35.802813
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 28.802812
+              activation_base: 28.802812
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 29792
+            local_tokens: 7448.0
+            sequence_ids: [29]
+            sequence_lengths: [29792]
+  ring_only:
+    allowed_attn_types: [ring]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 825.084338
+    solver_wall_s: 2.766296
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 825.084338
+        seq_sum: 182912
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [16544, 3840, 384, 480, 1344, 416, 992, 512, 608, 704, 8032, 3040, 160, 256, 1280, 96, 224, 1792, 384, 6240, 544, 224, 10592, 3712, 4128, 1184, 19264, 192, 640, 29792, 384, 4448, 800, 1376, 7168, 320, 1376, 544, 512, 96, 3904, 1888, 1568, 544, 1600, 1536, 2176, 3552, 224, 192, 6944, 3072, 3424, 800, 128, 992, 9440, 192, 3296, 256, 128, 160, 832, 1440]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 135.397715
+            estimated_memory_gb: 60.7075
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 53.7075
+              activation_base: 53.7075
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 13888
+            local_tokens: 13888.0
+            sequence_ids: [46, 41, 44, 63, 36, 25, 6, 43, 5, 18, 30, 13, 16, 21, 48, 27, 49, 57]
+            sequence_lengths: [2176, 1888, 1600, 1440, 1376, 1184, 992, 544, 416, 384, 384, 256, 224, 224, 224, 192, 192, 192]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 471.240392
+            estimated_memory_gb: 71.35
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.35
+              activation_base: 64.35
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16640
+            local_tokens: 16640.0
+            sequence_ids: [22, 40, 33, 38, 12, 15]
+            sequence_lengths: [10592, 3904, 1376, 512, 160, 96]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 141.671132
+            estimated_memory_gb: 58.7275
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 51.7275
+              activation_base: 51.7275
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 13376
+            local_tokens: 13376.0
+            sequence_ids: [23, 42, 55, 62, 32, 53, 9, 28, 20, 37, 7, 3, 2, 35, 59, 61, 54]
+            sequence_lengths: [3712, 1568, 992, 832, 800, 800, 704, 640, 544, 544, 512, 480, 384, 320, 256, 160, 128]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 408.374785
+            estimated_memory_gb: 70.855
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 63.855
+              activation_base: 63.855
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16512
+            local_tokens: 16512.0
+            sequence_ids: [56, 52, 11, 8]
+            sequence_lengths: [9440, 3424, 3040, 608]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 151.948751
+            estimated_memory_gb: 47.8375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 40.8375
+              activation_base: 40.8375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 10560
+            local_tokens: 10560.0
+            sequence_ids: [31, 58, 45, 14]
+            sequence_lengths: [4448, 3296, 1536, 1280]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 143.371866
+            estimated_memory_gb: 47.3425
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 40.3425
+              activation_base: 40.3425
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 10432
+            local_tokens: 10432.0
+            sequence_ids: [24, 51, 17, 4, 39]
+            sequence_lengths: [4128, 3072, 1792, 1344, 96]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 53.527716
+            estimated_memory_gb: 20.73625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 13.73625
+              activation_base: 13.73625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 3552
+            local_tokens: 3552.0
+            sequence_ids: [47]
+            sequence_lengths: [3552]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 232.023236
+            estimated_memory_gb: 38.55625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 31.55625
+              activation_base: 31.55625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 8160
+            local_tokens: 8160.0
+            sequence_ids: [10, 60]
+            sequence_lengths: [8032, 128]
+          -
+            group_id: 8
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 762.691971
+            estimated_memory_gb: 58.10875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 51.10875
+              activation_base: 51.10875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 26432
+            local_tokens: 13216.0
+            sequence_ids: [26, 34]
+            sequence_lengths: [19264, 7168]
+          -
+            group_id: 9
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 723.693637
+            estimated_memory_gb: 71.906875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.906875
+              activation_base: 64.906875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 33568
+            local_tokens: 16784.0
+            sequence_ids: [0, 50, 19, 1]
+            sequence_lengths: [16544, 6944, 6240, 3840]
+          -
+            group_id: 10
+            num_gpus: 4
+            strategy: ring
+            strategy_label: ring×4
+            sp_size: 1
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 825.084338
+            estimated_memory_gb: 35.802813
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 28.802812
+              activation_base: 28.802812
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 29792
+            local_tokens: 7448.0
+            sequence_ids: [29]
+            sequence_lengths: [29792]
+  ulysses_ring:
+    allowed_attn_types: [ulysses, ring]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 825.084338
+    solver_wall_s: 4.77511
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 825.084338
+        seq_sum: 182912
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [16544, 3840, 384, 480, 1344, 416, 992, 512, 608, 704, 8032, 3040, 160, 256, 1280, 96, 224, 1792, 384, 6240, 544, 224, 10592, 3712, 4128, 1184, 19264, 192, 640, 29792, 384, 4448, 800, 1376, 7168, 320, 1376, 544, 512, 96, 3904, 1888, 1568, 544, 1600, 1536, 2176, 3552, 224, 192, 6944, 3072, 3424, 800, 128, 992, 9440, 192, 3296, 256, 128, 160, 832, 1440]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 99.828812
+            estimated_memory_gb: 40.04125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 33.04125
+              activation_base: 33.04125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 8544
+            local_tokens: 8544.0
+            sequence_ids: [47, 63, 25, 53, 3, 5, 13, 27, 54, 39]
+            sequence_lengths: [3552, 1440, 1184, 800, 480, 416, 256, 192, 128, 96]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 245.081007
+            estimated_memory_gb: 64.42
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 57.42
+              activation_base: 57.42
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 14848
+            local_tokens: 14848.0
+            sequence_ids: [50, 36, 14, 55, 32, 28, 37, 43, 18, 30, 35, 59, 49, 57]
+            sequence_lengths: [6944, 1376, 1280, 992, 800, 640, 544, 544, 384, 384, 320, 256, 192, 192]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 180.160186
+            estimated_memory_gb: 54.39625
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 47.39625
+              activation_base: 47.39625
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12256
+            local_tokens: 12256.0
+            sequence_ids: [31, 24, 44, 62, 9, 20]
+            sequence_lengths: [4448, 4128, 1600, 832, 704, 544]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 180.606686
+            estimated_memory_gb: 54.89125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 47.89125
+              activation_base: 47.89125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12384
+            local_tokens: 12384.0
+            sequence_ids: [1, 23, 58, 45]
+            sequence_lengths: [3840, 3712, 3296, 1536]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 223.257602
+            estimated_memory_gb: 57.11875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 50.11875
+              activation_base: 50.11875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12960
+            local_tokens: 12960.0
+            sequence_ids: [19, 11, 41, 17]
+            sequence_lengths: [6240, 3040, 1888, 1792]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 334.875384
+            estimated_memory_gb: 70.73125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 63.73125
+              activation_base: 63.73125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16480
+            local_tokens: 16480.0
+            sequence_ids: [10, 40, 42, 33, 6, 7, 15]
+            sequence_lengths: [8032, 3904, 1568, 1376, 992, 512, 96]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 261.325508
+            estimated_memory_gb: 60.2125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 53.2125
+              activation_base: 53.2125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 13760
+            local_tokens: 13760.0
+            sequence_ids: [34, 51, 4, 8, 38, 2, 48, 12, 61, 60]
+            sequence_lengths: [7168, 3072, 1344, 608, 512, 384, 224, 160, 160, 128]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 391.274074
+            estimated_memory_gb: 66.895
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 59.895
+              activation_base: 59.895
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15488
+            local_tokens: 15488.0
+            sequence_ids: [56, 52, 46, 16, 21]
+            sequence_lengths: [9440, 3424, 2176, 224, 224]
+          -
+            group_id: 8
+            num_gpus: 2
+            strategy: ulysses
+            strategy_label: ulysses×2
+            sp_size: 2
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 779.877261
+            estimated_memory_gb: 44.24875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 37.24875
+              activation_base: 37.24875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 19264
+            local_tokens: 9632.0
+            sequence_ids: [26]
+            sequence_lengths: [19264]
+          -
+            group_id: 9
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 706.117855
+            estimated_memory_gb: 59.47
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 52.47
+              activation_base: 52.47
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 27136
+            local_tokens: 13568.0
+            sequence_ids: [0, 22]
+            sequence_lengths: [16544, 10592]
+          -
+            group_id: 10
+            num_gpus: 4
+            strategy: ring
+            strategy_label: ring×4
+            sp_size: 1
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 825.084338
+            estimated_memory_gb: 35.802813
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 28.802812
+              activation_base: 28.802812
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 29792
+            local_tokens: 7448.0
+            sequence_ids: [29]
+            sequence_lengths: [29792]
+  usp_only:
+    allowed_attn_types: [usp]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 1509.967082
+    solver_wall_s: 17.044077
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 1509.967082
+        seq_sum: 182912
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [16544, 3840, 384, 480, 1344, 416, 992, 512, 608, 704, 8032, 3040, 160, 256, 1280, 96, 224, 1792, 384, 6240, 544, 224, 10592, 3712, 4128, 1184, 19264, 192, 640, 29792, 384, 4448, 800, 1376, 7168, 320, 1376, 544, 512, 96, 3904, 1888, 1568, 544, 1600, 1536, 2176, 3552, 224, 192, 6944, 3072, 3424, 800, 128, 992, 9440, 192, 3296, 256, 128, 160, 832, 1440]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 293.108692
+            estimated_memory_gb: 71.845
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.845
+              activation_base: 64.845
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16768
+            local_tokens: 16768.0
+            sequence_ids: [50, 23, 17, 33, 62, 9, 28, 12, 61, 54, 60, 15, 39]
+            sequence_lengths: [6944, 3712, 1792, 1376, 832, 704, 640, 160, 160, 128, 128, 96, 96]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 474.913519
+            estimated_memory_gb: 71.96875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.96875
+              activation_base: 64.96875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16800
+            local_tokens: 16800.0
+            sequence_ids: [22, 40, 41, 21, 49]
+            sequence_lengths: [10592, 3904, 1888, 224, 192]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 395.727969
+            estimated_memory_gb: 71.96875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.96875
+              activation_base: 64.96875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16800
+            local_tokens: 16800.0
+            sequence_ids: [56, 52, 6, 55, 3, 2, 18, 30, 35]
+            sequence_lengths: [9440, 3424, 992, 992, 480, 384, 384, 384, 320]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 914.654858
+            estimated_memory_gb: 71.96875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.96875
+              activation_base: 64.96875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16800
+            local_tokens: 16800.0
+            sequence_ids: [0, 59]
+            sequence_lengths: [16544, 256]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 346.935115
+            estimated_memory_gb: 71.96875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.96875
+              activation_base: 64.96875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16800
+            local_tokens: 16800.0
+            sequence_ids: [10, 31, 4, 14, 25, 7]
+            sequence_lengths: [8032, 4448, 1344, 1280, 1184, 512]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 182.473086
+            estimated_memory_gb: 71.72125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.72125
+              activation_base: 64.72125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16736
+            local_tokens: 16736.0
+            sequence_ids: [51, 11, 46, 42, 63, 32, 53, 8, 20, 37, 43, 38, 5, 13, 16, 27]
+            sequence_lengths: [3072, 3040, 2176, 1568, 1440, 800, 800, 608, 544, 544, 544, 512, 416, 256, 224, 192]
+          -
+            group_id: 6
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 288.456175
+            estimated_memory_gb: 71.35
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.35
+              activation_base: 64.35
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16640
+            local_tokens: 16640.0
+            sequence_ids: [19, 24, 58, 44, 36]
+            sequence_lengths: [6240, 4128, 3296, 1600, 1376]
+          -
+            group_id: 7
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 319.985319
+            estimated_memory_gb: 70.855
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 63.855
+              activation_base: 63.855
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16512
+            local_tokens: 16512.0
+            sequence_ids: [34, 1, 47, 45, 48, 57]
+            sequence_lengths: [7168, 3840, 3552, 1536, 224, 192]
+          -
+            group_id: 8
+            num_gpus: 8
+            strategy: usp
+            strategy_label: "usp(sp2×cp4,cf)"
+            sp_size: 2
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 1363.302718
+            estimated_memory_gb: 30.713594
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 23.713594
+              activation_base: 23.713594
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 49056
+            local_tokens: 6132.0
+            sequence_ids: [29, 26]
+            sequence_lengths: [29792, 19264]
+  ulysses_ring_usp:
+    allowed_attn_types: [ulysses, ring, usp]
+    implicit_local_p1: true
+    status: ok
+    total_estimated_time_ms: 825.084338
+    solver_wall_s: 4.843294
+    selected_microbatch_count: 1
+    microbatches:
+      -
+        microbatch_id: 0
+        estimated_time_ms: 825.084338
+        seq_sum: 182912
+        num_sequences: 64
+        sequence_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        sequence_lengths: [16544, 3840, 384, 480, 1344, 416, 992, 512, 608, 704, 8032, 3040, 160, 256, 1280, 96, 224, 1792, 384, 6240, 544, 224, 10592, 3712, 4128, 1184, 19264, 192, 640, 29792, 384, 4448, 800, 1376, 7168, 320, 1376, 544, 512, 96, 3904, 1888, 1568, 544, 1600, 1536, 2176, 3552, 224, 192, 6944, 3072, 3424, 800, 128, 992, 9440, 192, 3296, 256, 128, 160, 832, 1440]
+        groups:
+          -
+            group_id: 0
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 194.864858
+            estimated_memory_gb: 71.1025
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 64.1025
+              activation_base: 64.1025
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16576
+            local_tokens: 16576.0
+            sequence_ids: [40, 51, 63, 33, 14, 53, 28, 7, 38, 3, 2, 35, 13, 59, 16, 21, 48, 57, 12, 60, 15, 39]
+            sequence_lengths: [3904, 3072, 1440, 1376, 1280, 800, 640, 512, 512, 480, 384, 320, 256, 256, 224, 224, 224, 192, 160, 128, 96, 96]
+          -
+            group_id: 1
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 86.251022
+            estimated_memory_gb: 30.76
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 23.76
+              activation_base: 23.76
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 6144
+            local_tokens: 6144.0
+            sequence_ids: [24, 25, 62]
+            sequence_lengths: [4128, 1184, 832]
+          -
+            group_id: 2
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 244.070073
+            estimated_memory_gb: 64.04875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 57.04875
+              activation_base: 57.04875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 14752
+            local_tokens: 14752.0
+            sequence_ids: [19, 47, 17, 42, 6, 8]
+            sequence_lengths: [6240, 3552, 1792, 1568, 992, 608]
+          -
+            group_id: 3
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 184.348359
+            estimated_memory_gb: 57.2425
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 50.2425
+              activation_base: 50.2425
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 12992
+            local_tokens: 12992.0
+            sequence_ids: [31, 23, 46, 36, 20, 37, 49]
+            sequence_lengths: [4448, 3712, 2176, 1376, 544, 544, 192]
+          -
+            group_id: 4
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 252.132919
+            estimated_memory_gb: 65.53375
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 58.53375
+              activation_base: 58.53375
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 15136
+            local_tokens: 15136.0
+            sequence_ids: [50, 41, 45, 4, 55, 32, 43, 5, 30, 61, 54]
+            sequence_lengths: [6944, 1888, 1536, 1344, 992, 800, 544, 416, 384, 160, 128]
+          -
+            group_id: 5
+            num_gpus: 1
+            strategy: ulysses
+            strategy_label: ulysses×1
+            sp_size: 1
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 226.764988
+            estimated_memory_gb: 70.73125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 63.73125
+              activation_base: 63.73125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 16480
+            local_tokens: 16480.0
+            sequence_ids: [1, 52, 58, 11, 44, 9, 18, 27]
+            sequence_lengths: [3840, 3424, 3296, 3040, 1600, 704, 384, 192]
+          -
+            group_id: 6
+            num_gpus: 2
+            strategy: ulysses
+            strategy_label: ulysses×2
+            sp_size: 2
+            cp_size: 1
+            placement: head_first
+            estimated_time_ms: 779.877261
+            estimated_memory_gb: 44.24875
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 37.24875
+              activation_base: 37.24875
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 19264
+            local_tokens: 9632.0
+            sequence_ids: [26]
+            sequence_lengths: [19264]
+          -
+            group_id: 7
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 460.073621
+            estimated_memory_gb: 56.87125
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 49.87125
+              activation_base: 49.87125
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 25792
+            local_tokens: 12896.0
+            sequence_ids: [22, 10, 34]
+            sequence_lengths: [10592, 8032, 7168]
+          -
+            group_id: 8
+            num_gpus: 2
+            strategy: ring
+            strategy_label: ring×2
+            sp_size: 1
+            cp_size: 2
+            placement: context_first
+            estimated_time_ms: 666.884949
+            estimated_memory_gb: 57.2425
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 50.2425
+              activation_base: 50.2425
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 25984
+            local_tokens: 12992.0
+            sequence_ids: [0, 56]
+            sequence_lengths: [16544, 9440]
+          -
+            group_id: 9
+            num_gpus: 4
+            strategy: ring
+            strategy_label: ring×4
+            sp_size: 1
+            cp_size: 4
+            placement: context_first
+            estimated_time_ms: 825.084338
+            estimated_memory_gb: 35.802813
+            memory_breakdown_gb:
+              model_states: 7.0
+              activation: 28.802812
+              activation_base: 28.802812
+              activation_head_padding_extra: 0.0
+              formula: model_states + activation; activation = act_per_token * seq_sum / num_gpus + head_padding_extra
+            seq_sum: 29792
+            local_tokens: 7448.0
+            sequence_ids: [29]
+            sequence_lengths: [29792]
+comparison:
+  baseline: ulysses_only
+  speedup_vs_ulysses_only:
+    ulysses_only: 1.0
+    ring_only: 1.341675
+    ulysses_ring: 1.341675
+    usp_only: 0.733125
+    ulysses_ring_usp: 1.341675

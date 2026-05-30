@@ -67,14 +67,21 @@ def _parse_forced_strategy(strategy_str):
     return groups
 
 
-def _build_forced_groups(seqs, world_size, forced_config):
+def _build_forced_groups(seqs, world_size, forced_config, chunks=1):
     """Build forced heterogeneous groups for testing.
 
     forced_config: list of (attn_type, parallel_size) or
                           (attn_type, parallel_size, sp_size, cp_size).
     If a single entry doesn't cover all GPUs it is auto-replicated.
+
+    chunks: number of sequential microbatches to produce. Sequences are
+    round-robin partitioned across the K microbatches, then each microbatch
+    runs the same forced group layout. With ``chunks=1`` behaves exactly as
+    before (single-microbatch global batch).
     """
     from galvatron.models.varlen_llama_hf.adacpsp_solver import ParallelStrategy
+
+    chunks = max(1, int(chunks))
 
     normalised = []
     for entry in forced_config:
@@ -99,18 +106,28 @@ def _build_forced_groups(seqs, world_size, forced_config):
         total_ps = sum(ps for _, ps, _, _ in normalised)
     assert total_ps == world_size
 
-    group_seqs = [[] for _ in range(len(normalised))]
+    # First split sequences into `chunks` microbatches (round-robin so length
+    # distribution stays balanced across microbatches), then within each
+    # microbatch split across forced groups.
+    mb_seqs = [[] for _ in range(chunks)]
     for i, seq in enumerate(seqs):
-        group_seqs[i % len(normalised)].append(seq)
+        mb_seqs[i % chunks].append(seq)
 
-    groups = []
-    for (attn_type, parallel_size, sp_size, cp_size), g_seqs in zip(normalised, group_seqs):
-        groups.append((
-            ParallelStrategy(attn_type=attn_type, parallel_size=parallel_size,
-                             sp_size=sp_size, cp_size=cp_size),
-            g_seqs,
-        ))
-    return [groups]
+    all_microbatches = []
+    for chunk_seqs in mb_seqs:
+        group_seqs = [[] for _ in range(len(normalised))]
+        for i, seq in enumerate(chunk_seqs):
+            group_seqs[i % len(normalised)].append(seq)
+
+        groups = []
+        for (attn_type, parallel_size, sp_size, cp_size), g_seqs in zip(normalised, group_seqs):
+            groups.append((
+                ParallelStrategy(attn_type=attn_type, parallel_size=parallel_size,
+                                 sp_size=sp_size, cp_size=cp_size),
+                g_seqs,
+            ))
+        all_microbatches.append(groups)
+    return all_microbatches
 
 
 def _unpack_packed_batch(batch):
@@ -372,7 +389,9 @@ def _adacpsp_solve_and_assign(batch, adacpsp_optimizer, forced_strategy,
         solver_cfg = _get_adacpsp_solver_config(args)
 
         if forced_strategy is not None:
-            all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
+            forced_chunks = int(getattr(args, "adaCPSP_forced_chunks", 1) or 1)
+            all_groups = _build_forced_groups(seqs, world_size, forced_strategy,
+                                              chunks=forced_chunks)
         else:
             all_groups, _ = _solve_global_batch_with_config(
                 adacpsp_optimizer, seqs, solver_cfg, log_context=solve_prefix
@@ -478,7 +497,8 @@ def _groups_to_micro_res(all_groups):
 
 
 def _async_solver_worker(
-    seq_lens, result_queue, forced_strategy, world_size, solver_cfg, log_context=None
+    seq_lens, result_queue, forced_strategy, world_size, solver_cfg, log_context=None,
+    forced_chunks=1,
 ):
     """
     Solver subprocess entry point (runs on CPU only).
@@ -492,7 +512,8 @@ def _async_solver_worker(
     seqs = [Sequence(seq=sl, id=i) for i, sl in enumerate(seq_lens)]
 
     if forced_strategy is not None:
-        all_groups = _build_forced_groups(seqs, world_size, forced_strategy)
+        all_groups = _build_forced_groups(seqs, world_size, forced_strategy,
+                                          chunks=forced_chunks)
     else:
         all_groups, _ = _solve_global_batch_with_config(
             _async_optimizer, seqs, solver_cfg, log_context=log_context
@@ -520,9 +541,11 @@ class _AsyncSolverState:
     stays synchronised.
     """
 
-    def __init__(self, optimizer, forced_strategy, solver_cfg, world_size, rank):
+    def __init__(self, optimizer, forced_strategy, solver_cfg, world_size, rank,
+                 forced_chunks=1):
         self._optimizer = optimizer
         self._forced_strategy = forced_strategy
+        self._forced_chunks = int(forced_chunks or 1)
         self._solver_cfg = solver_cfg
         self._world_size = world_size
         self._rank = rank
@@ -584,6 +607,7 @@ class _AsyncSolverState:
                 target=_async_solver_worker,
                 args=(seq_lens, self._result_queue,
                       self._forced_strategy, self._world_size, self._solver_cfg, solve_prefix),
+                kwargs={"forced_chunks": self._forced_chunks},
             )
             self._process.start()
 
@@ -625,7 +649,8 @@ class _AsyncSolverState:
 
         if self._forced_strategy is not None:
             all_groups = _build_forced_groups(
-                seqs, self._world_size, self._forced_strategy)
+                seqs, self._world_size, self._forced_strategy,
+                chunks=self._forced_chunks)
         else:
             all_groups, _ = _solve_global_batch_with_config(
                 self._optimizer, seqs, self._solver_cfg, log_context=solve_prefix
@@ -778,15 +803,26 @@ def train(args):
             legacy_comm_json = None
             comm_profile_json = None
             validation_json = None
+            # Prefer comm_profile_v2 (newer, has raw measurement points with
+            # latency-floor lookup for small messages). Falls back to legacy
+            # profile only if no v2 is available.
+            comm_v2_json = None
+            comm_legacy_json = None
             for pf in sorted(_glob.glob(os.path.join(configs_dir, "comm_profile_*.json")), reverse=True):
                 try:
                     with open(pf) as _f:
                         _d = _json.load(_f)
-                    if "alltoall" in _d and "p2p_ring" in _d:
-                        comm_profile_json = pf
-                        break
+                    if comm_v2_json is None and _d.get("type") == "comm_profile_v2":
+                        comm_v2_json = pf
+                        continue
+                    if comm_legacy_json is None and "alltoall" in _d and "p2p_ring" in _d:
+                        comm_legacy_json = pf
                 except Exception:
                     pass
+            comm_profile_json = comm_v2_json or comm_legacy_json
+            if rank == 0:
+                _kind = "v2" if comm_v2_json else ("legacy" if comm_legacy_json else "none")
+                print(f"[AdaCPSP] Selected comm profile ({_kind}): {comm_profile_json}")
             for pf in sorted(_glob.glob(os.path.join(configs_dir, "profile_validate_*.json")), reverse=True):
                 try:
                     with open(pf) as _f:
@@ -872,6 +908,51 @@ def train(args):
             )
             if rank == 0:
                 print("[AdaCPSP] Using default cost model (no profiling data found)")
+
+        # Non-attention residual profile (calibrated via 22_bench_residual +
+        # 23_fit_residual). Picks the newest matching residual_profile_*.json.
+        if os.path.isdir(configs_dir):
+            import glob as _glob, json as _json
+            residual_paths = sorted(
+                _glob.glob(os.path.join(configs_dir, "residual_profile_*.json")),
+                reverse=True,
+            )
+            for rp in residual_paths:
+                try:
+                    with open(rp) as _f:
+                        residual_data = _json.load(_f)
+                    if residual_data.get("schema") == "adacpsp_residual_v1":
+                        costmodel.apply_residual_profile(residual_data)
+                        if rank == 0:
+                            print(f"[AdaCPSP] Loaded residual profile: {rp}")
+                        break
+                except Exception as exc:
+                    if rank == 0:
+                        print(f"[AdaCPSP] Skipped residual profile {rp}: {exc}")
+
+            # b-decomposition profile (calibrated via 24_bench_b_decomp +
+            # 25b_fit_b_decomp_quick.py). Adds per-step constants `b_step_fb_ms`
+            # and `b_step_external_ms`; may also override per-sp residual
+            # coefficients when re-fit in the current training environment.
+            b_decomp_paths = sorted(
+                _glob.glob(os.path.join(configs_dir, "b_decomp_profile_*.json")),
+                reverse=True,
+            )
+            for rp in b_decomp_paths:
+                try:
+                    with open(rp) as _f:
+                        b_decomp_data = _json.load(_f)
+                    if b_decomp_data.get("schema") == "adacpsp_b_decomp_v1":
+                        costmodel.apply_b_decomp_profile(b_decomp_data)
+                        if rank == 0:
+                            print(f"[AdaCPSP] Loaded b-decomp profile: {rp}")
+                            print(f"          b_step_fb_per_sp={costmodel.b_step_fb_per_sp}, "
+                                  f"default={costmodel.b_step_fb_default_ms:.1f}ms, "
+                                  f"b_step_external_ms={costmodel.b_step_external_ms:.1f}")
+                        break
+                except Exception as exc:
+                    if rank == 0:
+                        print(f"[AdaCPSP] Skipped b-decomp profile {rp}: {exc}")
 
         # Determine memory limit
         override_mem = getattr(args, 'memory_limit_gb', 0)
@@ -967,6 +1048,7 @@ def train(args):
             solver_cfg=solver_cfg,
             world_size=world_size,
             rank=rank,
+            forced_chunks=int(getattr(args, "adaCPSP_forced_chunks", 1) or 1),
         )
         if rank == 0:
             print(
@@ -993,6 +1075,38 @@ def train(args):
         args=args,
         group=dataloader_group,
     )
+
+    # ═══════════════════════════════════════════════════════
+    # AdaCPSP: eagerly create + warm every NCCL ProcessGroup the solver could
+    # ever pick. This pays one upfront (~minutes) cost so that steady-state
+    # iterations are NEVER contaminated by 5-100s NCCL first-touch spikes
+    # (dist.new_group + ncclCommInitRank + IB QP setup). Required for the
+    # benchmark numbers to faithfully reflect the parallelization win, not
+    # accidental warmup overhead.
+    # ═══════════════════════════════════════════════════════
+    if args.use_adaCPSP and int(getattr(args, "adaCPSP_precreate_groups", 1)) == 1:
+        from galvatron.models.varlen_llama_hf.adacpsp_group_manager import (
+            precreate_all_groups,
+        )
+        _attn_types = tuple(getattr(args, "adaCPSP_attn_types", ["ulysses", "ring", "usp"]) or ["ulysses", "ring", "usp"])
+        _gpn = max(1, torch.cuda.device_count())
+        _max_ps_arg = int(getattr(args, "adaCPSP_precreate_max_ps", 0) or 0)
+        _max_ps = _max_ps_arg if _max_ps_arg > 0 else world_size
+        if rank == 0:
+            print(
+                f"[AdaCPSP] Pre-creating NCCL groups (one-time NCCL warmup) for "
+                f"world={world_size}, gpus_per_node={_gpn}, "
+                f"max_parallel_size={_max_ps}, attn_types={list(_attn_types)} ..."
+            )
+        precreate_all_groups(
+            world_size=world_size,
+            gpus_per_node=_gpn,
+            max_parallel_size=_max_ps,
+            min_parallel_size=1,
+            allowed_attn_types=_attn_types,
+            warm_with_allreduce=True,
+            verbose=True,
+        )
 
     if local_rank == 0:
         print("Start training...")

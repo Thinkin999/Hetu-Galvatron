@@ -75,6 +75,208 @@ def _get_or_create_group(ranks: List[int]) -> Optional[dist.ProcessGroup]:
     return None
 
 
+def _enumerate_all_possible_group_tuples(
+    world_size: int,
+    gpus_per_node: int,
+    max_parallel_size: int,
+    min_parallel_size: int = 1,
+    allowed_attn_types: Tuple[str, ...] = ("ulysses", "ring", "usp"),
+) -> List[Tuple[int, ...]]:
+    """
+    Enumerate every rank-tuple that `convert_microbatch_res` can ever pass to
+    `_get_or_create_group`, given the solver's search space.
+
+    Mirrors `AdaCPSPOptimizer._generate_gpu_partitions` and
+    `_strategies_for_group_size` semantics:
+      * Groups laid out on CONSECUTIVE rank ranges
+      * Group size is a power of 2 in [min_parallel_size, max_parallel_size]
+      * Base ranks are multiples of the group size that come out of partitions
+        of N=world_size into descending powers of 2 — i.e. for each size s,
+        bases {0, s, 2s, ...} where base+s <= world_size.
+      * USP creates additional strided SP groups inside each block; CP groups
+        in context_first happen to be consecutive (subset of simple groups);
+        head_first swaps the roles.
+
+    Returns a deterministic-ordered list of unique rank tuples.
+    """
+    max_ps = min(max_parallel_size or world_size, world_size)
+    min_ps = max(2, min_parallel_size)
+
+    sizes: List[int] = []
+    s = 2
+    while s <= max_ps:
+        if s >= min_ps:
+            sizes.append(s)
+        s *= 2
+
+    tuples: Set[Tuple[int, ...]] = set()
+
+    # 1) Simple consecutive groups (Ulysses / Ring of size `size`)
+    for size in sizes:
+        for base in range(0, world_size - size + 1, size):
+            tuples.add(tuple(range(base, base + size)))
+
+    # 2) USP sub-groups within each consecutive block of size `block`
+    if "usp" in allowed_attn_types:
+        for block in sizes:
+            if block < 4:
+                continue  # USP requires sp>=2 AND cp>=2 → block >= 4
+            # placements
+            placements = ["context_first"]
+            if block > gpus_per_node:
+                placements.append("head_first")
+            for base in range(0, world_size - block + 1, block):
+                sp = 2
+                while sp <= block // 2:
+                    if block % sp != 0:
+                        sp *= 2
+                        continue
+                    cp = block // sp
+                    if cp < 2:
+                        sp *= 2
+                        continue
+                    for placement in placements:
+                        if placement == "context_first":
+                            # rank(sp_idx, cp_idx) = base + sp_idx*cp + cp_idx
+                            # CP groups consecutive, SP groups strided
+                            for sp_idx in range(sp):
+                                cp_ranks = tuple(
+                                    base + sp_idx * cp + j for j in range(cp)
+                                )
+                                tuples.add(cp_ranks)
+                            for cp_idx in range(cp):
+                                sp_ranks = tuple(
+                                    base + sp_idx2 * cp + cp_idx
+                                    for sp_idx2 in range(sp)
+                                )
+                                tuples.add(sp_ranks)
+                        else:
+                            # head_first: rank(cp_idx, sp_idx) = base + cp_idx*sp + sp_idx
+                            # SP groups consecutive, CP groups strided
+                            for cp_idx in range(cp):
+                                sp_ranks = tuple(
+                                    base + cp_idx * sp + j for j in range(sp)
+                                )
+                                tuples.add(sp_ranks)
+                            for sp_idx in range(sp):
+                                cp_ranks = tuple(
+                                    base + cp_idx2 * sp + sp_idx
+                                    for cp_idx2 in range(cp)
+                                )
+                                tuples.add(cp_ranks)
+                    sp *= 2
+
+    # Deterministic, NCCL-friendly order: smaller groups first (cheaper init),
+    # then by lexicographic rank order.
+    return sorted(tuples, key=lambda t: (len(t), t))
+
+
+def precreate_all_groups(
+    world_size: Optional[int] = None,
+    gpus_per_node: int = 8,
+    max_parallel_size: Optional[int] = None,
+    min_parallel_size: int = 1,
+    allowed_attn_types: Tuple[str, ...] = ("ulysses", "ring", "usp"),
+    warm_with_allreduce: bool = True,
+    verbose: bool = True,
+) -> Dict[str, int]:
+    """
+    Eagerly create every NCCL ProcessGroup that the solver could ever dispatch
+    to, then force NCCL communicator initialization via a tiny all_reduce so
+    that subsequent steady-state iterations incur ZERO group-creation latency.
+
+    MUST be called collectively on ALL ranks (same arguments) before any
+    training step, and after `dist.init_process_group()` + CUDA device set.
+
+    The cost of this call is amortized over the entire run:
+      - For W=16, ~60-80 unique groups, ~3-5 min one-time
+      - Eliminates 5-100s "first-touch" spikes during training
+      - Solver decisions reflect TRUE steady-state cost, not warmup outliers
+
+    Returns: dict with counters {tuples_total, tuples_new, warmups_run}
+    """
+    import time
+
+    if world_size is None:
+        world_size = dist.get_world_size()
+    if max_parallel_size is None:
+        max_parallel_size = world_size
+
+    rank = dist.get_rank()
+    tuples = _enumerate_all_possible_group_tuples(
+        world_size=world_size,
+        gpus_per_node=gpus_per_node,
+        max_parallel_size=max_parallel_size,
+        min_parallel_size=min_parallel_size,
+        allowed_attn_types=allowed_attn_types,
+    )
+
+    if verbose and rank == 0:
+        # Bucket by size for readable logging
+        by_size: Dict[int, int] = {}
+        for t in tuples:
+            by_size[len(t)] = by_size.get(len(t), 0) + 1
+        print(
+            f"[GroupPrecreate] World={world_size}, gpn={gpus_per_node}, "
+            f"max_ps={max_parallel_size}, attn={allowed_attn_types}"
+        )
+        print(
+            f"[GroupPrecreate] Enumerated {len(tuples)} unique rank tuples: "
+            + ", ".join(f"size{k}×{v}" for k, v in sorted(by_size.items()))
+        )
+
+    device = torch.cuda.current_device() if torch.cuda.is_available() else None
+    dummy = (
+        torch.zeros(1, device=f"cuda:{device}", dtype=torch.float32)
+        if device is not None
+        else None
+    )
+
+    t0 = time.time()
+    new_groups = 0
+    warmups = 0
+    for idx, t in enumerate(tuples):
+        existed = t in _created_group_keys
+        # COLLECTIVE: every rank must enter this for each tuple, in identical order.
+        grp = _get_or_create_group(list(t))
+        if not existed:
+            new_groups += 1
+        # Force NCCL communicator init by issuing one tiny allreduce on members.
+        # Non-members skip (no collective participation needed for a sub-group).
+        if warm_with_allreduce and grp is not None and dummy is not None:
+            dist.all_reduce(dummy, group=grp)
+            warmups += 1
+        # Progress log (rank 0 only, throttled)
+        if verbose and rank == 0 and (idx + 1) % 16 == 0:
+            elapsed = time.time() - t0
+            print(
+                f"[GroupPrecreate] {idx + 1}/{len(tuples)} groups warmed "
+                f"({elapsed:.1f}s elapsed)",
+                flush=True,
+            )
+
+    # Synchronize all NCCL streams before the global barrier so that any
+    # pending warm-up allreduces are fully drained.
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    dist.barrier()
+    elapsed = time.time() - t0
+
+    if verbose and rank == 0:
+        print(
+            f"[GroupPrecreate] Done in {elapsed:.2f}s. "
+            f"new_groups={new_groups}, warmups_on_this_rank={warmups}, "
+            f"total_tuples={len(tuples)}"
+        )
+
+    return {
+        "tuples_total": len(tuples),
+        "tuples_new": new_groups,
+        "warmups_run": warmups,
+        "elapsed_s": elapsed,
+    }
+
+
 def convert_microbatch_res(micro_res):
     """
     Convert solver's microbatch result to per-rank assignment.

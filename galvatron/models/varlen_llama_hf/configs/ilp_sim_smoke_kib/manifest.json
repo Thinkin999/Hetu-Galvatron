@@ -1,0 +1,30 @@
+{
+  "dataset": "/mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/varlen_datasets/github.txt",
+  "attention_profile": "/mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/galvatron/models/varlen_llama_hf/configs/profile_validate_qwen2.5-7b_20260406_225144.json",
+  "comm_profile": "/mnt/bn/wyj-data0-hl/lqs/src/Hetu-Galvatron/galvatron/models/varlen_llama_hf/configs/comm_profile_qwen2.5-7b_16gpus_20260512_003327.json",
+  "cluster_size": 16,
+  "gpus_per_node": 8,
+  "memory_limit_gb": 72,
+  "global_batch_size": 64,
+  "max_seq": [
+    131072
+  ],
+  "random_batches": 0,
+  "tail_batches": 0,
+  "tail_long_count": 4,
+  "seed": 20260512,
+  "cases": {
+    "ulysses_only": [
+      "ulysses"
+    ],
+    "ring_only": [
+      "ring"
+    ],
+    "ulysses_ring": [
+      "ulysses",
+      "ring"
+    ]
+  },
+  "method": "full_ilp_no_time_limit",
+  "note": "Attention compute beyond profiled range is extrapolated from the last quadratic segment."
+}

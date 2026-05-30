@@ -13,9 +13,13 @@ CONDA_SH="${CONDA_SH:-${ROOT}/tools/miniforge3/etc/profile.d/conda.sh}"
 if [ -f "${CONDA_SH}" ] && [ -d "${ADACPSP_ENV}" ]; then
     # Auto-activate the expected benchmark env unless we are already inside it.
     if [ "${CONDA_PREFIX:-}" != "${ADACPSP_ENV}" ]; then
+        # conda's activate.d scripts may reference unbound vars (CFLAGS etc.);
+        # disable nounset for the duration of activation.
+        set +u
         # shellcheck disable=SC1090
         source "${CONDA_SH}"
         conda activate "${ADACPSP_ENV}"
+        set -u
     fi
 fi
 

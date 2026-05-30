@@ -1,13 +1,43 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 
+import contextlib
 import math
+import os
 from typing import Optional, Any, Tuple
 
 import torch
 from torch import Tensor
 from torch.nn import Module
 import torch.distributed as dist
+
+
+# Set GALVATRON_RING_TRACE_PER_STEP=1 to emit per-step `record_function` markers
+# inside ZigzagRingFlashAttention forward/backward. Off by default to avoid any
+# profiler overhead on production runs. Used by align_costmodel/08_trace_*.
+_RING_TRACE_PER_STEP = os.environ.get(
+    "GALVATRON_RING_TRACE_PER_STEP", "0"
+) not in ("", "0", "false", "False")
+
+
+def _ring_trace(name: str):
+    if _RING_TRACE_PER_STEP:
+        return torch.profiler.record_function(name)
+    return contextlib.nullcontext()
+
+
+# Set GALVATRON_ULYSSES_TRACE=1 to emit per-op record_function markers inside
+# DistributedAttention.forward (Ulysses) and _SeqAllToAll.backward. Used by
+# align_costmodel/15_trace_ulysses_*.
+_ULYSSES_TRACE = os.environ.get(
+    "GALVATRON_ULYSSES_TRACE", "0"
+) not in ("", "0", "false", "False")
+
+
+def _uly_trace(name: str):
+    if _ULYSSES_TRACE:
+        return torch.profiler.record_function(name)
+    return contextlib.nullcontext()
 
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.fusions.fused_softmax import FusedScaleMaskSoftmax
@@ -530,10 +560,8 @@ class _SeqAllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor, None, None]:
-
-        return (
-            None,
-            _SeqAllToAll.apply(
+        with _uly_trace(f"uly_bwd_{ctx.type or 'unk'}_a2a"):
+            grad_input = _SeqAllToAll.apply(
                 ctx.group,
                 *grad_output,
                 ctx.gather_idx,
@@ -543,7 +571,10 @@ class _SeqAllToAll(torch.autograd.Function):
                 ctx.handle,
                 ctx.type,
                 False,
-            ),
+            )
+        return (
+            None,
+            grad_input,
             None,
             None,
             None,
@@ -589,19 +620,35 @@ def _compute_head_padding(n_q_heads: int, n_kv_heads: int, sp_size: int):
 
 
 def _pad_heads(tensor: Tensor, extra: int, head_dim_idx: int = 2) -> Tensor:
-    """Replicate the first `extra` heads along `head_dim_idx` via concatenation.
+    """Append `extra` head replicas along `head_dim_idx`.
 
-    Autograd-safe: backward of torch.cat correctly accumulates gradients from
-    the replicated heads back to the originals.  When padded heads receive zero
+    When ``extra <= n_heads`` we simply slice-and-concat the first ``extra``
+    heads (single replica).  When ``extra > n_heads`` -- which happens for
+    Qwen2.5-7B at sp>=8 (n_kv=4, padded_n_kv=sp, kv_extra=sp-4 can exceed 4) --
+    we need MULTIPLE full replicas. We pad by appending ``floor(extra/n)`` full
+    copies and one partial slice of length ``extra % n``.
+
+    Autograd-safe: backward of torch.cat accumulates gradients from every
+    replicated head back to the originals. When padded heads receive zero
     output gradient (due to output slicing), their contribution is exactly zero.
     """
     if extra <= 0:
         return tensor
-    # Replicate the first `extra` heads (from the first `extra` GQA groups)
-    slices = [slice(None)] * tensor.ndim
-    slices[head_dim_idx] = slice(0, extra)
-    padding = tensor[tuple(slices)]
-    return torch.cat([tensor, padding], dim=head_dim_idx)
+    n = tensor.shape[head_dim_idx]
+    pieces = [tensor]
+    # Full replicas
+    full_reps = extra // n
+    for _ in range(full_reps):
+        pieces.append(tensor)
+    # Partial replica
+    remainder = extra - full_reps * n
+    if remainder > 0:
+        slices = [slice(None)] * tensor.ndim
+        slices[head_dim_idx] = slice(0, remainder)
+        pieces.append(tensor[tuple(slices)])
+    if len(pieces) == 1:
+        return tensor
+    return torch.cat(pieces, dim=head_dim_idx)
 
 
 def _unpad_heads(tensor: Tensor, original_heads: int, head_dim_idx: int = 2) -> Tensor:
@@ -686,10 +733,13 @@ class DistributedAttention(torch.nn.Module):
         )
 
         if kv_extra > 0:
-            key = _pad_heads(key, kv_extra, head_dim_idx)
-            value = _pad_heads(value, kv_extra, head_dim_idx)
+            with _uly_trace("uly_pad_k"):
+                key = _pad_heads(key, kv_extra, head_dim_idx)
+            with _uly_trace("uly_pad_v"):
+                value = _pad_heads(value, kv_extra, head_dim_idx)
         if q_extra > 0:
-            query = _pad_heads(query, q_extra, head_dim_idx)
+            with _uly_trace("uly_pad_q"):
+                query = _pad_heads(query, q_extra, head_dim_idx)
 
         # ---- All-to-All: scatter heads, gather sequence ----
         def bwd_hook(layer_type):
@@ -707,18 +757,21 @@ class DistributedAttention(torch.nn.Module):
 
         if sp_world_size > 1:
             self.layer_sync(query)
-            query_layer = _SeqAllToAll.apply(
-                self.spg, query, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "q"
-            )
+            with _uly_trace("uly_fwd_q_a2a"):
+                query_layer = _SeqAllToAll.apply(
+                    self.spg, query, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "q"
+                )
             self.layer_sync(key)
-            key_layer = _SeqAllToAll.apply(
-                self.spg, key, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "k"
-            )
+            with _uly_trace("uly_fwd_k_a2a"):
+                key_layer = _SeqAllToAll.apply(
+                    self.spg, key, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "k"
+                )
             if self.sp_overlap_comm:
                 self.dafult_stream.wait_stream(self.sp_stream)
-            value_layer = _SeqAllToAll.apply(
-                self.spg, value, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "v"
-            )
+            with _uly_trace("uly_fwd_v_a2a"):
+                value_layer = _SeqAllToAll.apply(
+                    self.spg, value, self.scatter_idx, self.gather_idx, batch_dim_idx, None, self.overlap_handles, "v"
+                )
             if self.sp_overlap_comm:
                 # Register a hook to synchronize dq and dk after the all-to-all
                 # operation when the gradient data is used.
@@ -734,21 +787,23 @@ class DistributedAttention(torch.nn.Module):
 
         # ---- Local attention ----
         head_dim = query_layer.shape[-1]
-        context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
+        with _uly_trace("uly_fwd_local_attn"):
+            context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
         context_layer = context_layer.view(context_layer.shape[0], context_layer.shape[1], -1, head_dim)
 
         # ---- Reverse All-to-All: scatter sequence, gather heads ----
         if sp_world_size > 1:
-            output = _SeqAllToAll.apply(
-                self.spg,
-                context_layer,
-                self.gather_idx,
-                self.scatter_idx,
-                batch_dim_idx,
-                self.sp_stream,
-                self.overlap_handles,
-                "o",
-            )
+            with _uly_trace("uly_fwd_o_a2a"):
+                output = _SeqAllToAll.apply(
+                    self.spg,
+                    context_layer,
+                    self.gather_idx,
+                    self.scatter_idx,
+                    batch_dim_idx,
+                    self.sp_stream,
+                    self.overlap_handles,
+                    "o",
+                )
         else:
             output = context_layer
 
@@ -756,7 +811,8 @@ class DistributedAttention(torch.nn.Module):
         # Slicing produces zero gradient for padded positions in backward,
         # ensuring gradient correctness without extra communication.
         if q_extra > 0:
-            output = _unpad_heads(output, n_q_heads_orig, head_dim_idx)
+            with _uly_trace("uly_unpad_o"):
+                output = _unpad_heads(output, n_q_heads_orig, head_dim_idx)
 
         # out e.g., [s/p::h]
         return output
@@ -1431,50 +1487,54 @@ def zigzag_ring_flash_attn_varlen_forward(
 
     old_lse = False
     for step in range(comm.world_size):
-        if step + 1 != comm.world_size:
-            next_k, next_v = comm.send_recv_kv(k, v)
+        with _ring_trace(f"ring_fwd_step_{step}"):
+            if step + 1 != comm.world_size:
+                with _ring_trace(f"ring_fwd_step_{step}_p2p_launch"):
+                    next_k, next_v = comm.send_recv_kv(k, v)
 
-        if step == 0:
-            # Tiny kernel so P2P is enqueued before flash-attn (same idea as non-varlen zigzag).
-            _ = torch.zeros((1,), device=torch.cuda.current_device())
-            block_out, block_lse = forward(q, k, v, causal=True)
-            if block_lse.dim() == 3:
-                old_lse = True
-                block_lse = flatten_varlen_lse(
-                    block_lse,
-                    cu_seqlens=cu_seqlens,
-                )
-            out, lse = update_out_and_lse(out, lse, block_out, block_lse)
-        elif step <= comm.rank:
-            k0 = k[half_index0]
-            v0 = v[half_index0]
-            # Tiny kernel so P2P is enqueued before flash-attn (same idea as non-varlen zigzag).
-            _ = torch.zeros((1,), device=torch.cuda.current_device())
-            block_out, block_lse = forward(q, k0, v0, causal=False)
-            if block_lse.dim() == 3:
-                old_lse = True
-                block_lse = flatten_varlen_lse(
-                    block_lse,
-                    cu_seqlens=cu_seqlens,
-                )
-            out, lse = update_out_and_lse(out, lse, block_out, block_lse)
-        else:
-            # Tiny kernel so P2P is enqueued before flash-attn (same idea as non-varlen zigzag).
-            _ = torch.zeros((1,), device=torch.cuda.current_device())
-            block_out, block_lse = forward(q1, k, v, causal=False)
-            if block_lse.dim() == 3:
-                old_lse = True
-                block_lse = flatten_varlen_lse(
-                    block_lse,
-                    cu_seqlens=half_cu_seqlens,
-                )
-            out[half_index1], lse[half_index1] = update_out_and_lse(
-                out[half_index1], lse[half_index1], block_out, block_lse
-            )
+            with _ring_trace(f"ring_fwd_step_{step}_compute"):
+                if step == 0:
+                    # Tiny kernel so P2P is enqueued before flash-attn (same idea as non-varlen zigzag).
+                    _ = torch.zeros((1,), device=torch.cuda.current_device())
+                    block_out, block_lse = forward(q, k, v, causal=True)
+                    if block_lse.dim() == 3:
+                        old_lse = True
+                        block_lse = flatten_varlen_lse(
+                            block_lse,
+                            cu_seqlens=cu_seqlens,
+                        )
+                    out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+                elif step <= comm.rank:
+                    k0 = k[half_index0]
+                    v0 = v[half_index0]
+                    # Tiny kernel so P2P is enqueued before flash-attn (same idea as non-varlen zigzag).
+                    _ = torch.zeros((1,), device=torch.cuda.current_device())
+                    block_out, block_lse = forward(q, k0, v0, causal=False)
+                    if block_lse.dim() == 3:
+                        old_lse = True
+                        block_lse = flatten_varlen_lse(
+                            block_lse,
+                            cu_seqlens=cu_seqlens,
+                        )
+                    out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+                else:
+                    # Tiny kernel so P2P is enqueued before flash-attn (same idea as non-varlen zigzag).
+                    _ = torch.zeros((1,), device=torch.cuda.current_device())
+                    block_out, block_lse = forward(q1, k, v, causal=False)
+                    if block_lse.dim() == 3:
+                        old_lse = True
+                        block_lse = flatten_varlen_lse(
+                            block_lse,
+                            cu_seqlens=half_cu_seqlens,
+                        )
+                    out[half_index1], lse[half_index1] = update_out_and_lse(
+                        out[half_index1], lse[half_index1], block_out, block_lse
+                    )
 
-        if step + 1 != comm.world_size:
-            comm.wait()
-            k, v = next_k, next_v
+            if step + 1 != comm.world_size:
+                with _ring_trace(f"ring_fwd_step_{step}_wait"):
+                    comm.wait()
+                    k, v = next_k, next_v
 
     out = out.to(q.dtype)
     if old_lse:
@@ -1574,61 +1634,68 @@ def zigzag_ring_flash_attn_varlen_backward(
         _flash_attn_varlen_backward(**params)
 
     for step in range(kv_comm.world_size):
-        if step == 0:
-            next_k, next_v = kv_comm.send_recv_kv(k, v)
-        else:
-            if step + 1 != kv_comm.world_size:
-                # Match K/V element type so stack does not upcast to fp32 (see Option A above).
-                k_dk = torch.stack([k, dk.to(original_dtype)], dim=0)
-                v_dv = torch.stack([v, dv.to(original_dtype)], dim=0)
-                next_k_dk, next_v_dv = kv_comm.send_recv_kv(k_dk, v_dv)
-            else:
-                next_dk, next_dv = kv_comm.send_recv_kv(dk, dv)
+        with _ring_trace(f"ring_bwd_step_{step}"):
+            with _ring_trace(f"ring_bwd_step_{step}_p2p_launch"):
+                if step == 0:
+                    next_k, next_v = kv_comm.send_recv_kv(k, v)
+                else:
+                    if step + 1 != kv_comm.world_size:
+                        # Match K/V element type so stack does not upcast to fp32 (see Option A above).
+                        k_dk = torch.stack([k, dk.to(original_dtype)], dim=0)
+                        v_dv = torch.stack([v, dv.to(original_dtype)], dim=0)
+                        next_k_dk, next_v_dv = kv_comm.send_recv_kv(k_dk, v_dv)
+                    else:
+                        next_dk, next_dv = kv_comm.send_recv_kv(dk, dv)
 
-        if step == 0:
-            backward(dout, q, k, v, out, softmax_lse, causal=True)
-            dq = dq_buffer.to(torch.float32)
-            dk = dk_buffer.to(torch.float32)
-            dv = dv_buffer.to(torch.float32)
-        else:
-            if step <= kv_comm.rank:
-                k0 = k[half_index0]
-                v0 = v[half_index0]
-                backward(dout, q, k0, v0, out, softmax_lse, causal=False)
-                dq += dq_buffer
-            else:
-                backward(dout1, q1, k, v, out1, softmax_lse1, causal=False)
-                dq[half_index1] += dq_buffer[:block_seq_len]
+            with _ring_trace(f"ring_bwd_step_{step}_compute"):
+                if step == 0:
+                    backward(dout, q, k, v, out, softmax_lse, causal=True)
+                    dq = dq_buffer.to(torch.float32)
+                    dk = dk_buffer.to(torch.float32)
+                    dv = dv_buffer.to(torch.float32)
+                else:
+                    if step <= kv_comm.rank:
+                        k0 = k[half_index0]
+                        v0 = v[half_index0]
+                        backward(dout, q, k0, v0, out, softmax_lse, causal=False)
+                        dq += dq_buffer
+                    else:
+                        backward(dout1, q1, k, v, out1, softmax_lse1, causal=False)
+                        dq[half_index1] += dq_buffer[:block_seq_len]
 
-            kv_comm.wait()
-            if step + 1 != kv_comm.world_size:
-                next_k, next_v = next_k_dk[0].to(original_dtype), next_v_dv[0].to(
-                    original_dtype
-                )
-                # Restore fp32 ring-carried grads for stable += with dk_buffer / dv_buffer.
-                next_dk, next_dv = next_k_dk[1].to(torch.float32), next_v_dv[1].to(
-                    torch.float32
-                )
-                k, v = next_k, next_v
-                dk_comm_buffer, dv_comm_buffer = dk, dv
-                dk, dv = next_dk, next_dv
-            else:
-                dk, dv = next_dk, next_dv
+            if step != 0:
+                with _ring_trace(f"ring_bwd_step_{step}_wait"):
+                    kv_comm.wait()
+                    if step + 1 != kv_comm.world_size:
+                        next_k, next_v = next_k_dk[0].to(original_dtype), next_v_dv[0].to(
+                            original_dtype
+                        )
+                        # Restore fp32 ring-carried grads for stable += with dk_buffer / dv_buffer.
+                        next_dk, next_dv = next_k_dk[1].to(torch.float32), next_v_dv[1].to(
+                            torch.float32
+                        )
+                        k, v = next_k, next_v
+                        dk_comm_buffer, dv_comm_buffer = dk, dv
+                        dk, dv = next_dk, next_dv
+                    else:
+                        dk, dv = next_dk, next_dv
 
-            if step <= kv_comm.rank:
-                dk[half_index0] += dk_buffer[:block_seq_len]
-                dv[half_index0] += dv_buffer[:block_seq_len]
-            else:
-                dk += dk_buffer
-                dv += dv_buffer
+                    if step <= kv_comm.rank:
+                        dk[half_index0] += dk_buffer[:block_seq_len]
+                        dv[half_index0] += dv_buffer[:block_seq_len]
+                    else:
+                        dk += dk_buffer
+                        dv += dv_buffer
 
-        if step == 0:
-            kv_comm.wait()
-            k, v = next_k, next_v
+            if step == 0:
+                with _ring_trace(f"ring_bwd_step_{step}_wait"):
+                    kv_comm.wait()
+                    k, v = next_k, next_v
 
-    next_dk, next_dv = kv_comm.send_recv_kv(dk, dv, dk_comm_buffer, dv_comm_buffer)
-    kv_comm.wait()
-    dk, dv = next_dk, next_dv
+    with _ring_trace("ring_bwd_final_dkdv"):
+        next_dk, next_dv = kv_comm.send_recv_kv(dk, dv, dk_comm_buffer, dv_comm_buffer)
+        kv_comm.wait()
+        dk, dv = next_dk, next_dv
 
     return dq.to(q.dtype), next_dk.to(q.dtype), next_dv.to(q.dtype)
 
