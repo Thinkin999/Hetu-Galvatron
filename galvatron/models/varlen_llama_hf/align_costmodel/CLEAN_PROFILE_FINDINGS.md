@@ -77,3 +77,24 @@ lazily-allocated optimizer); embed+head baseline ≈ 4–5 GB.
 ## Raw data
 `/tmp/galv_layerdiff/summary_ckpt0.tsv`, `summary_ckpt1.tsv`;
 `results/layerdiff_norecompute_20260531_015139.json` (bare-HF cross-check).
+
+## n1: communication-strategy validation (single-node 8-GPU, GBS=8, L=28)
+
+Measured fb (8 seqs in 1 group) vs cost-model prediction:
+
+| strat    | seq  | measured | predicted | err   |
+|----------|------|----------|-----------|-------|
+| ulysses8 | 4096 | 1133     | 1282      | +13%  |
+| ulysses8 | 8192 | 2927     | 2697      | -8%   |
+| ring8    | 4096 | 1455     | 1212      | -17%  |
+| ring8    | 8192 | 2471     | 2382      | -4%   |
+| usp2x4   | 4096 | 1277     | 1289      | +1%   |
+| usp2x4   | 8192 | 2266     | 2505      | +11%  |
+
+Measured optimal flips with seq: 4096 -> ulysses fastest; 8192 -> usp fastest,
+ulysses SLOWEST (GQA head-padding 2x at sp=8). Cost model captures the key
+qualitative trend (ulysses worst at long seq). Remaining bias: ring
+under-predicted at short seq (ring-step/launch overhead too low), usp slightly
+over-predicted at long seq -> comm-overhead constants need a light recalibration
+for perfect ranking. Residual `a` (sp-independent, same 799/1597 across
+strategies) is validated.
