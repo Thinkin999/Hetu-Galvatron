@@ -1240,8 +1240,36 @@ class AdaCPSPCostModel:
         return self.model_states_mb + self.activation_size(seqlens, parallel_size, sp_size)
 
     def token_capacity(self, memory_limit_gb: int) -> int:
-        """Max tokens per device given memory budget."""
+        """Max tokens per device given memory budget (sp=1 baseline)."""
         return int((memory_limit_gb * 1024 - self.model_states_mb) / self.act_per_token)
+
+    def act_per_token_for_strategy(self, strategy) -> float:
+        """Per-device activation MB/token for a specific strategy.
+
+        Base act_per_token is strategy-independent (non-attention activation is
+        sharded by parallel_size for ulysses/ring/usp alike) and recompute-aware
+        (set from the residual profile: ~5.3 no-recompute / ~0.87 recompute).
+        Ulysses/USP with sp not dividing the KV heads pay EXTRA activation for the
+        GQA head-padding (replicated Q/K/V). This term is small per-token but is
+        what distinguishes the corner case where ulysses-sp OOMs while ring/usp
+        (sp<=kv) fits, so the ILP/heuristic feasibility check should include it.
+        """
+        sp = int(strategy.sp_size) if strategy.attn_type in ("ulysses", "usp") else 1
+        if sp <= 1:
+            return self.act_per_token
+        q_factor, kv_factor = self.head_padding_overhead(sp)
+        if q_factor == 1.0 and kv_factor == 1.0:
+            return self.act_per_token
+        extra_bytes = ((q_factor - 1.0) * self.n_heads * self.head_dim * 2
+                       + (kv_factor - 1.0) * self.n_kv_heads * self.head_dim * 2 * 2)
+        return self.act_per_token + extra_bytes / 1024.0 / 1024.0
+
+    def token_capacity_for_strategy(self, memory_limit_gb: float, strategy) -> int:
+        """Max tokens per device for a specific strategy (recompute- and
+        head-padding-aware). Used by the ILP/heuristic memory feasibility check
+        so that, e.g., ulysses-sp8 (padded) gets a tighter capacity than ring."""
+        eff = self.act_per_token_for_strategy(strategy)
+        return int((memory_limit_gb * 1024 - self.model_states_mb) / max(1e-9, eff))
 
     # ---- Check / debug ----
 
@@ -2281,6 +2309,8 @@ class AdaCPSPOptimizer:
         self.costmodel = costmodel
         self.device_token_capacity = costmodel.token_capacity(memory_limit_gb)
         self.cluster_token_capacity = self.device_token_capacity * self.N
+        # Per-strategy device capacity cache (recompute- + head-padding-aware).
+        self._strat_cap_cache: Dict[tuple, int] = {}
         self.hide_output = hide_output
         self.scip_param_dict = scip_param_dict or {"limits/time": 10}
         self.allowed_attn_types = allowed_attn_types or ["ulysses", "ring"]
@@ -2315,6 +2345,18 @@ class AdaCPSPOptimizer:
         return "\n".join(formatted)
 
     # ---- Strategy pool generation ----
+
+    def strat_device_capacity(self, strategy) -> int:
+        """Per-device token capacity for a strategy (recompute- + head-padding-
+        aware). Cached. Used by all memory-feasibility checks so the ILP/heuristic
+        correctly tightens capacity for head-padded ulysses/usp (the corner case
+        where ulysses-sp OOMs but ring/usp fits)."""
+        key = (strategy.attn_type, int(strategy.sp_size), int(strategy.cp_size))
+        cap = self._strat_cap_cache.get(key)
+        if cap is None:
+            cap = self.costmodel.token_capacity_for_strategy(self.mem_limit_gb, strategy)
+            self._strat_cap_cache[key] = cap
+        return cap
 
     def get_strategy_pool(self, seqs: Optional[List[Sequence]] = None,
                            max_head_padding_factor: float = float("inf")) -> List[ParallelStrategy]:
@@ -2454,7 +2496,7 @@ class AdaCPSPOptimizer:
         All groups use the same strategy.
         Ensures exactly group_num groups are produced (fills empty bins).
         """
-        bin_capacity = self.device_token_capacity * strategy.parallel_size
+        bin_capacity = self.strat_device_capacity(strategy) * strategy.parallel_size
         A = BestFitDecreasing(seqs, bin_capacity, group_num)
         if A is None:
             return None
@@ -2473,7 +2515,7 @@ class AdaCPSPOptimizer:
         M = -1
         for p in range(P):
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K)) / strategy.parallel_size
-            if group_tokens > self.device_token_capacity:
+            if group_tokens > self.strat_device_capacity(strategy):
                 return None
             # Use full cost model (compute + comm + overlap) for accurate M
             group_seqlens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
@@ -2501,7 +2543,7 @@ class AdaCPSPOptimizer:
         All groups use the same strategy.
         Ensures exactly group_num groups are produced (fills empty bins).
         """
-        bin_capacity = self.device_token_capacity * strategy.parallel_size
+        bin_capacity = self.strat_device_capacity(strategy) * strategy.parallel_size
         A = FirstFitDecreasing(seqs, bin_capacity, group_num)
         if A is None:
             return None
@@ -2520,7 +2562,7 @@ class AdaCPSPOptimizer:
         M = -1
         for p in range(P):
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K)) / strategy.parallel_size
-            if group_tokens > self.device_token_capacity:
+            if group_tokens > self.strat_device_capacity(strategy):
                 return None
             # Use full cost model (compute + comm + overlap) for accurate M
             group_seqlens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
@@ -2747,8 +2789,8 @@ class AdaCPSPOptimizer:
         P = len(strategies)
         A = np.zeros((K, P), dtype=np.int32)
 
-        # Compute per-group capacity
-        capacities = [self.device_token_capacity * s.parallel_size for s in strategies]
+        # Compute per-group capacity (strategy-specific: recompute- + head-padding-aware)
+        capacities = [self.strat_device_capacity(s) * s.parallel_size for s in strategies]
         remaining = list(capacities)
 
         # Sort sequences descending by length
@@ -2782,7 +2824,7 @@ class AdaCPSPOptimizer:
             strat = strategies[p]
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K))
             local_tokens = group_tokens / strat.parallel_size
-            if local_tokens > self.device_token_capacity:
+            if local_tokens > self.strat_device_capacity(strat):
                 return None
 
             group_seqs_lens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
@@ -2853,7 +2895,7 @@ class AdaCPSPOptimizer:
         P = len(strategies)
         A = np.zeros((K, P), dtype=np.int32)
 
-        capacities = [self.device_token_capacity * s.parallel_size for s in strategies]
+        capacities = [self.strat_device_capacity(s) * s.parallel_size for s in strategies]
         remaining = list(capacities)
 
         seqs_sorted = sorted(enumerate(seqs), key=lambda x: x[1].seq, reverse=True)
@@ -2880,7 +2922,7 @@ class AdaCPSPOptimizer:
             strat = strategies[p]
             group_tokens = sum(seqs[k].seq * A[k, p] for k in range(K))
             local_tokens = group_tokens / strat.parallel_size
-            if local_tokens > self.device_token_capacity:
+            if local_tokens > self.strat_device_capacity(strat):
                 return None
 
             group_seqs_lens = [seqs[k].seq for k in range(K) if A[k, p] > 0]
@@ -3016,10 +3058,12 @@ class AdaCPSPOptimizer:
             strat = strategy_options[p]
             ps = strat.parallel_size
 
-            # Memory: total tokens in group / parallel_size <= capacity
+            # Memory: total tokens in group / parallel_size <= capacity.
+            # Capacity is strategy-specific (recompute- + head-padding-aware) so
+            # head-padded ulysses/usp get a correctly tighter bound.
             model.addCons(
                 quicksum(seqs[k].seq * A[k, p] for k in range(K)) / ps
-                <= self.device_token_capacity
+                <= self.strat_device_capacity(strat)
             )
 
             # Time: group time <= M
@@ -3132,9 +3176,10 @@ class AdaCPSPOptimizer:
             strat = strategy_options[p]
             ps = strat.parallel_size
             # Memory: total tokens (by bucket boundary) / parallel_size <= capacity
+            # (strategy-specific, recompute- + head-padding-aware).
             model.addCons(
                 quicksum(buckets[k].boundary * A[k, p] for k in range(K)) / ps
-                <= self.device_token_capacity
+                <= self.strat_device_capacity(strat)
             )
             # Time: group time <= M (using bucket boundary as proxy for seq length)
             model.addCons(
@@ -3249,7 +3294,7 @@ class AdaCPSPOptimizer:
                         tried.add(target_group)
 
                         new_len = group_total_lengths[target_group] + bucket.boundary
-                        if new_len / target_strat.parallel_size > self.device_token_capacity:
+                        if new_len / target_strat.parallel_size > self.strat_device_capacity(target_strat):
                             continue
 
                         current_val = model.getSolVal(solution, A_vars[orig_k, target_group]) or 0
@@ -3407,7 +3452,7 @@ class AdaCPSPOptimizer:
             feasible = True
             for p in range(P):
                 group_tokens = sum(seqs_gb[k].seq * A_mb[k, p] for k in range(K)) / strategy.parallel_size
-                if group_tokens > self.device_token_capacity:
+                if group_tokens > self.strat_device_capacity(strategy):
                     feasible = False
                     break
                 group_time = sum(
