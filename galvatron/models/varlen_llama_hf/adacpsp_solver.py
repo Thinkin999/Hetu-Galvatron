@@ -1055,7 +1055,11 @@ class AdaCPSPCostModel:
         bwd_per_layer = ((cp_size - 1) * self._leaky_max(bwd_step, bwd_comm_per_step)
                          + bwd_step)
 
-        return (fwd_per_layer + bwd_per_layer) * self.l
+        # Per-ring-step CPU/launch/stream-sync gap, exposed when per-step GPU
+        # work is short (calibrated against n1 ring8 cells; the overlap leaky_max
+        # alone under-predicts ring at short seq). (cp-1) fwd + (cp-1) bwd steps.
+        ring_overhead = self.ring_step_overhead_ms * (cp_size - 1) * 2 * self.l
+        return (fwd_per_layer + bwd_per_layer) * self.l + ring_overhead
 
     def _total_time_usp_overlap(self, seqlens: List[int],
                                  strategy: ParallelStrategy) -> float:
@@ -1317,6 +1321,14 @@ class AdaCPSPCostModel:
         #   no-recompute ~5.3 MB/token, full-recompute ~0.87 MB/token.
         if "act_per_token" in residual_profile:
             self.act_per_token = float(residual_profile["act_per_token"])
+        # Optional comm-overhead knobs (calibrated against n1 forced-cell sweep
+        # so the solver ranks ulysses/ring/usp correctly). Ring was under-
+        # predicted (-17% at short seq) -> bump ring_step_overhead_ms.
+        for _knob in ("ring_step_overhead_ms", "ulysses_a2a_overhead_ms",
+                      "usp_a2a_overhead_extra_ms", "usp_layer_overhead_base_ms",
+                      "usp_layer_overhead_per_sp_ms"):
+            if _knob in residual_profile:
+                setattr(self, _knob, float(residual_profile[_knob]))
 
     def apply_b_decomp_profile(
         self,

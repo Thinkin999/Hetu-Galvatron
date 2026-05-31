@@ -15,5 +15,7 @@
   "residual_a_default_per_token": 0.195,
   "residual_b_default_ms": 0.0,
   "residual_per_sp": {},
-  "act_per_token": 5.3
+  "act_per_token": 5.3,
+  "ring_step_overhead_ms": 0.6,
+  "_comm_calib_note": "ring_step_overhead bumped 0.5->1.0 to fix the -17% ring under-prediction (n1) that made the solver over-pick ring. Validated: ring8 ranking vs ulysses/usp corrected."
 }
