@@ -1,0 +1,19 @@
+{
+  "schema": "adacpsp_residual_v1",
+  "source": "clean single-GPU galvatron layer-diff (51_galv_layerdiff_sweep.sh, 2026-05-31)",
+  "notes": [
+    "sp-INDEPENDENT residual: a captures MLP/proj/embed/LM-head linear cost,",
+    "which is a GEMM on tokens_per_gpu and does not depend on sp.",
+    "Validated: full L=28 ulysses:1 8-GPU seq=4096 measured 957ms vs predicted",
+    "857ms (-10.4%); old per-sp model was ~-150%. Mild seq-dependence",
+    "(a=0.213@4k, 0.190@8k, 0.181@16k) not modeled here; constant 0.195 is a",
+    "compromise giving +-10% across 4k-16k.",
+    "act_per_token is recompute-aware: this file is the NO-RECOMPUTE operating",
+    "point (5.3 MB/token). For full recompute use 0.87."
+  ],
+  "operating_point": "no_recompute_zero2",
+  "residual_a_default_per_token": 0.195,
+  "residual_b_default_ms": 0.0,
+  "residual_per_sp": {},
+  "act_per_token": 5.3
+}

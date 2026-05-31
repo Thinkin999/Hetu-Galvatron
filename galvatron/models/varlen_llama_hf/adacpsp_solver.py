@@ -1312,6 +1312,11 @@ class AdaCPSPCostModel:
         self.residual_b_per_sp = {int(k): float(v["b_ms"])
                                   for k, v in per_sp.items()
                                   if "b_ms" in v}
+        # Optional recompute-aware activation-memory coefficient (MB/token).
+        # Validated clean single-GPU layer-diff (CLEAN_PROFILE_FINDINGS.md):
+        #   no-recompute ~5.3 MB/token, full-recompute ~0.87 MB/token.
+        if "act_per_token" in residual_profile:
+            self.act_per_token = float(residual_profile["act_per_token"])
 
     def apply_b_decomp_profile(
         self,

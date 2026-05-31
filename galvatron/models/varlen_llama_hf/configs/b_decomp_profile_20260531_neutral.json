@@ -1,0 +1,20 @@
+{
+  "schema": "adacpsp_b_decomp_v1",
+  "source": "neutral b-decomp to accompany clean residual profile (2026-05-31)",
+  "notes": [
+    "Supersedes the old 2-step-fitted b_decomp whose per-sp residual `a` and",
+    "large per-sp K_step (441-745ms) were overfit artifacts (see",
+    "CLEAN_PROFILE_FINDINGS.md). The validated model needs NO per-step K_step:",
+    "fwd_backward = attn_LUT + a*tokens + b(small), all per-group inside max.",
+    "This profile is intentionally NEUTRAL: it does NOT override residual a/b",
+    "(no residual_per_sp), and sets per-step constants to ~0 so the clean",
+    "residual profile governs. b_step_external (optimizer+grad-sync+clip) is",
+    "measured separately in timings_ms and only added when predicting",
+    "wall_step_total, not forward_backward."
+  ],
+  "b_step_fb_per_sp_clean": {},
+  "b_step_fb_per_sp_steady": {},
+  "b_step_fb_ms_clean": 0.0,
+  "b_step_fb_ms_steady": 0.0,
+  "b_step_external_ms": 0.0
+}
