@@ -291,7 +291,7 @@ class AdaCPSPCostModel:
         a2a_interp_consec: Optional[Dict[int, List[Tuple[float, float]]]] = None,
         a2a_interp_strided: Optional[Dict[int, List[Tuple[float, float]]]] = None,
         # ── Overlap-aware modeling parameters ──
-        bwd_fwd_ratio: float = 2.0,
+        bwd_fwd_ratio: float = 3.1,
         ring_bwd_comm_ratio: float = 2.0,
         enable_overlap_model: bool = True,
         ring_causal_correction: bool = False,
@@ -1544,13 +1544,13 @@ class AdaCPSPCostModel:
         alltoall_lin_c, alltoall_lin_s = cls._load_topo_linear_fits(a2a_data)
         p2p_lin_c, p2p_lin_s = cls._load_topo_linear_fits(p2p_data)
 
-        bwd_fwd_ratio = 2.0
+        bwd_fwd_ratio = 3.1
         ring_bwd_comm_ratio = 2.0
         if overlap_json is not None:
             with open(overlap_json, "r") as f:
                 ovlp_data = json.load(f)
             if "fwd_bwd" in ovlp_data:
-                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 2.0)
+                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 3.1)
             if "ring_bwd_comm" in ovlp_data and "summary" in ovlp_data["ring_bwd_comm"]:
                 ratios = [s["avg_bwd_fwd_comm_ratio"]
                           for s in ovlp_data["ring_bwd_comm"]["summary"].values()]
@@ -1725,13 +1725,13 @@ class AdaCPSPCostModel:
             a2a_interp_c, a2a_interp_s = cls._load_topo_interp_tables(a2a_data)
             p2p_interp_c, p2p_interp_s = cls._load_topo_interp_tables(p2p_data)
 
-        bwd_fwd_ratio = 2.0
+        bwd_fwd_ratio = 3.1
         ring_bwd_comm_ratio = 2.0
         if overlap_json is not None:
             with open(overlap_json, "r") as f:
                 ovlp_data = json.load(f)
             if "fwd_bwd" in ovlp_data:
-                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 2.0)
+                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 3.1)
             if "ring_bwd_comm" in ovlp_data and "summary" in ovlp_data["ring_bwd_comm"]:
                 ratios = [s["avg_bwd_fwd_comm_ratio"]
                           for s in ovlp_data["ring_bwd_comm"]["summary"].values()]
@@ -1819,13 +1819,13 @@ class AdaCPSPCostModel:
                 elif key.startswith("p2p"):
                     p2p_linear[gs] = entry
 
-        bwd_fwd_ratio = 2.0
+        bwd_fwd_ratio = 3.1
         ring_bwd_comm_ratio = 2.0
         if overlap_json is not None:
             with open(overlap_json, "r") as f:
                 ovlp_data = json.load(f)
             if "fwd_bwd" in ovlp_data:
-                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 2.0)
+                bwd_fwd_ratio = ovlp_data["fwd_bwd"].get("avg_bwd_fwd_ratio", 3.1)
             if "ring_bwd_comm" in ovlp_data and "summary" in ovlp_data["ring_bwd_comm"]:
                 ratios = [s["avg_bwd_fwd_comm_ratio"]
                           for s in ovlp_data["ring_bwd_comm"]["summary"].values()]
