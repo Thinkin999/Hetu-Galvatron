@@ -215,8 +215,8 @@ def summarize_groups(opt: AdaCPSPOptimizer, all_groups, all_results) -> Dict:
 
 def build_time_breakdown(cm: AdaCPSPCostModel, seqlens: List[int], strat) -> Dict:
     total_tokens = sum(seqlens)
-    a2a_topology = cm._get_topo(strat.placement, "alltoall")
-    ring_topology = cm._get_topo(strat.placement, "ring")
+    a2a_topology = cm._get_topo(strat.placement, "alltoall", strat.sp_size, strat.cp_size)
+    ring_topology = cm._get_topo(strat.placement, "ring", strat.sp_size, strat.cp_size)
     q_factor, kv_factor = cm.head_padding_overhead(strat.sp_size if strat.attn_type in ("ulysses", "usp") else 1)
     common = {
         "total_estimated_ms": round(cm.total_time(seqlens, strat), 6),

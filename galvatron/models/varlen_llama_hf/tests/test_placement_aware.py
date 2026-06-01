@@ -56,10 +56,17 @@ def test_ulysses_ring_placement_fixed():
 
 def test_costmodel_topo_routing():
     """CostModel._get_topo returns correct topology for each placement."""
-    assert AdaCPSPCostModel._get_topo("head_first", "alltoall") == "consecutive"
-    assert AdaCPSPCostModel._get_topo("head_first", "ring") == "strided"
-    assert AdaCPSPCostModel._get_topo("context_first", "alltoall") == "strided"
-    assert AdaCPSPCostModel._get_topo("context_first", "ring") == "consecutive"
+    # Pure ulysses (cp=1): always consecutive regardless of placement
+    assert AdaCPSPCostModel._get_topo("context_first", "alltoall", sp_size=8, cp_size=1) == "consecutive"
+    assert AdaCPSPCostModel._get_topo("head_first", "alltoall", sp_size=8, cp_size=1) == "consecutive"
+    # Pure ring (sp=1): always consecutive regardless of placement
+    assert AdaCPSPCostModel._get_topo("context_first", "ring", sp_size=1, cp_size=8) == "consecutive"
+    assert AdaCPSPCostModel._get_topo("head_first", "ring", sp_size=1, cp_size=8) == "consecutive"
+    # USP: placement determines which gets consecutive
+    assert AdaCPSPCostModel._get_topo("head_first", "alltoall", sp_size=4, cp_size=4) == "consecutive"
+    assert AdaCPSPCostModel._get_topo("head_first", "ring", sp_size=4, cp_size=4) == "strided"
+    assert AdaCPSPCostModel._get_topo("context_first", "alltoall", sp_size=4, cp_size=4) == "strided"
+    assert AdaCPSPCostModel._get_topo("context_first", "ring", sp_size=4, cp_size=4) == "consecutive"
     print("  [PASS] _get_topo routing")
 
 

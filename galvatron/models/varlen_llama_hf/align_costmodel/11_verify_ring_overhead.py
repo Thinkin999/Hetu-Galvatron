@@ -129,7 +129,7 @@ def main() -> None:
     for seq in (8192, 16384, 32768):
         seqlens = [seq] * 16
         sc = cm_old._ring_step_compute_per_layer(seqlens, strategy)
-        ring_topo = cm_old._get_topo(strategy.placement, "ring")
+        ring_topo = cm_old._get_topo(strategy.placement, "ring", strategy.sp_size, strategy.cp_size)
         fc = cm_old._p2p_fwd_comm_per_step(sum(seqlens), 16, topo=ring_topo)
         bc = cm_old._p2p_bwd_comm_per_step(sum(seqlens), 16, topo=ring_topo)
         bs = sc * cm_old.bwd_fwd_ratio
@@ -172,7 +172,7 @@ def main() -> None:
         chunk = seq // 16  # per-rank chunk size (1 sequence)
         seqlens = [seq] * NS
         sc = cm_old._ring_step_compute_per_layer(seqlens, strategy)
-        ring_topo = cm_old._get_topo(strategy.placement, "ring")
+        ring_topo = cm_old._get_topo(strategy.placement, "ring", strategy.sp_size, strategy.cp_size)
         fc_v2 = cm_old._p2p_fwd_comm_per_step(sum(seqlens), 16, topo=ring_topo)
         bc_v2 = cm_old._p2p_bwd_comm_per_step(sum(seqlens), 16, topo=ring_topo)
         fc_fit = fit_fwd_nccl_ms(chunk, NS)

@@ -49,8 +49,8 @@ def build_cm():
 
 def usp_breakdown(cm, tokens, sp, cp, placement="context_first"):
     """Mirrors total_time() USP branch but returns each comm component."""
-    a2a_topo = cm._get_topo(placement, "alltoall")
-    ring_topo = cm._get_topo(placement, "ring")
+    a2a_topo = cm._get_topo(placement, "alltoall", sp, cp)
+    ring_topo = cm._get_topo(placement, "ring", sp, cp)
     parallel_size = sp * cp
     q_factor, kv_factor = cm.head_padding_overhead(sp)
 
@@ -87,7 +87,7 @@ def usp_breakdown(cm, tokens, sp, cp, placement="context_first"):
 
 
 def ulysses_breakdown(cm, tokens, sp, placement="context_first"):
-    a2a_topo = cm._get_topo(placement, "alltoall")
+    a2a_topo = cm._get_topo(placement, "alltoall", sp, 1)
     q_factor, kv_factor = cm.head_padding_overhead(sp)
     qo_msg_mb = cm.h * q_factor * tokens * 2 / 1024 / 1024 / sp
     kv_msg_mb = cm.kv_hidden * kv_factor * tokens * 2 / 1024 / 1024 / sp
@@ -105,7 +105,7 @@ def ulysses_breakdown(cm, tokens, sp, placement="context_first"):
 
 
 def ring_breakdown(cm, tokens, cp, placement="context_first"):
-    ring_topo = cm._get_topo(placement, "ring")
+    ring_topo = cm._get_topo(placement, "ring", 1, cp)
     fwd_step = cm._p2p_fwd_comm_per_step(tokens, cp, None, ring_topo)
     fwd_total = fwd_step * (cp - 1) * cm.l
     bwd_total = fwd_total * cm.ring_bwd_comm_ratio

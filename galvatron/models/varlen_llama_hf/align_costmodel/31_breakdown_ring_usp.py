@@ -71,7 +71,7 @@ def breakdown_ring(cm, seqlens, cp_size: int):
     )
     total_tokens = sum(seqlens)
     step_compute = cm._ring_step_compute_per_layer(seqlens, strat)
-    ring_topo = cm._get_topo(strat.placement, "ring")
+    ring_topo = cm._get_topo(strat.placement, "ring", strat.sp_size, cp_size)
     fwd_comm = cm._p2p_fwd_comm_per_step(total_tokens, cp_size, topo=ring_topo)
     bwd_comm = cm._p2p_bwd_comm_per_step(total_tokens, cp_size, topo=ring_topo)
     overlap_fwd = cm._overlap_time(step_compute, fwd_comm)
@@ -109,8 +109,8 @@ def breakdown_usp(cm, seqlens, sp_size: int, cp_size: int):
     )
     total_tokens = sum(seqlens)
     parallel_size = sp_size * cp_size
-    a2a_topo = cm._get_topo(strat.placement, "alltoall")
-    ring_topo = cm._get_topo(strat.placement, "ring")
+    a2a_topo = cm._get_topo(strat.placement, "alltoall", sp_size, cp_size)
+    ring_topo = cm._get_topo(strat.placement, "ring", sp_size, cp_size)
 
     q_factor, kv_factor = cm.head_padding_overhead(sp_size)
     qo_msg_mb = cm.h * q_factor * total_tokens * 2 / 1024 / 1024 / parallel_size

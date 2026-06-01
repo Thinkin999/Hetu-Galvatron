@@ -86,8 +86,8 @@ for seqs in SEQS_TO_TEST:
         if attn == "ring":
             # ring overlap or additive
             if cm.enable_overlap_model:
-                compute = cm._total_time_ring_overlap(seqs, strat) - cm.p2p_ring_time(seqs, cp, cm._get_topo(place, "ring")) * (1 + cm.ring_bwd_comm_ratio)
-                comm = cm.p2p_ring_time(seqs, cp, cm._get_topo(place, "ring")) * (1 + cm.ring_bwd_comm_ratio)
+                compute = cm._total_time_ring_overlap(seqs, strat) - cm.p2p_ring_time(seqs, cp, cm._get_topo(place, "ring", sp, cp)) * (1 + cm.ring_bwd_comm_ratio)
+                comm = cm.p2p_ring_time(seqs, cp, cm._get_topo(place, "ring", sp, cp)) * (1 + cm.ring_bwd_comm_ratio)
             else:
                 fwd_compute = cm.compute_time(seqs, strat)
                 compute = fwd_compute * (1 + cm.bwd_fwd_ratio)

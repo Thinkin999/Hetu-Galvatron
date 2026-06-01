@@ -420,12 +420,20 @@ class AdaCPSPCostModel:
     # ---- Placement-aware topology routing ----
 
     @staticmethod
-    def _get_topo(placement: str, comm_type: str) -> str:
-        """Derive topology type from placement and communication primitive.
+    def _get_topo(placement: str, comm_type: str,
+                  sp_size: int = 1, cp_size: int = 1) -> str:
+        """Derive comm-group rank layout (consecutive vs strided) for profile lookup.
 
-        head_first:    AlltoAll=consecutive, Ring=strided
-        context_first: AlltoAll=strided,     Ring=consecutive
+        Pure ulysses (cp=1) or pure ring (sp=1):
+            The group is always formed with consecutive ranks regardless of
+            placement, so the profile key is always ``consecutive``.
+        USP (sp>1 AND cp>1):
+            Placement determines which dimension occupies consecutive ranks:
+              head_first:    SP=consecutive → AlltoAll=consecutive, CP=strided → Ring=strided
+              context_first: CP=consecutive → Ring=consecutive, SP=strided → AlltoAll=strided
         """
+        if cp_size <= 1 or sp_size <= 1:
+            return "consecutive"
         if placement == "head_first":
             return "consecutive" if comm_type == "alltoall" else "strided"
         else:  # context_first (default)
@@ -947,8 +955,8 @@ class AdaCPSPCostModel:
           * ``ring_step_overhead_ms`` per ring step (CPU launch / autograd /
             stream-sync gap between consecutive ring p2p steps).
         """
-        a2a_topo = self._get_topo(placement, "alltoall")
-        ring_topo = self._get_topo(placement, "ring")
+        a2a_topo = self._get_topo(placement, "alltoall", sp_size, cp_size)
+        ring_topo = self._get_topo(placement, "ring", sp_size, cp_size)
 
         if sp_size <= 1:
             return self.p2p_ring_time(seqlens, cp_size, ring_topo)
@@ -991,8 +999,9 @@ class AdaCPSPCostModel:
     def comm_time(self, seqlens: List[int], strategy: ParallelStrategy) -> float:
         """Communication time for a strategy."""
         placement = strategy.placement
-        a2a_topo = self._get_topo(placement, "alltoall")
-        ring_topo = self._get_topo(placement, "ring")
+        sp, cp = strategy.sp_size, strategy.cp_size
+        a2a_topo = self._get_topo(placement, "alltoall", sp, cp)
+        ring_topo = self._get_topo(placement, "ring", sp, cp)
         if strategy.attn_type == "ulysses":
             return self.alltoall_time(seqlens, strategy.sp_size, a2a_topo)
         elif strategy.attn_type == "ring":
@@ -1040,7 +1049,8 @@ class AdaCPSPCostModel:
             return fwd_compute * (1 + self.bwd_fwd_ratio)
 
         total_tokens = sum(seqlens)
-        ring_topo = self._get_topo(strategy.placement, "ring")
+        ring_topo = self._get_topo(strategy.placement, "ring",
+                                   strategy.sp_size, cp_size)
 
         step_compute_per_layer = self._ring_step_compute_per_layer(
             seqlens, strategy)
@@ -1067,8 +1077,8 @@ class AdaCPSPCostModel:
         sp_size = strategy.sp_size
         cp_size = strategy.cp_size
         placement = strategy.placement
-        a2a_topo = self._get_topo(placement, "alltoall")
-        ring_topo = self._get_topo(placement, "ring")
+        a2a_topo = self._get_topo(placement, "alltoall", sp_size, cp_size)
+        ring_topo = self._get_topo(placement, "ring", sp_size, cp_size)
 
         if cp_size <= 1:
             fwd_compute = self.compute_time(seqlens, strategy)
@@ -1164,7 +1174,8 @@ class AdaCPSPCostModel:
             return self._total_time_usp_overlap(seqlens, strategy) + self.residual_time(seqlens, strategy)
         elif strategy.attn_type == "ring":
             cp = strategy.cp_size
-            ring_topo = self._get_topo(strategy.placement, "ring")
+            ring_topo = self._get_topo(strategy.placement, "ring",
+                                       strategy.sp_size, cp)
             step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
             fwd_compute_per_layer = cp * step_compute
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
@@ -1174,8 +1185,8 @@ class AdaCPSPCostModel:
         elif strategy.attn_type == "usp":
             sp, cp = strategy.sp_size, strategy.cp_size
             placement = strategy.placement
-            a2a_topo = self._get_topo(placement, "alltoall")
-            ring_topo = self._get_topo(placement, "ring")
+            a2a_topo = self._get_topo(placement, "alltoall", sp, cp)
+            ring_topo = self._get_topo(placement, "ring", sp, cp)
             step_compute = self._ring_step_compute_per_layer(seqlens, strategy)
             fwd_compute_per_layer = cp * step_compute
             total_compute = fwd_compute_per_layer * (1 + self.bwd_fwd_ratio) * self.l
